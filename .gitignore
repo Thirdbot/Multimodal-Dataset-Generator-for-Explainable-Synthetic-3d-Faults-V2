@@ -16,3 +16,5 @@ runs/
 .env
 
 .idea/
+configs/
+recipes/

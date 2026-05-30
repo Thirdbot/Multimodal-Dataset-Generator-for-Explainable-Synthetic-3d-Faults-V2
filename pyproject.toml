@@ -10,7 +10,7 @@ requires-python = ">=3.11"
 dependencies = []
 
 [project.scripts]
-simulationv2 = "simulationv2:main"
+simulationv2 = "simulationv2.main:main"
 
 [build-system]
 requires = ["uv_build>=0.11.16,<0.12.0"]
@@ -33,7 +33,7 @@ synthoseis = [
     "ruff>=0.10.0",
     "scikit-image>=0.26.0",
     "scipy>=1.17.1",
-    "setuptools>=78.1.1",
+    "setuptools<82",
     "tqdm>=4.67.3",
     "uvicorn[standard]>=0.30",
     "xarray>=2026.4.0",
