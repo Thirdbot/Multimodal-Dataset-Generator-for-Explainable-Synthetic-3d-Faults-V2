@@ -1,0 +1,41 @@
+[project]
+name = "simulationv2"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "thirdbot", email = "astroll656@gmail.com" }
+]
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+simulationv2 = "simulationv2:main"
+
+[build-system]
+requires = ["uv_build>=0.11.16,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+synthoseis = [
+    "anyio>=4.0",
+    "bruges>=0.5.4",
+    "commentjson>=0.9.0",
+    "fastapi>=0.115",
+    "httpx>=0.27",
+    "matplotlib>=3.10.9",
+    "numba>=0.65.1",
+    "numpy>=2.0",
+    "opensimplex>=0.4.5.1",
+    "plotly>=6.7.0",
+    "psutil>=7.2.2",
+    "pydantic>=2.5",
+    "ruff>=0.10.0",
+    "scikit-image>=0.26.0",
+    "scipy>=1.17.1",
+    "setuptools>=78.1.1",
+    "tqdm>=4.67.3",
+    "uvicorn[standard]>=0.30",
+    "xarray>=2026.4.0",
+    "zarr>=3",
+]
