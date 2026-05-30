@@ -1,0 +1,3 @@
+[submodule "third_party/synthoseis"]
+	path = third_party/synthoseis
+	url = https://github.com/sede-open/synthoseis
