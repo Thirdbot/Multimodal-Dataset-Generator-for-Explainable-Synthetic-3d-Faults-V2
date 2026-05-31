@@ -3,6 +3,7 @@ import uuid
 
 import yaml
 
+from logger_color import logger
 from yaml_helper import YAMLHelper
 from typing import Literal
 import json
@@ -82,9 +83,6 @@ class CategoricalParameter:
 
     def __init__(self, **kwargs):
         self.kwargs = kwargs
-
-    def set_name(self,name):
-        self.kwargs["project"] = name
 
     def set(self,categories:Literal["boring","fault_only","fault_complex","salt_only","salt_fault_mixed","onlap","depositional","full_mixed"],**extra):
         """
@@ -290,14 +288,13 @@ class SampleControl:
         self.population_amount,self.ratio_configs = self._manage_population()
 
 
-    def _run_category(self,name,category):
+    def _run_category(self,category):
         """
         set sample name to build's id and its category
         :param name:
         :param category:
         :return: parameters of Synthoseis configs
         """
-        self.categorical_parameter.set_name(name)
         self.categorical_parameter.set(category)
         return self.categorical_parameter.expose()
 
@@ -351,7 +348,7 @@ class SampleControl:
 
         return population ,types_ratio
 
-    def populate(self,recipe_path,config_path):
+    def populate(self,recipe_path,config_path,seed=42):
         recipe_path = Path(recipe_path)
         config_path = Path(config_path)
 
@@ -374,6 +371,7 @@ class SampleControl:
         recipe_name = f"recipe_{run_number}"
         recipe_config = {
             'population': {
+                'seed': seed,
                 'amount':self.population_amount},
             'category_ratio': self.ratio_configs,
             'category_counts': counts,
@@ -384,15 +382,17 @@ class SampleControl:
         recipe_name_path.touch(exist_ok=True)
         configs_list = []
 
+        logger.info(f"[Populating] from file {recipe_name} At {recipe_name_path}")
         for category,amount in counts.items():
             # loop in amount
             for _ in range(amount):
                 name = f"{category}_{uuid.uuid4().hex}"
                 config_name_path = config_path / f"{name}.json"
-                config = self._run_category(name,category) # generate sample with unique id with its type
+                config = self._run_category(category) # generate sample with unique id with its type
                 with open(config_name_path,'w') as f:
                     json.dump(config,f,indent=2)
                 configs_list.append(name)
+                logger.debug(f"[Populating]: Category {category} Amount {amount}")
 
         recipe_config["population"].update({
             "samples": configs_list,
@@ -410,17 +410,19 @@ low_level_controls = structural |structural_properties |fault_controls |geo_body
 # (you can set some type to not exists by set 0.0)
 
 high_level_controls = {
-    'sample_population': 8, # amount of sample that will be populated
+    'sample_population': 1, # amount of sample that will be populated
     # each sample that is randomly created or mixed category will be ratio
     # all-faulted has different fault-line that it will be ratio, salt-fault will be ratio
-    'sample_types': ["boring",
+    'sample_types': [
+                     # "boring",
                      "fault_only",
-                     "fault_complex",
-                     "salt_only",
-                     "salt_fault_mixed",
-                     "onlap",
-                     "depositional",
-                     "full_mixed"], # for dataset generations each generation will be ratio in same amount
+                     # "fault_complex",
+                     # "salt_only",
+                     # "salt_fault_mixed",
+                     # "onlap",
+                     # "depositional",
+                     # "full_mixed"
+    ], # for dataset generations each generation will be ratio in same amount
     'ratio_per_types':{
         # "boring":0.0,
         # "fault_only":1.0,
@@ -483,6 +485,20 @@ if __name__ == "__main__":
 
     categorical_parameter = CategoricalParameter(**low_level_controls)
 
+    LOW = {
+        "cube_shape": [100, 100, 500],
+    }
+
+    MEDIUM = {
+        "cube_shape": [150, 150, 750],
+    }
+
+    HIGH = {
+        "cube_shape": [300, 300, 1250],
+    }
+    # set cube shape
+    cube_shape = LOW['cube_shape']
+
     categorical_parameter.initialize(
         project="example",
         project_folder=output_path,
@@ -525,4 +541,4 @@ if __name__ == "__main__":
     # control initialized template
     sample_control = SampleControl(categorical_parameter,**high_level_controls)
     # sample_control.load_recipe(Path(recipes_path) / "f0e5bfe6bb074c74b9b9617aaa5d9e60.yaml")
-    sample_control.populate(recipes_path,config_path)
+    sample_control.populate(recipes_path,config_path,seed=42)

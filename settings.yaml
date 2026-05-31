@@ -5,8 +5,8 @@ paths:
   work_path: 'outputs/tmp'
 
 control:
-  cube_shape: [96,96,384]
-  incident_angles: [15]
+  cube_shape: [100, 100, 500] # small size
+  incident_angles: [7, 15, 24] #
   digi: 4
   infill_factor: 2
   initial_layer_stdev: [3.0,10.0]
