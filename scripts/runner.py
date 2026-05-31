@@ -42,6 +42,19 @@ class ConfigRunner(FileSystemEventHandler):
         self.last_event_time[path] = now
         return False
 
+    def build_sample(self, sample_path, run_id, seed):
+        try:
+            build_model(
+                user_json=str(sample_path),
+                run_id=run_id,
+                test_mode=None,
+                seed=seed,
+            )
+            return True
+        except BaseException as exc:
+            logger.error(f"[BUILD FAILED] -> Run: {run_id} Error: {exc}")
+            return False
+
     # events like delete ,create ,update recipes
     def on_created(self, event):
         if event.is_directory:
@@ -66,15 +79,10 @@ class ConfigRunner(FileSystemEventHandler):
             sample_path = self.configs_path.joinpath(f"{sample}.json")
             logger.info(f"[GENERATE] -> Config: {sample}")
 
-            build_model(
-                user_json=str(sample_path),
-                run_id=f"{path.stem}_{sample}",
-                test_mode=None,
-                seed=seed,
-            )
             with open(str(sample_path), "r") as file:
                 recipe = json.load(file)
                 self.recipe_cache[path]["configs"][sample] = recipe
+            self.build_sample(sample_path, f"{path.stem}_{sample}", seed)
 
 
     def on_modified(self, event):
@@ -142,12 +150,7 @@ class ConfigRunner(FileSystemEventHandler):
                 for folder in Path(self.work_folder).glob(f"temp_folder__*_{path.stem}_{sample}"):
                     shutil.rmtree(folder, ignore_errors=True)
 
-                build_model(
-                    user_json=str(sample_path),
-                    run_id=f"{path.stem}_{sample}",
-                    test_mode=None,
-                    seed=seed,
-                )
+                self.build_sample(sample_path, f"{path.stem}_{sample}", seed)
 
             new_configs[sample] = new_recipes
 
