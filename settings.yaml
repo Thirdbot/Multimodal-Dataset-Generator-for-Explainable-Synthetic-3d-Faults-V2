@@ -3,6 +3,7 @@ paths:
   recipes_path: recipes
   output_path: outputs
   work_path: 'outputs/tmp'
+  traces_path: traces
 
 control:
   cube_shape: [100, 100, 500] # small size

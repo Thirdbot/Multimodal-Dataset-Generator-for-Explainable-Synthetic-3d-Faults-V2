@@ -194,7 +194,7 @@ class CategoricalParameter:
         self.kwargs["include_salt"] = False
         self.kwargs["basin_floor_fans"] = False
         self.kwargs["min_number_faults"] = 0
-        self.kwargs["max_number_faults"] = 0
+        self.kwargs["max_number_faults"] = 1 # safe-guard
         self.kwargs["closure_types"] = ["simple"]
 
     def fault_only(self,f_min=1,f_max=2):
@@ -231,7 +231,7 @@ class CategoricalParameter:
         self.kwargs["include_salt"] = True
         self.kwargs["basin_floor_fans"] = False
         self.kwargs["min_number_faults"] = 0
-        self.kwargs["max_number_faults"] = 0
+        self.kwargs["max_number_faults"] = 1 # safe-guard
         self.kwargs["closure_types"] = ["simple"]
 
     def salt_fault_mixed(self,f_min=1,f_max=4):
@@ -414,8 +414,8 @@ high_level_controls = {
     # each sample that is randomly created or mixed category will be ratio
     # all-faulted has different fault-line that it will be ratio, salt-fault will be ratio
     'sample_types': [
-                     # "boring",
-                     "fault_only",
+                     "boring",
+                     # "fault_only",
                      # "fault_complex",
                      # "salt_only",
                      # "salt_fault_mixed",
