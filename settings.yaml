@@ -1,0 +1,42 @@
+paths:
+  config_path: configs
+  recipes_path: recipes
+  output_path: outputs
+  work_path: 'outputs/tmp'
+
+control:
+  cube_shape: [96,96,384]
+  incident_angles: [15]
+  digi: 4
+  infill_factor: 2
+  initial_layer_stdev: [3.0,10.0]
+  thickness_min: 4
+  thickness_max: 18
+  seabed_min_depth: [20,50]
+  dip_factor_max: 1
+  pad_samples: 8
+  sand_layer_thickness: 2
+  sand_layer_fraction_min: 0.05
+  sand_layer_fraction_max: 0.30
+  include_channels: False
+  bandwidth_ord: 4
+  broadband_qc_volume: False
+  extra_qc_plots: False
+  verbose: True
+  model_qc_volumes: False
+  model_store_in_memory: False
+  cleanup_intermediates: False
+
+  max_column_height: [100.0,150.0]
+  min_closure_voxels_simple: 500
+  min_closure_voxels_faulted: 1000
+  min_closure_voxels_onlap: 500
+  signal_to_noise_ratio_db: [7.5,12.5,17.5]
+  bandwidth_low: [3.0,8.0]
+  bandwidth_high: [25.0,45.0]
+
+  closure_types: ["simple"]
+  include_salt: False
+  basin_floor_fans: False
+  min_number_faults: 0
+  max_number_faults: 0

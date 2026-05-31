@@ -7,7 +7,9 @@ authors = [
     { name = "thirdbot", email = "astroll656@gmail.com" }
 ]
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "pyvista>=0.48.4",
+]
 
 [project.scripts]
 simulationv2 = "simulationv2.main:main"
