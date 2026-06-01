@@ -1,6 +1,7 @@
 import json
 import shutil
 
+import yaml
 from watchdog.events import FileSystemEventHandler
 import time
 from logger_color import logger
@@ -18,18 +19,28 @@ from main import build_model
 
 class ConfigRunner(FileSystemEventHandler):
     def __init__(self, recipes_path):
-        self.recipes_path = Path(recipes_path)
+        self.root = Path(__file__).parent.parent
+        self.recipes_path = self._resolve_path(recipes_path)
         self.recipes_name_path = None
         self.parent_path = self.recipes_path.parent
         self.configs_path = self.parent_path.joinpath('configs')
-        setting_path = Path(__file__).parent.parent / "settings.yaml"
+        setting_path = self.root / "settings.yaml"
         yaml_helper = YAMLHelper(setting_path)
-        self.project_folder = Path(yaml_helper.get_data("output_path"))
-        self.work_folder = Path(yaml_helper.get_data("work_path"))
+        self.project_folder = self._resolve_path(yaml_helper.get_data("output_path"))
+        self.work_folder = self._resolve_path(yaml_helper.get_data("work_path"))
+
+        self.success = []
+        self.failed = []
 
         self.recipe_cache = {}
 
         self.last_event_time = {}
+
+    def _resolve_path(self, path):
+        path = Path(path)
+        if path.is_absolute():
+            return path
+        return self.root / path
 
     # de-bouncing
     def should_skip(self, path, seconds=2):
@@ -43,16 +54,44 @@ class ConfigRunner(FileSystemEventHandler):
         return False
 
     def build_sample(self, sample_path, run_id, seed):
+        logger.info(f"[BUILD START] -> Run: {run_id}")
         try:
             build_model(
                 user_json=str(sample_path),
                 run_id=run_id,
                 test_mode=None,
-                seed=seed,
+                # seed=seed,
             )
+            logger.info(f"[BUILD DONE] -> Run: {run_id}")
+            success_configs = self.project_folder / 'success.yaml'
+            existing = {}
+            if success_configs.exists():
+                with open(success_configs, 'r') as file:
+                    existing = yaml.safe_load(file) or {}
+
+            list_folder = list(Path(self.project_folder).glob(f'seismic__*_{run_id}'))
+            old_success = existing.get("success_build_obj", [])
+            new_success = [folder.as_posix() for folder in list_folder if folder.exists()]
+            self.success = list(dict.fromkeys(old_success + new_success))
+            success = {"success_build_obj":self.success}
+            with open(success_configs,'w') as file:
+                yaml.dump(success, file)
+            logger.info(f"[TRACK SUCCESS] -> Path: {success_configs}")
+
             return True
         except BaseException as exc:
             logger.error(f"[BUILD FAILED] -> Run: {run_id} Error: {exc}")
+
+            failed_configs = self.project_folder / 'failed.yaml'
+            failed_configs.touch(exist_ok=True)
+
+            self.failed.append(str(sample_path))
+            failed = {"failed_build_config": self.failed}
+
+            with open(failed_configs,'w') as file:
+                yaml.dump(failed, file)
+            logger.info(f"[TRACK FAILED] -> Path: {failed_configs}")
+
             return False
 
     # events like delete ,create ,update recipes
@@ -83,6 +122,8 @@ class ConfigRunner(FileSystemEventHandler):
                 recipe = json.load(file)
                 self.recipe_cache[path]["configs"][sample] = recipe
             self.build_sample(sample_path, f"{path.stem}_{sample}", seed)
+
+        self.last_event_time[path] = time.time()
 
 
     def on_modified(self, event):
@@ -196,7 +237,7 @@ class ConfigRunner(FileSystemEventHandler):
 def watch_over_files(recipes_path):
     observer = Observer()
     file_watcher = ConfigRunner(recipes_path)
-    path = Path(recipes_path)
+    path = file_watcher.recipes_path
 
     if path.exists():
         logger.info(f"[NOW MONITORING] -> Path: {path}")
