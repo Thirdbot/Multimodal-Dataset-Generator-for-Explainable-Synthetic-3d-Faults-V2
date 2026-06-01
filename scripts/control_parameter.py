@@ -392,7 +392,7 @@ class SampleControl:
                 with open(config_name_path,'w') as f:
                     json.dump(config,f,indent=2)
                 configs_list.append(name)
-                logger.debug(f"[Populating]: Category {category} Amount {amount}")
+            logger.debug(f"[Populating]: Category {category} Amount {amount}")
 
         recipe_config["population"].update({
             "samples": configs_list,
@@ -410,12 +410,12 @@ low_level_controls = structural |structural_properties |fault_controls |geo_body
 # (you can set some type to not exists by set 0.0)
 
 high_level_controls = {
-    'sample_population': 10, # amount of sample that will be populated
+    'sample_population': 2, # amount of sample that will be populated
     # each sample that is randomly created or mixed category will be ratio
     # all-faulted has different fault-line that it will be ratio, salt-fault will be ratio
     'sample_types': [
                      # "boring",
-                     # "fault_only",
+                     "fault_only",
                      "fault_complex",
                      # "salt_only",
                      # "salt_fault_mixed",

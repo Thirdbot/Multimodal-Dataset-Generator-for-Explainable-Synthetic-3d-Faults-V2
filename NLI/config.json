@@ -1,0 +1,6 @@
+{
+  "model": "MoritzLaurer/DeBERTa-v3-base-mnli-fever-anli",
+  "entailment_threshold": 0.72,
+  "contradiction_threshold": 0.72,
+  "top_k": 8
+}

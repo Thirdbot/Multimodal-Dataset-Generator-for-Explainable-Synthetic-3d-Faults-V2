@@ -28,6 +28,7 @@ class ConfigRunner(FileSystemEventHandler):
         yaml_helper = YAMLHelper(setting_path)
         self.project_folder = self._resolve_path(yaml_helper.get_data("output_path"))
         self.work_folder = self._resolve_path(yaml_helper.get_data("work_path"))
+        self.traces_path = self._resolve_path(yaml_helper.get_data("traces_path"))
 
         self.success = []
         self.failed = []
@@ -52,6 +53,51 @@ class ConfigRunner(FileSystemEventHandler):
 
         self.last_event_time[path] = now
         return False
+
+    def delete_sample_artifacts(self, recipe_name, sample):
+        deleted_outputs = []
+
+        for folder in Path(self.project_folder).glob(f"seismic__*_{recipe_name}_{sample}"):
+            deleted_outputs.append(folder.as_posix())
+            shutil.rmtree(folder, ignore_errors=True)
+
+        for folder in Path(self.work_folder).glob(f"temp_folder__*_{recipe_name}_{sample}"):
+            shutil.rmtree(folder, ignore_errors=True)
+
+        for output_folder in deleted_outputs:
+            output_name = Path(output_folder).name
+            db_extract = self.traces_path / f"{output_name}_db_extract.json"
+            properties_graph = self.traces_path / "properties_graph" / f"{output_name}_db_extract_properties_graph.json"
+
+            if db_extract.exists():
+                db_extract.unlink()
+                logger.info(f"[TRACE DELETE] -> {db_extract}")
+
+            if properties_graph.exists():
+                properties_graph.unlink()
+                logger.info(f"[GRAPH DELETE] -> {properties_graph}")
+
+        self.prune_success_tracker(deleted_outputs)
+
+    def prune_success_tracker(self, deleted_outputs):
+        success_configs = self.project_folder / "success.yaml"
+        if not success_configs.exists():
+            return
+
+        with open(success_configs, "r") as file:
+            data = yaml.safe_load(file) or {}
+
+        old_success = data.get("success_build_obj", [])
+        new_success = [path for path in old_success if path not in deleted_outputs]
+
+        if new_success == old_success:
+            return
+
+        self.success = new_success
+        with open(success_configs, "w") as file:
+            yaml.dump({"success_build_obj": new_success}, file)
+
+        logger.info(f"[TRACK PRUNE] -> Path: {success_configs}")
 
     def build_sample(self, sample_path, run_id, seed):
         logger.info(f"[BUILD START] -> Run: {run_id}")
@@ -162,11 +208,7 @@ class ConfigRunner(FileSystemEventHandler):
             if sample_path.exists():
                 sample_path.unlink()
 
-            for folder in Path(self.project_folder).glob(f"seismic__*_{path.stem}_{sample}"):
-                shutil.rmtree(folder, ignore_errors=True)
-
-            for folder in Path(self.work_folder).glob(f"temp_folder__*_{path.stem}_{sample}"):
-                shutil.rmtree(folder, ignore_errors=True)
+            self.delete_sample_artifacts(path.stem, sample)
 
         new_configs = {}
         for sample in new_samples:
@@ -185,12 +227,7 @@ class ConfigRunner(FileSystemEventHandler):
 
             if should_rebuild:
                 logger.warning(f"[MODIFIED] -> Config: {sample}")
-                for folder in Path(self.project_folder).glob(f"seismic__*_{path.stem}_{sample}"):
-                    shutil.rmtree(folder, ignore_errors=True)
-
-                for folder in Path(self.work_folder).glob(f"temp_folder__*_{path.stem}_{sample}"):
-                    shutil.rmtree(folder, ignore_errors=True)
-
+                self.delete_sample_artifacts(path.stem, sample)
                 self.build_sample(sample_path, f"{path.stem}_{sample}", seed)
 
             new_configs[sample] = new_recipes
@@ -225,12 +262,7 @@ class ConfigRunner(FileSystemEventHandler):
                 sample_path.unlink()
 
             logger.warning(f"[MODIFIED] -> Config: {sample}")
-            # sample_path.
-            for folder in Path(self.project_folder).glob(f"seismic__*_{path.stem}_{sample}"):
-                shutil.rmtree(folder, ignore_errors=True)
-
-            for folder in Path(self.work_folder).glob(f"temp_folder__*_{path.stem}_{sample}"):
-                shutil.rmtree(folder, ignore_errors=True)
+            self.delete_sample_artifacts(path.stem, sample)
 
 
 

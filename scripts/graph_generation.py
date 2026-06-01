@@ -1,4 +1,4 @@
-# run watchdog over outputs of complete built only --extract db and array relation
+# run watchdog over outputs of complete built only --extract db and build properties graph
 # watch dog each extract.json to make graph using graph_generation.py
 
 import time
@@ -10,13 +10,12 @@ from logger_color import logger
 import yaml
 from yaml_helper import YAMLHelper
 from low_level_tracer import LowLevelTracer
-from high_level_tracer import HighLevelTracer
-from graph_system import GraphSystem, ArrayRelationsGraph
-from semantic_graph import SemanticGraph
+from graph_system import GraphSystem
 
 class GraphGeneration(FileSystemEventHandler):
     def __init__(self):
         self.already_traced = set()
+        self.last_success_mtime = None
 
     def on_any_event(self, event):
         self.trace_success_file(event)
@@ -47,9 +46,15 @@ class GraphGeneration(FileSystemEventHandler):
         if not path.exists():
             return
 
+        current_mtime = path.stat().st_mtime
+        if self.last_success_mtime is not None and current_mtime == self.last_success_mtime:
+            return
+
         time.sleep(0.2)
         with open(path, 'r') as f:
             data = yaml.safe_load(f) or {}
+
+        self.last_success_mtime = current_mtime
 
         for folder in data.get("success_build_obj", []):
             folder = Path(folder)
@@ -71,23 +76,11 @@ class GraphGeneration(FileSystemEventHandler):
             low_tracker.save_to_json()
             low_trace_path = low_tracker.trace_sample_path
 
-            high_tracker = HighLevelTracer(folder)
-            high_tracker.save_to_json()
-            high_trace_path = high_tracker.trace_sample_path
-
             properties_graph = GraphSystem()
             properties_graph.build(low_trace_path)
             properties_graph_path = properties_graph.save_to_json()
 
-            array_graph = ArrayRelationsGraph()
-            array_graph.build(high_trace_path)
-            array_graph_path = array_graph.save_to_json()
-
-            semantic_graph = SemanticGraph()
-            semantic_graph.build(properties_graph_path, array_graph_path)
-            semantic_graph_path = semantic_graph.save_to_json()
-
-            logger.info(f"[TRACE DONE] -> Graph: {semantic_graph_path}")
+            logger.info(f"[TRACE DONE] -> Graph: {properties_graph_path}")
             return True
         except Exception as exc:
             logger.error(f"[TRACE FAILED] -> Sample: {folder} Error: {exc}")
@@ -106,7 +99,7 @@ def watch_over_outputs(successful_path):
     successful_path = Path(successful_path)
 
     if successful_path.parent.exists():
-        logger.debug(f"Watching {successful_path}")
+        logger.info(f"[NOW MONITORING] -> Path: {successful_path}")
 
         graph = GraphGeneration()
         if successful_path.exists():
@@ -118,6 +111,7 @@ def watch_over_outputs(successful_path):
     observe.start()
     try:
         while True:
+            graph.trace_success_path(successful_path)
             time.sleep(1)
     except KeyboardInterrupt:
         logger.error(f"[STOPPING]")
@@ -127,10 +121,14 @@ def watch_over_outputs(successful_path):
 
 
 if __name__ == "__main__":
-    setting_path = Path(__file__).parent.parent.joinpath('settings.yaml')
+    root = Path(__file__).parent.parent
+    setting_path = root.joinpath('settings.yaml')
     yaml_helper = YAMLHelper(setting_path)
     output_path = yaml_helper.get_data('output_path')
-    successful_path = Path(output_path) / 'success.yaml'
+    output_path = Path(output_path)
+    if not output_path.is_absolute():
+        output_path = root / output_path
+    successful_path = output_path / 'success.yaml'
 
     # watch over update in recipes
     watch_over_outputs(successful_path)
