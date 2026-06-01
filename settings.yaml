@@ -24,7 +24,7 @@ control:
   broadband_qc_volume: False
   extra_qc_plots: False
   verbose: True
-  model_qc_volumes: False
+  model_qc_volumes: True
   model_store_in_memory: False
   cleanup_intermediates: False
 

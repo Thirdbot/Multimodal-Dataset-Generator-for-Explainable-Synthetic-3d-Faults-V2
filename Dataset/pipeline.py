@@ -154,7 +154,7 @@ class DatasetPipeline(object):
         logger.info(f"[DATASET DELETE] -> Sample: {sample_id}")
         return True
 
-    def watch(self, max_attempts=5, batch_size=3, evidence_limit=12, verbose=False):
+    def watch(self, max_attempts=10, batch_size=5, evidence_limit=100, verbose=False):
         watcher = DatasetWatcher(
             pipeline=self,
             graph_root=self.graph_root,

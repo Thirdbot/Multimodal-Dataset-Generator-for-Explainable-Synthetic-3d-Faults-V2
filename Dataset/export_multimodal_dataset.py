@@ -64,6 +64,15 @@ def select_seismic_item(sample_path):
     raise FileNotFoundError(f"no seismic array found in {sample_path}")
 
 
+def select_fault_segments_item(sample_path):
+    arrays = list_arrays(sample_path)
+    for item in arrays:
+        rel = item["group_path"].relative_to(sample_path).as_posix()
+        if rel.startswith("fault_segments_") and rel.endswith(".zarr"):
+            return item
+    return None
+
+
 def clip_normalize(slice_2d):
     finite = slice_2d[np.isfinite(slice_2d)]
     if finite.size == 0:
@@ -121,6 +130,7 @@ def closure_indices(closure, shape):
         "source": "closure_extent",
         "source_id": closure.get("id"),
         "fluid": closure.get("fluid"),
+        "closure": closure,
     }
 
 
@@ -146,13 +156,32 @@ def choose_fault_heuristic(graph, shape):
     return {
         "inline": bounded_index(fault.get("x0"), shape[0]),
         "crossline": bounded_index(fault.get("y0"), shape[1]),
+        "timeslice": None,
         "source": "fault_heuristic",
         "source_id": fault.get("id"),
         "fault_index": fault.get("fault_index"),
+        "fault": fault,
     }
 
 
-def select_view_indices(volume, graph=None):
+def fault_volume_indices(fault_volume):
+    occupancy = np.nan_to_num(fault_volume, nan=0.0)
+    inline_scores = occupancy.sum(axis=(1, 2))
+    crossline_scores = occupancy.sum(axis=(0, 2))
+    timeslice_scores = occupancy.sum(axis=(0, 1))
+
+    if inline_scores.max() <= 0 and crossline_scores.max() <= 0 and timeslice_scores.max() <= 0:
+        return None
+
+    return {
+        "inline": int(np.argmax(inline_scores)),
+        "crossline": int(np.argmax(crossline_scores)),
+        "timeslice": int(np.argmax(timeslice_scores)),
+        "source": "fault_segments",
+    }
+
+
+def select_view_indices(volume, graph=None, fault_volume=None):
     amplitude = np.abs(np.nan_to_num(volume, nan=0.0))
     inline_scores = amplitude.mean(axis=(1, 2))
     crossline_scores = amplitude.mean(axis=(0, 2))
@@ -162,25 +191,35 @@ def select_view_indices(volume, graph=None):
     selected = {}
     methods = {}
 
-    closure_choice = closure_indices(choose_target_closure(graph), volume.shape)
-    if closure_choice:
-        if closure_choice.get("inline") is not None:
-            selected["inline"] = closure_choice["inline"]
-            methods["inline"] = closure_choice["source"]
-        if closure_choice.get("crossline") is not None:
-            selected["crossline"] = closure_choice["crossline"]
-            methods["crossline"] = closure_choice["source"]
-        if closure_choice.get("timeslice") is not None:
-            selected["timeslice"] = closure_choice["timeslice"]
-            methods["timeslice"] = closure_choice["source"]
-
     fault_choice = choose_fault_heuristic(graph, volume.shape)
+    fault_volume_choice = fault_volume_indices(fault_volume) if fault_volume is not None else None
+
+    if fault_volume_choice:
+        selected["inline"] = fault_volume_choice["inline"]
+        methods["inline"] = fault_volume_choice["source"]
+        selected["crossline"] = fault_volume_choice["crossline"]
+        methods["crossline"] = fault_volume_choice["source"]
+        selected["timeslice"] = fault_volume_choice["timeslice"]
+        methods["timeslice"] = fault_volume_choice["source"]
+
     if "inline" not in selected and fault_choice.get("inline") is not None:
         selected["inline"] = fault_choice["inline"]
         methods["inline"] = fault_choice["source"]
     if "crossline" not in selected and fault_choice.get("crossline") is not None:
         selected["crossline"] = fault_choice["crossline"]
         methods["crossline"] = fault_choice["source"]
+
+    closure_choice = closure_indices(choose_target_closure(graph), volume.shape)
+    if closure_choice:
+        if "inline" not in selected and closure_choice.get("inline") is not None:
+            selected["inline"] = closure_choice["inline"]
+            methods["inline"] = closure_choice["source"]
+        if "crossline" not in selected and closure_choice.get("crossline") is not None:
+            selected["crossline"] = closure_choice["crossline"]
+            methods["crossline"] = closure_choice["source"]
+        if "timeslice" not in selected and closure_choice.get("timeslice") is not None:
+            selected["timeslice"] = closure_choice["timeslice"]
+            methods["timeslice"] = closure_choice["source"]
 
     if "inline" not in selected:
         selected["inline"] = int(np.argmax(inline_scores))
@@ -197,11 +236,14 @@ def select_view_indices(volume, graph=None):
         "crossline": selected["crossline"],
         "timeslice": selected["timeslice"],
         "methods": methods,
+        "fault_volume_used": bool(fault_volume_choice),
+        "target_closure": closure_choice.get("closure") if closure_choice else None,
+        "target_fault": fault_choice.get("fault") if fault_choice else None,
     }
 
 
-def build_views(volume, graph=None):
-    indices = select_view_indices(volume, graph=graph)
+def build_views(volume, graph=None, fault_volume=None):
+    indices = select_view_indices(volume, graph=graph, fault_volume=fault_volume)
     inline = clip_normalize(volume[indices["inline"], :, :].T)
     crossline = clip_normalize(volume[:, indices["crossline"], :].T)
     timeslice = clip_normalize(volume[:, :, indices["timeslice"]].T)
@@ -284,6 +326,8 @@ def multimodal_row(source_row, image_path, seismic_relpath, slice_indices):
             "view_indices": slice_indices,
             "render_type": "three_view_seismic_panel",
             "view_selection": slice_indices.get("methods", {}),
+            "target_closure": slice_indices.get("target_closure"),
+            "target_fault": slice_indices.get("target_fault"),
         },
         "evidence": source_row.get("evidence", []),
         "verification": source_row.get("verification", {}),
@@ -306,10 +350,12 @@ def export_dataset(verified_path, output_path, image_dir, limit=None):
         try:
             sample_path = resolve_sample_folder(sample_id)
             seismic_item = select_seismic_item(sample_path)
+            fault_segments_item = select_fault_segments_item(sample_path)
             volume = load_array(seismic_item)
+            fault_volume = load_array(fault_segments_item) if fault_segments_item else None
             graph_path = row.get("metadata", {}).get("graph_path")
             graph = load_graph(graph_path) if graph_path else {"nodes": [], "edges": []}
-            views = build_views(volume, graph=graph)
+            views = build_views(volume, graph=graph, fault_volume=fault_volume)
 
             image_path = image_dir / f"{sample_id}.png"
             seismic_relpath = seismic_item["group_path"].relative_to(sample_path).as_posix()

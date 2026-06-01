@@ -215,144 +215,20 @@ def visualize(item, array, spacing, cmap, opacity, threshold, show_bounds):
     plotter.show()
 
 
-def add_overlay(plotter, sample_path, overlay_arg, spacing, cmap, opacity, threshold):
-    overlay_item = resolve_array(sample_path, overlay_arg)
-    overlay_array = load_array(overlay_item)
-    overlay_grid = build_grid(overlay_array, spacing)
-
-    if looks_like_label(overlay_item, overlay_array):
-        label_threshold = threshold if threshold is not None else 0.5
-        mesh = overlay_grid.threshold(value=label_threshold, scalars="values")
-        plotter.add_mesh(
-            mesh,
-            scalars="values",
-            cmap=cmap,
-            opacity=opacity,
-            show_scalar_bar=True,
-            categories=True,
-        )
-    else:
-        finite = overlay_array[np.isfinite(overlay_array)]
-        if finite.size == 0:
-            return
-        contour_values = np.linspace(finite.min(), finite.max(), 6)[1:-1]
-        mesh = overlay_grid.contour(isosurfaces=contour_values, scalars="values")
-        plotter.add_mesh(
-            mesh,
-            scalars="values",
-            cmap=cmap,
-            opacity=opacity,
-            show_scalar_bar=True,
-        )
-
-
-def visualize_with_overlays(
-    item,
-    array,
-    sample_path,
-    overlays,
-    spacing,
-    cmap,
-    opacity,
-    threshold,
-    overlay_cmap,
-    overlay_opacity,
-    overlay_threshold,
-    show_bounds,
-):
-    import pyvista as pv
-
-    grid = build_grid(array, spacing)
-    plotter = pv.Plotter()
-    plotter.add_axes()
-    if show_bounds:
-        plotter.show_bounds(grid="front", location="outer")
-
-    volume_opacity = opacity
-    if isinstance(opacity, float):
-        volume_opacity = "sigmoid"
-    plotter.add_volume(grid, scalars="values", cmap=cmap, opacity=volume_opacity, shade=False)
-
-    for overlay_arg in overlays:
-        add_overlay(
-            plotter=plotter,
-            sample_path=sample_path,
-            overlay_arg=overlay_arg,
-            spacing=spacing,
-            cmap=overlay_cmap,
-            opacity=overlay_opacity,
-            threshold=overlay_threshold if overlay_threshold is not None else threshold,
-        )
-
-    title = item["group_path"].name
-    if overlays:
-        title = f"{title} + overlays"
-    plotter.add_text(title, font_size=10)
-    plotter.show()
-
-
-def print_array_list(sample_path):
-    for item in list_arrays(sample_path):
-        rel = item["group_path"].relative_to(sample_path).as_posix()
-        shape = tuple(item["metadata"]["shape"])
-        dtype = item["metadata"]["data_type"]
-        print(f"{rel} :: {item['array_name']} :: shape={shape} dtype={dtype}")
-
-
 def main():
-    parser = argparse.ArgumentParser(description="Visualize one Synthoseis sample array in 3D with PyVista.")
+    parser = argparse.ArgumentParser(description="Display one Synthoseis sample array in 3D with PyVista.")
     parser.add_argument("sample", nargs="?", default=None, help="sample folder path under outputs/")
     parser.add_argument("--array", default=None, help="relative .zarr path inside sample folder")
-    parser.add_argument("--list", action="store_true", help="list available .zarr arrays in the sample")
-    parser.add_argument("--stats", action="store_true", help="print selected array stats and exit")
     parser.add_argument("--spacing", nargs=3, type=float, default=(1.0, 1.0, 1.0), metavar=("DX", "DY", "DZ"))
     parser.add_argument("--cmap", default="viridis")
     parser.add_argument("--opacity", type=float, default=0.25)
     parser.add_argument("--threshold", type=float, default=None, help="threshold for label-like arrays")
-    parser.add_argument("--overlay", action="append", default=[], help="relative .zarr path to overlay on top of the main volume; repeatable")
-    parser.add_argument("--overlay-cmap", default="glasbey")
-    parser.add_argument("--overlay-opacity", type=float, default=0.55)
-    parser.add_argument("--overlay-threshold", type=float, default=None, help="threshold for overlay label arrays")
     parser.add_argument("--show-bounds", action="store_true")
     args = parser.parse_args()
 
     sample_path = sample_path_from_arg(args.sample)
-    if args.list:
-        print_array_list(sample_path)
-        return
-
     item = resolve_array(sample_path, args.array)
     array = load_array(item)
-
-    if args.stats:
-        finite = array[np.isfinite(array)]
-        rel = item["group_path"].relative_to(sample_path).as_posix()
-        print(f"sample: {sample_path}")
-        print(f"array: {rel}")
-        print(f"shape: {array.shape}")
-        print(f"dtype: {array.dtype}")
-        if finite.size:
-            print(f"min: {finite.min()}")
-            print(f"max: {finite.max()}")
-            print(f"mean: {finite.mean()}")
-        return
-
-    if args.overlay:
-        visualize_with_overlays(
-            item=item,
-            array=array,
-            sample_path=sample_path,
-            overlays=args.overlay,
-            spacing=tuple(args.spacing),
-            cmap=args.cmap,
-            opacity=args.opacity,
-            threshold=args.threshold,
-            overlay_cmap=args.overlay_cmap,
-            overlay_opacity=args.overlay_opacity,
-            overlay_threshold=args.overlay_threshold,
-            show_bounds=args.show_bounds,
-        )
-        return
 
     visualize(
         item=item,
