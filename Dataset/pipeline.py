@@ -1,11 +1,12 @@
-# automated dataset generation from properties graphs
-import argparse
+# watch properties graphs and generate verified dataset rows
 import json
 import re
 import sys
+import time
 from pathlib import Path
 
-from tqdm import tqdm
+from watchdog.events import FileSystemEventHandler
+from watchdog.observers import Observer
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -18,6 +19,7 @@ from NLI.verifier import (
     NliGraphVerifier,
 )
 from Tracer.tracer import EvidenceTracer
+from scripts.logger_color import logger
 
 
 default_graph_root = ROOT / "traces" / "properties_graph"
@@ -32,58 +34,15 @@ class DatasetPipeline(object):
         self.output_path = Path(output_path)
         self.llm_config = self.load_config(llm_config_path)
         self.nli_config = self.load_config(nli_config_path)
-
-    def run(
-        self,
-        max_attempts=5,
-        batch_size=5,
-        evidence_limit=12,
-        append=False,
-        verbose=False,
-    ):
-        graph_paths = self.list_graph_paths()
-        if not graph_paths:
-            raise FileNotFoundError(f"no properties graph found in {self.graph_root}")
-
-        verifier = NliGraphVerifier(
+        self.rows = self.load_existing_rows()
+        self.verifier = NliGraphVerifier(
             model_name=self.nli_config.get("model", DEFAULT_NLI_MODEL),
             top_k=self.nli_config.get("top_k", 8),
             entailment_threshold=self.nli_config.get("entailment_threshold", DEFAULT_ENTAILMENT_THRESHOLD),
             contradiction_threshold=self.nli_config.get("contradiction_threshold", DEFAULT_CONTRADICTION_THRESHOLD),
         )
 
-        mode = "a" if append else "w"
-        rows = []
-        report = []
-        self.output_path.parent.mkdir(parents=True, exist_ok=True)
-
-        with open(self.output_path, mode) as file:
-            for graph_path in tqdm(graph_paths, desc="building dataset"):
-                row, status = self.build_sample_row(
-                    graph_path,
-                    verifier,
-                    max_attempts=max_attempts,
-                    batch_size=batch_size,
-                    evidence_limit=evidence_limit,
-                    verbose=verbose,
-                )
-                report.append(status)
-                if row is None:
-                    continue
-
-                file.write(json.dumps(row) + "\n")
-                file.flush()
-                rows.append(row)
-
-        return {
-            "graph_count": len(graph_paths),
-            "saved_rows": len(rows),
-            "unsupported_graphs": len([item for item in report if item["status"] != "saved"]),
-            "output_path": self.output_path.as_posix(),
-            "report": report,
-        }
-
-    def build_sample_row(self, graph_path, verifier, max_attempts=5, batch_size=5, evidence_limit=12, verbose=False):
+    def build_sample_row(self, graph_path, max_attempts=5, batch_size=5, evidence_limit=12, verbose=False):
         seen = set()
         sample_id = self.sample_id_from_graph(graph_path)
         supported = []
@@ -104,12 +63,11 @@ class DatasetPipeline(object):
                     continue
                 seen.add(normalized)
 
-                verification = verifier.verify_graph_claim(
-                    graph_path,
-                    hypothesis,
-                )
+                verification = self.verifier.verify_graph_claim(graph_path, hypothesis)
                 if verbose:
-                    print(f"[{sample_id}] {verification['status']} {verification['score']:.3f}: {hypothesis}")
+                    logger.info(
+                        f"[{sample_id}] {verification['status']} {verification['score']:.3f}: {hypothesis}"
+                    )
 
                 if verification["status"] != "supported":
                     continue
@@ -159,23 +117,75 @@ class DatasetPipeline(object):
             "tested_hypotheses": len(seen),
         }
 
-    def check(self, evidence_limit=8):
-        graph_paths = self.list_graph_paths()
-        checks = []
-        for graph_path in graph_paths:
-            tracer = EvidenceTracer(graph_path)
-            evidence = tracer.structural_evidence()
-            checks.append({
-                "sample_id": self.sample_id_from_graph(graph_path),
-                "graph_path": graph_path.as_posix(),
-                "evidence_count": len(evidence),
-                "preview": evidence[:evidence_limit],
-                "instruction": self.instruction_text(),
-            })
-        return checks
+    def process_graph(self, graph_path, max_attempts=5, batch_size=3, evidence_limit=12, verbose=False):
+        graph_path = Path(graph_path)
+        if not graph_path.exists():
+            return None
 
-    def list_graph_paths(self):
-        return sorted(self.graph_root.glob("*_properties_graph.json"))
+        logger.info(f"[DATASET START] -> Graph: {graph_path.name}")
+        row, status = self.build_sample_row(
+            graph_path,
+            max_attempts=max_attempts,
+            batch_size=batch_size,
+            evidence_limit=evidence_limit,
+            verbose=verbose,
+        )
+
+        sample_id = self.sample_id_from_graph(graph_path)
+        if row is None:
+            logger.warning(
+                f"[DATASET SKIP] -> Sample: {sample_id} Status: {status['status']}"
+            )
+            return status
+
+        self.rows[sample_id] = row
+        self.write_rows()
+        logger.info(
+            f"[DATASET SAVE] -> Sample: {sample_id} Output: {self.output_path}"
+        )
+        return status
+
+    def remove_graph(self, graph_path):
+        sample_id = self.sample_id_from_graph(graph_path)
+        if sample_id not in self.rows:
+            return False
+        self.rows.pop(sample_id, None)
+        self.write_rows()
+        logger.info(f"[DATASET DELETE] -> Sample: {sample_id}")
+        return True
+
+    def watch(self, max_attempts=5, batch_size=3, evidence_limit=12, verbose=False):
+        watcher = DatasetWatcher(
+            pipeline=self,
+            graph_root=self.graph_root,
+            max_attempts=max_attempts,
+            batch_size=batch_size,
+            evidence_limit=evidence_limit,
+            verbose=verbose,
+        )
+        watcher.run()
+
+    def load_existing_rows(self):
+        rows = {}
+        if not self.output_path.exists():
+            return rows
+
+        for line in self.output_path.read_text().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            row = json.loads(line)
+            sample_id = row.get("sample_id")
+            if sample_id:
+                rows[sample_id] = row
+        return rows
+
+    def write_rows(self):
+        self.output_path.parent.mkdir(parents=True, exist_ok=True)
+        ordered_rows = [self.rows[key] for key in sorted(self.rows)]
+        with open(self.output_path, "w") as file:
+            for row in ordered_rows:
+                file.write(json.dumps(row) + "\n")
 
     def selected_evidence(self, verification):
         deciding = verification["deciding_evidence"]
@@ -194,7 +204,6 @@ class DatasetPipeline(object):
 
         def evidence_priority(item):
             fact_name = item.get("fact_name")
-            sentence = str(item.get("sentence", "")).lower()
             rank = {
                 "Fault": 0,
                 "HAS_FAULT": 1,
@@ -208,8 +217,6 @@ class DatasetPipeline(object):
                 "HAS_CATEGORY": 20,
                 "Category": 21,
             }.get(fact_name, 50)
-            if any(token in sentence for token in ("x=", "y=", "z=", "spans", "voxels", "throw")):
-                rank -= 2
             return (rank, -item.get("scores", {}).get("entailment", 0.0))
 
         for item in sorted(retrieved, key=evidence_priority):
@@ -235,18 +242,16 @@ class DatasetPipeline(object):
         score = float(verification["score"])
         bonus = 0.0
 
-        if any(token in text for token in ("x=", "y=", "z=")):
-            bonus += 0.20
-        if "throw" in text:
-            bonus += 0.10
-        if any(token in text for token in ("spans", "voxels")):
-            bonus += 0.15
         if "because" in text or "due to" in text or "indicated by" in text:
             bonus += 0.05
         if "fault" in text:
             bonus += 0.08
         if "closure" in text:
             bonus += 0.08
+        if "fluid" in text or "oil" in text or "gas" in text or "brine" in text:
+            bonus += 0.05
+        if any(token in text for token in ("x=", "y=", "z=", "throw", "voxels")):
+            bonus -= 0.20
         if "category" in text or text.startswith("the sample belongs to"):
             bonus -= 0.30
         if text.startswith("has_category:"):
@@ -281,27 +286,68 @@ class DatasetPipeline(object):
         return json.loads(path.read_text())
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Generate one supported dataset row per properties graph.")
-    parser.add_argument("--graph-root", default=str(default_graph_root))
-    parser.add_argument("--output", default=str(default_output))
-    parser.add_argument("--max-attempts", type=int, default=5)
-    parser.add_argument("--batch-size", type=int, default=5)
-    parser.add_argument("--evidence-limit", type=int, default=12)
-    parser.add_argument("--append", action="store_true")
-    parser.add_argument("--verbose", action="store_true")
-    parser.add_argument("--check", action="store_true")
-    args = parser.parse_args()
+class DatasetWatcher(FileSystemEventHandler):
+    def __init__(self, pipeline, graph_root, max_attempts=5, batch_size=3, evidence_limit=100, verbose=False):
+        self.pipeline = pipeline
+        self.graph_root = Path(graph_root)
+        self.max_attempts = max_attempts
+        self.batch_size = batch_size
+        self.evidence_limit = evidence_limit
+        self.verbose = verbose
+        self.processed_mtimes = {}
 
-    pipeline = DatasetPipeline(args.graph_root, args.output)
-    if args.check:
-        result = pipeline.check(evidence_limit=args.evidence_limit)
-    else:
-        result = pipeline.run(
-            max_attempts=args.max_attempts,
-            batch_size=args.batch_size,
-            evidence_limit=args.evidence_limit,
-            append=args.append,
-            verbose=args.verbose,
-        )
-    print(json.dumps(result, indent=2, default=str))
+    def on_any_event(self, event):
+        path = Path(getattr(event, "dest_path", event.src_path))
+        if event.event_type == "deleted":
+            self.handle_deleted(path)
+            return
+        self.handle_path(path)
+
+    def handle_deleted(self, path):
+        if path.name.endswith("_properties_graph.json"):
+            self.processed_mtimes.pop(path.as_posix(), None)
+            self.pipeline.remove_graph(path)
+
+    def handle_path(self, path):
+        path = Path(path)
+        if path.name.endswith("_properties_graph.json") and path.exists():
+            current_mtime = path.stat().st_mtime
+            key = path.as_posix()
+            if self.processed_mtimes.get(key) == current_mtime:
+                return
+            time.sleep(0.2)
+            self.processed_mtimes[key] = current_mtime
+            self.pipeline.process_graph(
+                path,
+                max_attempts=self.max_attempts,
+                batch_size=self.batch_size,
+                evidence_limit=self.evidence_limit,
+                verbose=self.verbose,
+            )
+
+    def process_existing(self):
+        for graph_path in sorted(self.graph_root.glob("*_properties_graph.json")):
+            self.handle_path(graph_path)
+
+    def run(self):
+        self.graph_root.mkdir(parents=True, exist_ok=True)
+        logger.info(f"[NOW MONITORING] -> Path: {self.graph_root}")
+
+        observer = Observer()
+        observer.schedule(self, self.graph_root, recursive=False)
+        observer.start()
+        try:
+            self.process_existing()
+            while True:
+                self.process_existing()
+                time.sleep(1)
+        except KeyboardInterrupt:
+            logger.error("[STOPPING]")
+        finally:
+            observer.stop()
+            observer.join()
+
+
+if __name__ == "__main__":
+    pipeline = DatasetPipeline()
+    pipeline.watch()

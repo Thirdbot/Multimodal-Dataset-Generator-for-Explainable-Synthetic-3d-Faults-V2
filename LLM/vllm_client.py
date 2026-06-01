@@ -43,7 +43,7 @@ def select_prompt_evidence(tracer, evidence_limit):
         sentence = str(item.get("sentence", "")).lower()
         rank = priority_order.get(fact_name, 50)
         detail_bonus = 0
-        if any(token in sentence for token in ("x=", "y=", "z=", "spans", "voxels", "throw")):
+        if any(token in sentence for token in ("fault", "closure", "fluid")):
             detail_bonus = -1
         if fact_name in {"Category", "HAS_CATEGORY"}:
             detail_bonus += 5
@@ -78,9 +78,11 @@ Rules:
 - Do not repeat the same hypothesis with different wording.
 - Write as a natural seismic interpretation statement that could later be used to supervise a vision-language model.
 - Mention how the observed properties combine into an interpretable structural scene.
-- Prefer directly observable structural wording such as shows, contains, has, includes, spans, is centered near, or is characterized by.
+- Prefer directly observable structural wording such as shows, contains, has, includes, or is characterized by.
 - Each hypothesis may include a short evidence phrase using because, due to, or indicated by.
-- If spatial evidence is present, prefer at least one concrete spatial detail such as fault center coordinates, throw, or closure extent.
+- Prefer qualitative summaries over exact coordinates or parameter values.
+- If the evidence contains small counts, write them as words such as one, two, or three instead of digits.
+- Avoid exact x/y/z coordinates, voxel totals, throw values, and other dense numeric details unless there is no other way to make a correct statement.
 - Do not mention graph, metadata, database, model parameters, or file paths.
 - Do not repeat or paraphrase the task instructions.
 - Do not talk about evidence lists, arrays, prompts, or what you are trying to do.
@@ -91,7 +93,7 @@ Rules:
 - Never describe the output format.
 
 Good style:
-H: The seismic sample shows a faulted structural scene because it includes two realized faults, with one fault centered near x=227.2, y=-450.2, z=-2101.5.
+H: The seismic sample shows a faulted structural scene because it includes two realized faults and several closures containing hydrocarbon fluids.
 
 Bad style:
 H: The graph metadata records number_faults=2.
