@@ -86,6 +86,7 @@ class DatasetPipeline(object):
     def build_sample_row(self, graph_path, verifier, max_attempts=5, batch_size=5, evidence_limit=12, verbose=False):
         seen = set()
         sample_id = self.sample_id_from_graph(graph_path)
+        supported = []
 
         for attempt in range(1, max_attempts + 1):
             generation = generate_hypotheses_for_graph(
@@ -113,30 +114,43 @@ class DatasetPipeline(object):
                 if verification["status"] != "supported":
                     continue
 
-                evidence = self.selected_evidence(verification["retrieved_evidence"])
-                row = {
-                    "sample_id": sample_id,
-                    "instruction": self.instruction_text(),
-                    "input": "",
-                    "answer": hypothesis,
-                    "evidence": evidence,
-                    "verification": {
-                        "status": verification["status"],
-                        "score": verification["score"],
-                    },
-                    "metadata": {
-                        "graph_path": graph_path.as_posix(),
-                        "category": self.category_from_graph(graph_path),
-                        "attempt": attempt,
-                        "evidence_count": len(evidence),
-                    },
-                }
-                return row, {
-                    "sample_id": sample_id,
-                    "status": "saved",
+                supported.append({
+                    "hypothesis": hypothesis,
                     "attempt": attempt,
+                    "verification": verification,
+                })
+
+        if supported:
+            best = max(
+                supported,
+                key=lambda item: self.supported_candidate_score(item["hypothesis"], item["verification"]),
+            )
+            evidence = self.selected_evidence(best["verification"])
+            row = {
+                "sample_id": sample_id,
+                "instruction": self.instruction_text(),
+                "input": "",
+                "answer": best["hypothesis"],
+                "evidence": evidence,
+                "verification": {
+                    "status": best["verification"]["status"],
+                    "score": best["verification"]["score"],
+                },
+                "metadata": {
+                    "graph_path": graph_path.as_posix(),
+                    "category": self.category_from_graph(graph_path),
+                    "attempt": best["attempt"],
+                    "evidence_count": len(evidence),
                     "tested_hypotheses": len(seen),
-                }
+                },
+            }
+            return row, {
+                "sample_id": sample_id,
+                "status": "saved",
+                "attempt": best["attempt"],
+                "tested_hypotheses": len(seen),
+                "supported_candidates": len(supported),
+            }
 
         return None, {
             "sample_id": sample_id,
@@ -163,11 +177,48 @@ class DatasetPipeline(object):
     def list_graph_paths(self):
         return sorted(self.graph_root.glob("*_properties_graph.json"))
 
-    def selected_evidence(self, evidence):
-        selected = [
-            item for item in evidence
-            if item.get("source") in {"relation", "property"}
-        ]
+    def selected_evidence(self, verification):
+        deciding = verification["deciding_evidence"]
+        retrieved = verification["retrieved_evidence"]
+        selected = []
+        seen = set()
+
+        def add_item(item):
+            sentence = item.get("sentence")
+            if not sentence or sentence in seen:
+                return
+            seen.add(sentence)
+            selected.append(item)
+
+        add_item(deciding)
+
+        def evidence_priority(item):
+            fact_name = item.get("fact_name")
+            sentence = str(item.get("sentence", "")).lower()
+            rank = {
+                "Fault": 0,
+                "HAS_FAULT": 1,
+                "Closure": 2,
+                "HAS_CLOSURE": 3,
+                "FaultSystem": 4,
+                "ClosureSystem": 5,
+                "ModelParameters": 6,
+                "HAS_FLUID": 7,
+                "Fluid": 8,
+                "HAS_CATEGORY": 20,
+                "Category": 21,
+            }.get(fact_name, 50)
+            if any(token in sentence for token in ("x=", "y=", "z=", "spans", "voxels", "throw")):
+                rank -= 2
+            return (rank, -item.get("scores", {}).get("entailment", 0.0))
+
+        for item in sorted(retrieved, key=evidence_priority):
+            if item.get("source") not in {"relation", "property"}:
+                continue
+            add_item(item)
+            if len(selected) >= 4:
+                break
+
         compact = []
         for item in selected[:4]:
             compact.append({
@@ -179,19 +230,44 @@ class DatasetPipeline(object):
         return compact
 
     @staticmethod
+    def supported_candidate_score(hypothesis, verification):
+        text = hypothesis.lower()
+        score = float(verification["score"])
+        bonus = 0.0
+
+        if any(token in text for token in ("x=", "y=", "z=")):
+            bonus += 0.20
+        if "throw" in text:
+            bonus += 0.10
+        if any(token in text for token in ("spans", "voxels")):
+            bonus += 0.15
+        if "because" in text or "due to" in text or "indicated by" in text:
+            bonus += 0.05
+        if "fault" in text:
+            bonus += 0.08
+        if "closure" in text:
+            bonus += 0.08
+        if "category" in text or text.startswith("the sample belongs to"):
+            bonus -= 0.30
+        if text.startswith("has_category:"):
+            bonus -= 0.50
+
+        return score + bonus
+
+    @staticmethod
     def instruction_text():
         return "Describe the structural interpretation of the seismic sample, focusing on faults, closures, fluids, and related structures."
 
     @staticmethod
     def category_from_graph(graph_path):
-        name = Path(graph_path).stem.replace("_properties_graph", "")
+        name = Path(graph_path).stem.replace("_properties_graph", "").replace("_db_extract", "")
         match = re.search(r"recipe_\d+_(.+)", name)
         return match.group(1) if match else "unknown"
 
     @staticmethod
     def sample_id_from_graph(graph_path):
         name = Path(graph_path).stem
-        return name.replace("_properties_graph", "")
+        return name.replace("_properties_graph", "").replace("_db_extract", "")
 
     @staticmethod
     def normalize_text(text):

@@ -15,26 +15,43 @@ DEFAULT_VLLM_ENDPOINT = "http://localhost:8000/v1/chat/completions"
 
 
 def instruction_block():
-    return "Generate structural seismic interpretation hypotheses grounded in the synthetic sample evidence."
+    return "Generate explanatory structural seismic interpretation hypotheses grounded in the synthetic sample evidence."
 
 
 def select_prompt_evidence(tracer, evidence_limit):
     source_evidence = tracer.structural_evidence()
+    priority_order = {
+        "Fault": 0,
+        "HAS_FAULT": 1,
+        "Closure": 2,
+        "HAS_CLOSURE": 3,
+        "FaultSystem": 4,
+        "ClosureSystem": 5,
+        "ModelParameters": 6,
+        "HAS_FLUID": 7,
+        "Fluid": 8,
+        "HAS_CATEGORY": 9,
+        "Category": 10,
+        "sample": 11,
+    }
+
     prioritized = []
-    for item in source_evidence:
+    for index, item in enumerate(source_evidence):
         fact_name = str(item.get("fact_name", ""))
-        if fact_name in {"sample", "Category"}:
+        if fact_name == "sample":
             continue
         sentence = str(item.get("sentence", "")).lower()
-        if fact_name in {"FaultSystem", "Fault", "HAS_FAULT", "ModelParameters", "ClosureSystem", "Closure", "HAS_CLOSURE"}:
-            prioritized.append(item)
-            continue
-        if "fault" in sentence or "closure" in sentence or "structur" in sentence:
-            prioritized.append(item)
+        rank = priority_order.get(fact_name, 50)
+        detail_bonus = 0
+        if any(token in sentence for token in ("x=", "y=", "z=", "spans", "voxels", "throw")):
+            detail_bonus = -1
+        if fact_name in {"Category", "HAS_CATEGORY"}:
+            detail_bonus += 5
+        prioritized.append((rank + detail_bonus, index, item))
 
-    if prioritized:
-        return prioritized[:evidence_limit]
-    return source_evidence[:evidence_limit]
+    prioritized.sort(key=lambda item: (item[0], item[1]))
+    selected = [item for _, _, item in prioritized]
+    return selected[:evidence_limit]
 
 
 def build_hypothesis_prompt(graph_path, evidence_limit=12, hypothesis_count=5):
@@ -60,18 +77,21 @@ Rules:
 - Do not copy evidence as raw comma-separated key-value pairs.
 - Do not repeat the same hypothesis with different wording.
 - Write as a natural seismic interpretation statement that could later be used to supervise a vision-language model.
-- Use structural wording such as contains, includes, shows fault-related structure, shows closure-related structure, or is structurally faulted.
+- Mention how the observed properties combine into an interpretable structural scene.
+- Prefer directly observable structural wording such as shows, contains, has, includes, spans, is centered near, or is characterized by.
+- Each hypothesis may include a short evidence phrase using because, due to, or indicated by.
+- If spatial evidence is present, prefer at least one concrete spatial detail such as fault center coordinates, throw, or closure extent.
 - Do not mention graph, metadata, database, model parameters, or file paths.
 - Do not repeat or paraphrase the task instructions.
 - Do not talk about evidence lists, arrays, prompts, or what you are trying to do.
 - Do not claim geological causality unless the evidence directly states causality.
 - Prefer claims that NLI can verify directly from one or two evidence sentences.
-- Each hypothesis should be one sentence of 12 to 40 words.
+- Each hypothesis should be one sentence of 18 to 45 words.
 - Stop after the final hypothesis line.
 - Never describe the output format.
 
 Good style:
-H: The seismic sample contains fault-related structure and includes two realized faults.
+H: The seismic sample shows a faulted structural scene because it includes two realized faults, with one fault centered near x=227.2, y=-450.2, z=-2101.5.
 
 Bad style:
 H: The graph metadata records number_faults=2.
@@ -90,7 +110,7 @@ def generate_with_vllm_endpoint(
     endpoint=DEFAULT_VLLM_ENDPOINT,
     model=None,
     api_key=None,
-    max_new_tokens=512,
+    max_new_tokens=2048,
     temperature=0.7,
     top_p=0.9,
     timeout=120,
@@ -140,7 +160,14 @@ def clean_hypothesis_text(text):
     match = re.search(r"(.+?[.!?])(?:\s|$)", text)
     if match:
         text = match.group(1).strip()
-    return text.strip(" -*")
+    text = text.strip(" -*")
+    text = re.sub(
+        r"^(?:HAS_CATEGORY|HAS_FAULT|HAS_CLOSURE|HAS_FLUID|REALIZED|CATEGORY|FAULTSYSTEM|MODELPARAMETERS|FAULT|CLOSURE)\s*:\s*",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    return text.strip()
 
 
 def parse_hypotheses(raw_text):
@@ -151,7 +178,7 @@ def parse_hypotheses(raw_text):
     matches = list(marker_pattern.finditer(cleaned_text))
 
     if not matches:
-        return parse_plain_hypotheses(cleaned_text)
+        return []
 
     for index, match in enumerate(matches):
         start = match.end()
@@ -164,23 +191,24 @@ def parse_hypotheses(raw_text):
     return hypotheses
 
 
-def parse_plain_hypotheses(raw_text):
-    hypotheses = []
-    seen = set()
-    for line in raw_text.splitlines():
-        line = re.sub(r"^\s*(?:[-*]|\d+[.)])\s*", "", line).strip()
-        line = re.sub(r"^H\s*:\s*", "", line, flags=re.IGNORECASE).strip()
-        hypothesis = clean_hypothesis_text(line)
-        normalized = hypothesis.lower()
-        if is_usable_hypothesis(hypothesis) and normalized not in seen:
-            hypotheses.append(hypothesis)
-            seen.add(normalized)
-    return hypotheses
-
-
 def is_usable_hypothesis(text):
     normalized = text.lower().strip()
     if len(normalized.split()) < 6:
+        return False
+
+    banned_prefixes = (
+        "has_category:",
+        "has_fault:",
+        "has_closure:",
+        "has_fluid:",
+        "faultsystem:",
+        "category:",
+        "modelparameters:",
+        "closure:",
+        "fault:",
+        "realized:",
+    )
+    if normalized.startswith(banned_prefixes):
         return False
 
     banned_phrases = [
@@ -198,12 +226,41 @@ def is_usable_hypothesis(text):
         "output format",
         "array with role",
         "the sample includes a visible",
+        "has_category:",
+        "has_fault:",
+        "has_closure:",
+        "next,",
+        "then,",
+        "another hypothesis",
+        "i should also",
+        "i should",
+        "i notice",
+        "for the next hypothesis",
+        "given this",
+        "another",
+        "belongs to the",
+        "sample category is",
     ]
     for phrase in banned_phrases:
         if phrase in normalized:
             return False
 
-    if normalized.startswith(("okay", "alright", "first", "now", "so", "wait")):
+    if normalized.startswith((
+        "okay",
+        "alright",
+        "first",
+        "now",
+        "so",
+        "wait",
+        "next",
+        "then",
+        "another",
+        "looking at",
+        "given this",
+        "for the next hypothesis",
+        "i should",
+        "i notice",
+    )):
         return False
 
     return True
