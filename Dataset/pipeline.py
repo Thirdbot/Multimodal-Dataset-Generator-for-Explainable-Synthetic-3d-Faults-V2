@@ -1,3 +1,4 @@
+import argparse
 # watch properties graphs and generate verified dataset rows
 import json
 import re
@@ -29,9 +30,10 @@ nli_config_path = ROOT / "NLI" / "config.json"
 
 
 class DatasetPipeline(object):
-    def __init__(self, graph_root=default_graph_root, output_path=default_output):
+    def __init__(self, graph_root=default_graph_root, output_path=default_output, task="structural_interpretation"):
         self.graph_root = Path(graph_root)
         self.output_path = Path(output_path)
+        self.task = task
         self.llm_config = self.load_config(llm_config_path)
         self.nli_config = self.load_config(nli_config_path)
         self.rows = self.load_existing_rows()
@@ -55,6 +57,7 @@ class DatasetPipeline(object):
                 evidence_limit=evidence_limit,
                 count=batch_size,
                 seed=attempt,
+                task=self.task,
             )
 
             for hypothesis in generation["hypotheses"]:
@@ -71,11 +74,14 @@ class DatasetPipeline(object):
 
                 if verification["status"] != "supported":
                     continue
+                if not self.is_task_supported_hypothesis(hypothesis):
+                    continue
 
                 supported.append({
                     "hypothesis": hypothesis,
                     "attempt": attempt,
                     "verification": verification,
+                    "generation": generation,
                 })
 
         if supported:
@@ -86,7 +92,7 @@ class DatasetPipeline(object):
             evidence = self.selected_evidence(best["verification"])
             row = {
                 "sample_id": sample_id,
-                "instruction": self.instruction_text(),
+                "instruction": self.instruction_text(self.task),
                 "input": "",
                 "answer": best["hypothesis"],
                 "evidence": evidence,
@@ -97,24 +103,39 @@ class DatasetPipeline(object):
                 "metadata": {
                     "graph_path": graph_path.as_posix(),
                     "category": self.category_from_graph(graph_path),
+                    "task": self.task,
                     "attempt": best["attempt"],
                     "evidence_count": len(evidence),
                     "tested_hypotheses": len(seen),
+                },
+                "trace": {
+                    "llm_prompt": best["generation"].get("prompt", ""),
+                    "llm_raw_output": best["generation"].get("raw_output", ""),
+                    "llm_answer": best["hypothesis"],
+                    "graph_trace": best["generation"].get("evidence", []),
+                    "retrieved_evidence": best["verification"].get("retrieved_evidence", []),
+                    "deciding_evidence": best["verification"].get("deciding_evidence", {}),
+                    "nli_model": best["verification"].get("model", ""),
                 },
             }
             return row, {
                 "sample_id": sample_id,
                 "status": "saved",
+                "task": self.task,
                 "attempt": best["attempt"],
                 "tested_hypotheses": len(seen),
                 "supported_candidates": len(supported),
+                "nli_score": best["verification"]["score"],
+                "answer": best["hypothesis"],
             }
 
         return None, {
             "sample_id": sample_id,
             "status": "no_entailed_hypothesis",
+            "task": self.task,
             "attempts": max_attempts,
             "tested_hypotheses": len(seen),
+            "supported_candidates": 0,
         }
 
     def process_graph(self, graph_path, max_attempts=5, batch_size=3, evidence_limit=12, verbose=False):
@@ -136,6 +157,7 @@ class DatasetPipeline(object):
             logger.warning(
                 f"[DATASET SKIP] -> Sample: {sample_id} Status: {status['status']}"
             )
+            self.log_summary(status)
             return status
 
         self.rows[sample_id] = row
@@ -143,7 +165,24 @@ class DatasetPipeline(object):
         logger.info(
             f"[DATASET SAVE] -> Sample: {sample_id} Output: {self.output_path}"
         )
+        self.log_summary(status)
         return status
+
+    def log_summary(self, status):
+        logger.info(
+            "[DATASET SUMMARY] -> "
+            f"Sample: {status.get('sample_id')} "
+            f"Task: {status.get('task')} "
+            f"Status: {status.get('status')} "
+            f"Tested: {status.get('tested_hypotheses', 0)} "
+            f"Supported: {status.get('supported_candidates', 0)}"
+        )
+        if status.get("answer"):
+            logger.info(
+                "[DATASET ANSWER] -> "
+                f"NLI: {float(status.get('nli_score', 0.0)):.3f} "
+                f"Text: {status.get('answer')}"
+            )
 
     def remove_graph(self, graph_path):
         sample_id = self.sample_id_from_graph(graph_path)
@@ -203,21 +242,12 @@ class DatasetPipeline(object):
         add_item(deciding)
 
         def evidence_priority(item):
-            fact_name = item.get("fact_name")
-            rank = {
-                "Fault": 0,
-                "HAS_FAULT": 1,
-                "Closure": 2,
-                "HAS_CLOSURE": 3,
-                "FaultSystem": 4,
-                "ClosureSystem": 5,
-                "ModelParameters": 6,
-                "HAS_FLUID": 7,
-                "Fluid": 8,
-                "HAS_CATEGORY": 20,
-                "Category": 21,
-            }.get(fact_name, 50)
-            return (rank, -item.get("scores", {}).get("entailment", 0.0))
+            source_rank = {
+                "relation": 0,
+                "property": 1,
+                "sample": 2,
+            }.get(item.get("source"), 9)
+            return (source_rank, -item.get("scores", {}).get("entailment", 0.0))
 
         for item in sorted(retrieved, key=evidence_priority):
             if item.get("source") not in {"relation", "property"}:
@@ -242,14 +272,6 @@ class DatasetPipeline(object):
         score = float(verification["score"])
         bonus = 0.0
 
-        if "because" in text or "due to" in text or "indicated by" in text:
-            bonus += 0.05
-        if "fault" in text:
-            bonus += 0.08
-        if "closure" in text:
-            bonus += 0.08
-        if "fluid" in text or "oil" in text or "gas" in text or "brine" in text:
-            bonus += 0.05
         if any(token in text for token in ("x=", "y=", "z=", "throw", "voxels")):
             bonus -= 0.20
         count_bonus = cls.count_specificity_bonus(text, verification)
@@ -257,6 +279,8 @@ class DatasetPipeline(object):
         if "category" in text or text.startswith("the sample belongs to"):
             bonus -= 0.30
         if text.startswith("has_category:"):
+            bonus -= 0.50
+        if not text.endswith((".", "!", "?")):
             bonus -= 0.50
 
         return score + bonus
@@ -317,8 +341,19 @@ class DatasetPipeline(object):
         }
         return mapping.get(count)
 
+    def is_task_supported_hypothesis(self, hypothesis):
+        if self.task != "fault_detection":
+            return True
+        text = hypothesis.lower()
+        if "fault" not in text:
+            return False
+        blocked_terms = ("closure", "fluid", "hydrocarbon", "oil", "gas", "brine", "salt", "trap")
+        return not any(term in text for term in blocked_terms)
+
     @staticmethod
-    def instruction_text():
+    def instruction_text(task="structural_interpretation"):
+        if task == "fault_detection":
+            return "Detect and describe faults in the seismic sample. State if no fault evidence is present."
         return "Describe the structural interpretation of the seismic sample, focusing on faults, closures, fluids, and related structures."
 
     @staticmethod
@@ -406,6 +441,28 @@ class DatasetWatcher(FileSystemEventHandler):
             observer.join()
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="Watch properties graphs and generate verified dataset rows.")
+    parser.add_argument("--task", default="structural_interpretation", choices=["structural_interpretation", "fault_detection"])
+    parser.add_argument("--graph-root", default=str(default_graph_root))
+    parser.add_argument("--output", default=str(default_output))
+    parser.add_argument("--max-attempts", type=int, default=10)
+    parser.add_argument("--batch-size", type=int, default=5)
+    parser.add_argument("--evidence-limit", type=int, default=100)
+    parser.add_argument("--verbose", action="store_true")
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
-    pipeline = DatasetPipeline()
-    pipeline.watch()
+    args = parse_args()
+    pipeline = DatasetPipeline(
+        graph_root=args.graph_root,
+        output_path=args.output,
+        task=args.task,
+    )
+    pipeline.watch(
+        max_attempts=args.max_attempts,
+        batch_size=args.batch_size,
+        evidence_limit=args.evidence_limit,
+        verbose=args.verbose,
+    )

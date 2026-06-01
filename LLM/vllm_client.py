@@ -14,58 +14,57 @@ from Tracer.tracer import EvidenceTracer
 DEFAULT_VLLM_ENDPOINT = "http://localhost:8000/v1/chat/completions"
 
 
-def instruction_block():
+def instruction_block(task="structural_interpretation"):
+    if task == "fault_detection":
+        return "Generate fault detection hypotheses grounded in the synthetic seismic sample evidence."
     return "Generate explanatory structural seismic interpretation hypotheses grounded in the synthetic sample evidence."
 
 
-def select_prompt_evidence(tracer, evidence_limit):
+def is_fault_evidence(item):
+    fact_name = str(item.get("fact_name", "")).lower()
+    sentence = str(item.get("sentence", "")).lower()
+    if "fault" in fact_name or "fault" in sentence:
+        return True
+    if fact_name == "has_category" and any(token in sentence for token in ("boring", "fault_only", "fault_complex")):
+        return True
+    return False
+
+
+def select_prompt_evidence(tracer, evidence_limit, task="structural_interpretation"):
     source_evidence = tracer.structural_evidence()
-    priority_order = {
-        "Fault": 0,
-        "HAS_FAULT": 1,
-        "Closure": 2,
-        "HAS_CLOSURE": 3,
-        "FaultSystem": 4,
-        "ClosureSystem": 5,
-        "ModelParameters": 6,
-        "HAS_FLUID": 7,
-        "Fluid": 8,
-        "HAS_CATEGORY": 9,
-        "Category": 10,
-        "sample": 11,
-    }
+    if task == "fault_detection":
+        source_evidence = [item for item in source_evidence if is_fault_evidence(item)]
 
-    prioritized = []
-    for index, item in enumerate(source_evidence):
-        fact_name = str(item.get("fact_name", ""))
-        if fact_name == "sample":
-            continue
-        sentence = str(item.get("sentence", "")).lower()
-        rank = priority_order.get(fact_name, 50)
-        detail_bonus = 0
-        if any(token in sentence for token in ("fault", "closure", "fluid")):
-            detail_bonus = -1
-        if fact_name in {"Category", "HAS_CATEGORY"}:
-            detail_bonus += 5
-        prioritized.append((rank + detail_bonus, index, item))
-
-    prioritized.sort(key=lambda item: (item[0], item[1]))
-    selected = [item for _, _, item in prioritized]
+    priority = {"relation": 0, "property": 1, "sample": 2}
+    selected = sorted(
+        source_evidence,
+        key=lambda item: (
+            priority.get(item.get("source"), 9),
+            str(item.get("fact_name", "")) == "HAS_CATEGORY",
+        ),
+    )
     return selected[:evidence_limit]
 
 
-def build_hypothesis_prompt(graph_path, evidence_limit=12, hypothesis_count=5):
+def build_hypothesis_prompt(graph_path, evidence_limit=12, hypothesis_count=5, task="structural_interpretation"):
     tracer = EvidenceTracer(graph_path)
-    evidence = select_prompt_evidence(tracer, evidence_limit)
+    evidence = select_prompt_evidence(tracer, evidence_limit, task=task)
     evidence_lines = "\n".join(
         f"- {item['fact_name']}: {item['sentence']}"
         for item in evidence
-    )
+    ) or "- No fault evidence was found in the graph trace."
     graph = tracer.graph
     sample_nodes = [node for node in graph.get("nodes", []) if node.get("label") == "Sample"]
     sample_id = sample_nodes[0].get("sample_id", graph_path.stem) if sample_nodes else Path(graph_path).stem
 
-    prompt = f"""Task: {instruction_block()}
+    task_rules = ""
+    if task == "fault_detection":
+        task_rules = """- Focus only on whether faults are present and how they affect visible seismic structure.
+- Do not discuss closures, fluids, hydrocarbons, salt, or traps.
+- If the evidence states zero faults or no fault evidence, produce no-fault hypotheses.
+"""
+
+    prompt = f"""Task: {instruction_block(task)}
 
 Rules:
 - Use only the evidence below.
@@ -92,12 +91,7 @@ Rules:
 - Each hypothesis should be one sentence of 18 to 45 words.
 - Stop after the final hypothesis line.
 - Never describe the output format.
-
-Good style:
-H: The seismic sample shows a faulted structural scene because it includes two realized faults and several closures containing hydrocarbon fluids.
-
-Bad style:
-H: The graph metadata records number_faults=2.
+{task_rules}
 
 Sample id: {sample_id}
 
@@ -198,6 +192,8 @@ def is_usable_hypothesis(text):
     normalized = text.lower().strip()
     if len(normalized.split()) < 6:
         return False
+    if normalized[-1:] not in {".", "!", "?"}:
+        return False
 
     banned_prefixes = (
         "has_category:",
@@ -266,6 +262,18 @@ def is_usable_hypothesis(text):
     )):
         return False
 
+    bad_endings = (
+        "because",
+        "due to",
+        "indicating",
+        "showing",
+        "suggesting",
+        "with",
+        "including",
+    )
+    if any(normalized.endswith(f" {ending}.") or normalized == f"{ending}." for ending in bad_endings):
+        return False
+
     return True
 
 
@@ -276,16 +284,18 @@ def generate_hypotheses_for_graph(
     api_key=None,
     evidence_limit=12,
     count=5,
-    max_new_tokens=512,
+    max_new_tokens=1024,
     temperature=0.7,
     top_p=0.9,
     timeout=120,
     seed=42,
+    task="structural_interpretation",
 ):
     prompt, evidence = build_hypothesis_prompt(
         graph_path,
         evidence_limit=evidence_limit,
         hypothesis_count=count,
+        task=task,
     )
     raw_output = generate_with_vllm_endpoint(
         prompt,

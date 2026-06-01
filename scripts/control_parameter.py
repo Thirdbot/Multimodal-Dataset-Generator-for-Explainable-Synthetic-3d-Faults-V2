@@ -410,28 +410,28 @@ low_level_controls = structural |structural_properties |fault_controls |geo_body
 # (you can set some type to not exists by set 0.0)
 
 high_level_controls = {
-    'sample_population': 2, # amount of sample that will be populated
+    'sample_population': 5, # amount of sample that will be populated
     # each sample that is randomly created or mixed category will be ratio
     # all-faulted has different fault-line that it will be ratio, salt-fault will be ratio
     'sample_types': [
-                     "boring",
+                     # "boring",
                      "fault_only",
                      "fault_complex",
-                     "salt_only",
-                     "salt_fault_mixed",
-                     "onlap",
-                     "depositional",
-                     "full_mixed"
+                     # "salt_only",
+                     # "salt_fault_mixed",
+                     # "onlap",
+                     # "depositional",
+                     # "full_mixed"
     ], # for dataset generations each generation will be ratio in same amount
     'ratio_per_types':{
-        "boring":0.0,
-        "fault_only":1.0,
-        "fault_complex":0.4,
-        "salt_only":0.0,
-        "salt_fault_mixed":0.0,
-        "onlap":0.0,
-        "depositional":0.0,
-        "full_mixed":0.0
+        # "boring":0.0,
+        # "fault_only":1.0,
+        # "fault_complex":0.4,
+        # "salt_only":0.0,
+        # "salt_fault_mixed":0.0,
+        # "onlap":0.0,
+        # "depositional":0.0,
+        # "full_mixed":0.0
     }
 }
 

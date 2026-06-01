@@ -215,6 +215,84 @@ def visualize(item, array, spacing, cmap, opacity, threshold, show_bounds):
     plotter.show()
 
 
+def add_highlight(plotter, sample_path, highlight_arg, spacing, cmap, opacity, threshold):
+    highlight_item = resolve_array(sample_path, highlight_arg)
+    highlight_array = load_array(highlight_item)
+    highlight_grid = build_grid(highlight_array, spacing)
+
+    if looks_like_label(highlight_item, highlight_array):
+        highlight_threshold = threshold if threshold is not None else 0.5
+        mesh = highlight_grid.threshold(value=highlight_threshold, scalars="values")
+        plotter.add_mesh(
+            mesh,
+            scalars="values",
+            cmap=cmap,
+            opacity=opacity,
+            show_scalar_bar=True,
+            categories=True,
+        )
+    else:
+        finite = highlight_array[np.isfinite(highlight_array)]
+        if finite.size == 0:
+            return
+        contour_values = np.linspace(finite.min(), finite.max(), 6)[1:-1]
+        mesh = highlight_grid.contour(isosurfaces=contour_values, scalars="values")
+        plotter.add_mesh(
+            mesh,
+            scalars="values",
+            cmap=cmap,
+            opacity=opacity,
+            show_scalar_bar=True,
+        )
+
+
+def visualize_with_highlight(
+    item,
+    array,
+    sample_path,
+    highlight,
+    spacing,
+    cmap,
+    opacity,
+    threshold,
+    highlight_cmap,
+    highlight_opacity,
+    highlight_threshold,
+    show_bounds,
+):
+    import pyvista as pv
+
+    grid = build_grid(array, spacing)
+    plotter = pv.Plotter()
+    plotter.add_axes()
+    if show_bounds:
+        plotter.show_bounds(grid="front", location="outer")
+
+    if looks_like_label(item, array):
+        label_threshold = threshold if threshold is not None else 0.5
+        mesh = grid.threshold(value=label_threshold, scalars="values")
+        plotter.add_mesh(mesh, cmap=cmap, opacity=opacity, show_scalar_bar=True)
+    else:
+        volume_opacity = opacity
+        if isinstance(opacity, float):
+            volume_opacity = "sigmoid"
+        plotter.add_volume(grid, scalars="values", cmap=cmap, opacity=volume_opacity, shade=False)
+
+    add_highlight(
+        plotter=plotter,
+        sample_path=sample_path,
+        highlight_arg=highlight,
+        spacing=spacing,
+        cmap=highlight_cmap,
+        opacity=highlight_opacity,
+        threshold=highlight_threshold if highlight_threshold is not None else threshold,
+    )
+
+    title = f"{item['group_path'].name} + {Path(highlight).name}"
+    plotter.add_text(title, font_size=10)
+    plotter.show()
+
+
 def main():
     parser = argparse.ArgumentParser(description="Display one Synthoseis sample array in 3D with PyVista.")
     parser.add_argument("sample", nargs="?", default=None, help="sample folder path under outputs/")
@@ -223,12 +301,33 @@ def main():
     parser.add_argument("--cmap", default="viridis")
     parser.add_argument("--opacity", type=float, default=0.25)
     parser.add_argument("--threshold", type=float, default=None, help="threshold for label-like arrays")
+    parser.add_argument("--highlight", default=None, help="relative .zarr path to highlight in color over the base volume")
+    parser.add_argument("--highlight-cmap", default="autumn")
+    parser.add_argument("--highlight-opacity", type=float, default=0.65)
+    parser.add_argument("--highlight-threshold", type=float, default=None)
     parser.add_argument("--show-bounds", action="store_true")
     args = parser.parse_args()
 
     sample_path = sample_path_from_arg(args.sample)
     item = resolve_array(sample_path, args.array)
     array = load_array(item)
+
+    if args.highlight:
+        visualize_with_highlight(
+            item=item,
+            array=array,
+            sample_path=sample_path,
+            highlight=args.highlight,
+            spacing=tuple(args.spacing),
+            cmap=args.cmap,
+            opacity=args.opacity,
+            threshold=args.threshold,
+            highlight_cmap=args.highlight_cmap,
+            highlight_opacity=args.highlight_opacity,
+            highlight_threshold=args.highlight_threshold,
+            show_bounds=args.show_bounds,
+        )
+        return
 
     visualize(
         item=item,

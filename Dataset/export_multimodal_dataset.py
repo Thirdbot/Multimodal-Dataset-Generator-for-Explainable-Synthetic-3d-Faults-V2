@@ -73,6 +73,16 @@ def select_fault_segments_item(sample_path):
     return None
 
 
+def select_first_existing(sample_path, candidates):
+    arrays = list_arrays(sample_path)
+    for candidate in candidates:
+        for item in arrays:
+            rel = item["group_path"].relative_to(sample_path).as_posix()
+            if rel == candidate or rel.endswith(candidate):
+                return item
+    return None
+
+
 def clip_normalize(slice_2d):
     finite = slice_2d[np.isfinite(slice_2d)]
     if finite.size == 0:
@@ -164,8 +174,8 @@ def choose_fault_heuristic(graph, shape):
     }
 
 
-def fault_volume_indices(fault_volume):
-    occupancy = np.nan_to_num(fault_volume, nan=0.0)
+def target_volume_indices(target_volume, source_name):
+    occupancy = np.nan_to_num(target_volume, nan=0.0)
     inline_scores = occupancy.sum(axis=(1, 2))
     crossline_scores = occupancy.sum(axis=(0, 2))
     timeslice_scores = occupancy.sum(axis=(0, 1))
@@ -177,11 +187,15 @@ def fault_volume_indices(fault_volume):
         "inline": int(np.argmax(inline_scores)),
         "crossline": int(np.argmax(crossline_scores)),
         "timeslice": int(np.argmax(timeslice_scores)),
-        "source": "fault_segments",
+        "source": source_name,
     }
 
 
-def select_view_indices(volume, graph=None, fault_volume=None):
+def clamp_index(index, axis_len):
+    return int(np.clip(int(index), 0, axis_len - 1))
+
+
+def select_view_indices(volume, graph=None, target_volume=None, target_source="target_mask"):
     amplitude = np.abs(np.nan_to_num(volume, nan=0.0))
     inline_scores = amplitude.mean(axis=(1, 2))
     crossline_scores = amplitude.mean(axis=(0, 2))
@@ -192,15 +206,15 @@ def select_view_indices(volume, graph=None, fault_volume=None):
     methods = {}
 
     fault_choice = choose_fault_heuristic(graph, volume.shape)
-    fault_volume_choice = fault_volume_indices(fault_volume) if fault_volume is not None else None
+    target_choice = target_volume_indices(target_volume, target_source) if target_volume is not None else None
 
-    if fault_volume_choice:
-        selected["inline"] = fault_volume_choice["inline"]
-        methods["inline"] = fault_volume_choice["source"]
-        selected["crossline"] = fault_volume_choice["crossline"]
-        methods["crossline"] = fault_volume_choice["source"]
-        selected["timeslice"] = fault_volume_choice["timeslice"]
-        methods["timeslice"] = fault_volume_choice["source"]
+    if target_choice:
+        selected["inline"] = clamp_index(target_choice["inline"], volume.shape[0])
+        methods["inline"] = target_choice["source"]
+        selected["crossline"] = clamp_index(target_choice["crossline"], volume.shape[1])
+        methods["crossline"] = target_choice["source"]
+        selected["timeslice"] = clamp_index(target_choice["timeslice"], volume.shape[2])
+        methods["timeslice"] = target_choice["source"]
 
     if "inline" not in selected and fault_choice.get("inline") is not None:
         selected["inline"] = fault_choice["inline"]
@@ -236,14 +250,19 @@ def select_view_indices(volume, graph=None, fault_volume=None):
         "crossline": selected["crossline"],
         "timeslice": selected["timeslice"],
         "methods": methods,
-        "fault_volume_used": bool(fault_volume_choice),
+        "target_volume_used": bool(target_choice),
         "target_closure": closure_choice.get("closure") if closure_choice else None,
         "target_fault": fault_choice.get("fault") if fault_choice else None,
     }
 
 
-def build_views(volume, graph=None, fault_volume=None):
-    indices = select_view_indices(volume, graph=graph, fault_volume=fault_volume)
+def build_views(volume, graph=None, target_volume=None, target_source="target_mask"):
+    indices = select_view_indices(
+        volume,
+        graph=graph,
+        target_volume=target_volume,
+        target_source=target_source,
+    )
     inline = clip_normalize(volume[indices["inline"], :, :].T)
     crossline = clip_normalize(volume[:, indices["crossline"], :].T)
     timeslice = clip_normalize(volume[:, :, indices["timeslice"]].T)
@@ -253,6 +272,117 @@ def build_views(volume, graph=None, fault_volume=None):
         "timeslice": timeslice,
         "indices": indices,
     }
+
+
+def build_overlay_views(mask_volume, indices):
+    binary = np.nan_to_num(mask_volume, nan=0.0)
+    inline_idx = clamp_index(indices["inline"], binary.shape[0])
+    crossline_idx = clamp_index(indices["crossline"], binary.shape[1])
+    timeslice_idx = clamp_index(indices["timeslice"], binary.shape[2])
+    inline = (binary[inline_idx, :, :].T > 0).astype(np.float32)
+    crossline = (binary[:, crossline_idx, :].T > 0).astype(np.float32)
+    timeslice = (binary[:, :, timeslice_idx].T > 0).astype(np.float32)
+    return {
+        "inline": inline,
+        "crossline": crossline,
+        "timeslice": timeslice,
+    }
+
+
+def align_overlay_mask(overlay_mask, target_shape):
+    target_h, target_w = target_shape
+    src_h, src_w = overlay_mask.shape
+
+    aligned = np.zeros((target_h, target_w), dtype=np.float32)
+    copy_h = min(target_h, src_h)
+    copy_w = min(target_w, src_w)
+    aligned[:copy_h, :copy_w] = overlay_mask[:copy_h, :copy_w]
+    return aligned
+
+
+def choose_overlay_source(sample_path, source_row, graph, fault_segments_item, task="structural_interpretation"):
+    evidence = source_row.get("evidence", [])
+    answer = str(source_row.get("answer", "")).lower()
+    fact_names = [str(item.get("fact_name", "")) for item in evidence]
+
+    if task == "fault_detection":
+        if fault_segments_item is None:
+            return None
+        return {
+            "kind": "fault",
+            "item": fault_segments_item,
+            "color": "#ef4444",
+        }
+
+    target_closure = None
+    for node in graph.get("nodes", []):
+        if node.get("label") == "Closure":
+            target_closure = node
+            break
+
+    # Answer topic should dominate overlay choice.
+    if "fault" in answer and fault_segments_item is not None:
+        return {
+            "kind": "fault",
+            "item": fault_segments_item,
+            "color": "#ef4444",
+        }
+
+    if any(token in answer for token in ("closure", "oil", "gas", "brine")) and target_closure:
+        fluid = str(target_closure.get("fluid", "")).lower()
+        fluid_item = select_first_existing(sample_path, [f"closures/{fluid}.zarr"]) if fluid else None
+        if fluid_item:
+            return {
+                "kind": f"closure_{fluid}",
+                "item": fluid_item,
+                "color": overlay_color_for_kind(fluid),
+            }
+
+    fault_priority = (
+        fault_segments_item is not None and
+        any(name in {"Fault", "HAS_FAULT", "FaultSystem"} for name in fact_names)
+    )
+    if fault_priority:
+        return {
+            "kind": "fault",
+            "item": fault_segments_item,
+            "color": "#ef4444",
+        }
+
+    if target_closure:
+        fluid = str(target_closure.get("fluid", "")).lower()
+        fluid_item = select_first_existing(sample_path, [f"closures/{fluid}.zarr"]) if fluid else None
+        if fluid_item:
+            return {
+                "kind": f"closure_{fluid}",
+                "item": fluid_item,
+                "color": overlay_color_for_kind(fluid),
+            }
+
+    hc_item = select_first_existing(sample_path, ["closures/hc_labels.zarr", "all_closure_segments"])
+    if hc_item:
+        return {
+            "kind": "closure",
+            "item": hc_item,
+            "color": "#f59e0b",
+        }
+
+    if fault_segments_item is not None:
+        return {
+            "kind": "fault",
+            "item": fault_segments_item,
+            "color": "#ef4444",
+        }
+
+    return None
+
+
+def overlay_color_for_kind(kind):
+    return {
+        "oil": "#f59e0b",
+        "gas": "#22c55e",
+        "brine": "#38bdf8",
+    }.get(str(kind).lower(), "#ef4444")
 
 
 def render_panel(sample_id, seismic_name, views, output_path):
@@ -292,18 +422,96 @@ def render_panel(sample_id, seismic_name, views, output_path):
     plt.close(fig)
 
 
-def multimodal_row(source_row, image_path, seismic_relpath, slice_indices):
+def render_overlay_panel(sample_id, seismic_name, views, overlay_views, overlay_kind, overlay_color, output_path):
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    fig, axes = plt.subplots(1, 3, figsize=(14, 5), dpi=180)
+    fig.patch.set_facecolor("black")
+
+    panel_defs = [
+        (
+            "Inline",
+            views["inline"],
+            overlay_views["inline"],
+            f"i={views['indices']['inline']} [{views['indices']['methods'].get('inline', 'unknown')}]",
+        ),
+        (
+            "Crossline",
+            views["crossline"],
+            overlay_views["crossline"],
+            f"x={views['indices']['crossline']} [{views['indices']['methods'].get('crossline', 'unknown')}]",
+        ),
+        (
+            "Timeslice",
+            views["timeslice"],
+            overlay_views["timeslice"],
+            f"t={views['indices']['timeslice']} [{views['indices']['methods'].get('timeslice', 'unknown')}]",
+        ),
+    ]
+
+    rgb = np.array(plt.matplotlib.colors.to_rgb(overlay_color), dtype=np.float32)
+    for ax, (title, image, overlay_mask, subtitle) in zip(axes, panel_defs):
+        overlay_mask = align_overlay_mask(overlay_mask, image.shape)
+        base_rgb = np.dstack([image, image, image])
+        alpha = overlay_mask[..., None] * 0.55
+        overlay_rgb = np.ones_like(base_rgb) * rgb
+        composite = base_rgb * (1.0 - alpha) + overlay_rgb * alpha
+        ax.imshow(composite, aspect="auto", origin="lower")
+        ax.set_title(f"{title}\n{subtitle}", color="white", fontsize=10)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.set_facecolor("black")
+
+    fig.suptitle(f"{sample_id}\n{seismic_name} + {overlay_kind}", color="white", fontsize=11)
+    fig.tight_layout()
+    fig.savefig(output_path, facecolor=fig.get_facecolor(), bbox_inches="tight")
+    plt.close(fig)
+
+
+def render_mask_panel(sample_id, overlay_views, overlay_kind, output_path):
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    fig, axes = plt.subplots(1, 3, figsize=(14, 5), dpi=180)
+    fig.patch.set_facecolor("black")
+    panel_defs = [
+        ("Inline", overlay_views["inline"]),
+        ("Crossline", overlay_views["crossline"]),
+        ("Timeslice", overlay_views["timeslice"]),
+    ]
+
+    for ax, (title, image) in zip(axes, panel_defs):
+        ax.imshow(image, cmap="gray", aspect="auto", origin="lower")
+        ax.set_title(title, color="white", fontsize=10)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.set_facecolor("black")
+
+    fig.suptitle(f"{sample_id}\n{overlay_kind} mask", color="white", fontsize=11)
+    fig.tight_layout()
+    fig.savefig(output_path, facecolor=fig.get_facecolor(), bbox_inches="tight")
+    plt.close(fig)
+
+
+def multimodal_row(source_row, image_path, overlay_image_path, mask_image_path, seismic_relpath, overlay_relpath, overlay_kind, slice_indices):
     instruction = source_row["instruction"]
     answer = source_row["answer"]
     sample_id = source_row["sample_id"]
+    trace = source_row.get("trace", {})
+    verification = source_row.get("verification", {})
+    deciding_evidence = trace.get("deciding_evidence") or {}
+    if not deciding_evidence and source_row.get("evidence"):
+        deciding_evidence = source_row["evidence"][0]
 
     return {
         "id": sample_id,
         "sample_id": sample_id,
-        "image": image_path.as_posix(),
         "instruction": instruction,
         "input": "",
         "answer": answer,
+        "image": image_path.as_posix(),
+        "overlay_image": overlay_image_path.as_posix() if overlay_image_path else "",
+        "mask_image": mask_image_path.as_posix() if mask_image_path else "",
+        "overlay_kind": overlay_kind or "",
         "messages": [
             {
                 "role": "user",
@@ -320,21 +528,64 @@ def multimodal_row(source_row, image_path, seismic_relpath, slice_indices):
             },
         ],
         "metadata": {
-            **source_row.get("metadata", {}),
-            "source_verified_sample_id": sample_id,
+            "graph_path": source_row.get("metadata", {}).get("graph_path", ""),
+            "category": source_row.get("metadata", {}).get("category", ""),
             "seismic_array": seismic_relpath,
+            "overlay_array": overlay_relpath or "",
             "view_indices": slice_indices,
             "render_type": "three_view_seismic_panel",
-            "view_selection": slice_indices.get("methods", {}),
-            "target_closure": slice_indices.get("target_closure"),
-            "target_fault": slice_indices.get("target_fault"),
         },
-        "evidence": source_row.get("evidence", []),
-        "verification": source_row.get("verification", {}),
+        "trace": {
+            "graph_trace": trace.get("graph_trace", source_row.get("evidence", [])),
+            "llm_prompt": trace.get("llm_prompt", ""),
+            "llm_raw_output": trace.get("llm_raw_output", ""),
+            "llm_answer": trace.get("llm_answer", answer),
+            "nli_status": verification.get("status", ""),
+            "nli_score": verification.get("score", ""),
+            "nli_model": trace.get("nli_model", ""),
+            "nli_deciding_evidence": deciding_evidence,
+            "nli_retrieved_evidence": trace.get("retrieved_evidence", source_row.get("evidence", [])),
+        },
     }
 
 
-def export_dataset(verified_path, output_path, image_dir, limit=None):
+def is_exportable_answer(text):
+    text = str(text or "").strip()
+    if len(text.split()) < 6:
+        return False
+    if text[-1:] not in {".", "!", "?"}:
+        return False
+    lowered = text.lower()
+    bad_endings = (
+        "because",
+        "due to",
+        "indicating",
+        "showing",
+        "suggesting",
+        "with",
+        "including",
+    )
+    if any(lowered.endswith(f" {ending}.") or lowered == f"{ending}." for ending in bad_endings):
+        return False
+    return True
+
+
+def is_no_fault_answer(text):
+    text = str(text or "").lower()
+    no_fault_phrases = (
+        "no fault",
+        "no faults",
+        "without fault",
+        "without faults",
+        "does not contain fault",
+        "does not contain faults",
+        "no fault evidence",
+        "zero faults",
+    )
+    return any(phrase in text for phrase in no_fault_phrases)
+
+
+def export_dataset(verified_path, output_path, image_dir, limit=None, task="structural_interpretation"):
     rows = load_verified_rows(verified_path)
     image_dir = Path(image_dir)
     output_path = Path(output_path)
@@ -348,16 +599,33 @@ def export_dataset(verified_path, output_path, image_dir, limit=None):
     for row in source_rows:
         sample_id = row["sample_id"]
         try:
+            if not is_exportable_answer(row.get("answer", "")):
+                raise ValueError("answer is incomplete or not training-ready")
+
             sample_path = resolve_sample_folder(sample_id)
             seismic_item = select_seismic_item(sample_path)
             fault_segments_item = select_fault_segments_item(sample_path)
+            if task == "fault_detection" and "fault" not in str(row.get("answer", "")).lower():
+                raise ValueError("fault_detection row does not contain a fault statement")
+            if task == "fault_detection" and fault_segments_item is None and not is_no_fault_answer(row.get("answer", "")):
+                raise ValueError("positive fault_detection row has no fault mask")
+
             volume = load_array(seismic_item)
-            fault_volume = load_array(fault_segments_item) if fault_segments_item else None
             graph_path = row.get("metadata", {}).get("graph_path")
             graph = load_graph(graph_path) if graph_path else {"nodes": [], "edges": []}
-            views = build_views(volume, graph=graph, fault_volume=fault_volume)
+            overlay_source = choose_overlay_source(sample_path, row, graph, fault_segments_item, task=task)
+            overlay_volume = load_array(overlay_source["item"]) if overlay_source else None
+            view_graph = graph if task != "fault_detection" or fault_segments_item is not None else {"nodes": [], "edges": []}
+            views = build_views(
+                volume,
+                graph=view_graph,
+                target_volume=overlay_volume,
+                target_source=overlay_source["kind"] if overlay_source else "amplitude_max",
+            )
 
             image_path = image_dir / f"{sample_id}.png"
+            overlay_image_path = image_dir / f"{sample_id}_overlay.png"
+            mask_image_path = image_dir / f"{sample_id}_mask.png"
             seismic_relpath = seismic_item["group_path"].relative_to(sample_path).as_posix()
             render_panel(
                 sample_id=sample_id,
@@ -366,14 +634,51 @@ def export_dataset(verified_path, output_path, image_dir, limit=None):
                 output_path=image_path,
             )
 
-            exported.append(
-                multimodal_row(
-                    source_row=row,
-                    image_path=image_path,
-                    seismic_relpath=seismic_relpath,
-                    slice_indices=views["indices"],
+            overlay_relpath = ""
+            overlay_kind = ""
+            if overlay_source:
+                overlay_views = build_overlay_views(overlay_volume, views["indices"])
+                overlay_kind = overlay_source["kind"]
+                overlay_relpath = overlay_source["item"]["group_path"].relative_to(sample_path).as_posix()
+                render_overlay_panel(
+                    sample_id=sample_id,
+                    seismic_name=seismic_relpath,
+                    views=views,
+                    overlay_views=overlay_views,
+                    overlay_kind=overlay_kind,
+                    overlay_color=overlay_source["color"],
+                    output_path=overlay_image_path,
                 )
+                render_mask_panel(
+                    sample_id=sample_id,
+                    overlay_views=overlay_views,
+                    overlay_kind=overlay_kind,
+                    output_path=mask_image_path,
+                )
+            else:
+                overlay_image_path = None
+                mask_image_path = None
+
+            exported_row = multimodal_row(
+                source_row=row,
+                image_path=image_path,
+                overlay_image_path=overlay_image_path,
+                mask_image_path=mask_image_path,
+                seismic_relpath=seismic_relpath,
+                overlay_relpath=overlay_relpath,
+                overlay_kind=overlay_kind,
+                slice_indices=views["indices"],
             )
+            exported_row["metadata"]["task"] = task
+            if overlay_image_path is not None:
+                exported_row["messages"][0]["content"].append(
+                    {"type": "image", "image": overlay_image_path.as_posix()}
+                )
+            if mask_image_path is not None:
+                exported_row["messages"][0]["content"].append(
+                    {"type": "image", "image": mask_image_path.as_posix()}
+                )
+            exported.append(exported_row)
         except Exception as exc:
             skipped.append({
                 "sample_id": sample_id,
@@ -401,30 +706,75 @@ def write_csv(output_path, rows):
     fieldnames = [
         "id",
         "sample_id",
-        "image",
         "instruction",
         "input",
         "answer",
-        "metadata_json",
-        "evidence_json",
-        "verification_json",
+        "image",
+        "overlay_image",
+        "mask_image",
+        "overlay_kind",
+        "view_inline",
+        "view_crossline",
+        "view_timeslice",
+        "view_mode_inline",
+        "view_mode_crossline",
+        "view_mode_timeslice",
+        "graph_path",
+        "seismic_array",
+        "overlay_array",
+        "llm_answer",
+        "llm_raw_output",
+        "nli_status",
+        "nli_score",
+        "nli_model",
+        "nli_deciding_sentence",
+        "nli_deciding_evidence_json",
+        "llm_prompt",
+        "graph_trace_json",
+        "nli_retrieved_evidence_json",
         "messages_json",
+        "metadata_json",
     ]
     with open(output_path, "w", newline="") as file:
         writer = csv.DictWriter(file, fieldnames=fieldnames)
         writer.writeheader()
         for row in rows:
+            metadata = row.get("metadata", {})
+            trace = row.get("trace", {})
+            deciding = trace.get("nli_deciding_evidence", {}) or {}
+            view_indices = metadata.get("view_indices", {})
+            view_selection = view_indices.get("methods", {})
             writer.writerow({
                 "id": row["id"],
                 "sample_id": row["sample_id"],
-                "image": row["image"],
                 "instruction": row["instruction"],
                 "input": row["input"],
                 "answer": row["answer"],
-                "metadata_json": json.dumps(row.get("metadata", {})),
-                "evidence_json": json.dumps(row.get("evidence", [])),
-                "verification_json": json.dumps(row.get("verification", {})),
+                "image": row["image"],
+                "overlay_image": row.get("overlay_image", ""),
+                "mask_image": row.get("mask_image", ""),
+                "overlay_kind": row.get("overlay_kind", ""),
+                "view_inline": view_indices.get("inline"),
+                "view_crossline": view_indices.get("crossline"),
+                "view_timeslice": view_indices.get("timeslice"),
+                "view_mode_inline": view_selection.get("inline", ""),
+                "view_mode_crossline": view_selection.get("crossline", ""),
+                "view_mode_timeslice": view_selection.get("timeslice", ""),
+                "graph_path": metadata.get("graph_path", ""),
+                "seismic_array": metadata.get("seismic_array", ""),
+                "overlay_array": metadata.get("overlay_array", ""),
+                "llm_answer": trace.get("llm_answer", row["answer"]),
+                "llm_raw_output": trace.get("llm_raw_output", ""),
+                "nli_status": trace.get("nli_status", ""),
+                "nli_score": trace.get("nli_score", ""),
+                "nli_model": trace.get("nli_model", ""),
+                "nli_deciding_sentence": deciding.get("sentence", ""),
+                "nli_deciding_evidence_json": json.dumps(deciding),
+                "llm_prompt": trace.get("llm_prompt", ""),
+                "graph_trace_json": json.dumps(trace.get("graph_trace", [])),
+                "nli_retrieved_evidence_json": json.dumps(trace.get("nli_retrieved_evidence", [])),
                 "messages_json": json.dumps(row.get("messages", [])),
+                "metadata_json": json.dumps(metadata),
             })
 
 
@@ -436,6 +786,7 @@ def parse_args():
     parser.add_argument("--output", default=str(DEFAULT_OUTPUT))
     parser.add_argument("--image-dir", default=str(DEFAULT_IMAGE_DIR))
     parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument("--task", default="structural_interpretation", choices=["structural_interpretation", "fault_detection"])
     return parser.parse_args()
 
 
@@ -446,6 +797,7 @@ def main():
         output_path=args.output,
         image_dir=args.image_dir,
         limit=args.limit,
+        task=args.task,
     )
     print(json.dumps(result, indent=2))
 
