@@ -19,3 +19,6 @@ runs/
 configs/
 recipes/
 traces/
+Dataset/verified_hypotheses.jsonl
+Dataset/multimodal_verified_dataset.csv
+Dataset/multimodal_images/

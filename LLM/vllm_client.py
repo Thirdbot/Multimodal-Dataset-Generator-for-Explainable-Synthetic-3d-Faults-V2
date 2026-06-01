@@ -82,6 +82,7 @@ Rules:
 - Each hypothesis may include a short evidence phrase using because, due to, or indicated by.
 - Prefer qualitative summaries over exact coordinates or parameter values.
 - If the evidence contains small counts, write them as words such as one, two, or three instead of digits.
+- If the evidence states a fault count or closure count, prefer that explicit count in words instead of vague phrases like multiple, several, or many.
 - Avoid exact x/y/z coordinates, voxel totals, throw values, and other dense numeric details unless there is no other way to make a correct statement.
 - Do not mention graph, metadata, database, model parameters, or file paths.
 - Do not repeat or paraphrase the task instructions.

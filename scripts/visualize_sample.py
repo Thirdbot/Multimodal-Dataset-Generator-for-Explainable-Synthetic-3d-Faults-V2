@@ -163,7 +163,8 @@ def load_array(item):
                 k1 = min(k0 + chunk_shape[2], shape[2])
 
                 subshape = (i1 - i0, j1 - j0, k1 - k0)
-                array[i0:i1, j0:j1, k0:k1] = chunk.reshape(subshape, order="C")
+                chunk_full = chunk.reshape(chunk_shape, order="C")
+                array[i0:i1, j0:j1, k0:k1] = chunk_full[:subshape[0], :subshape[1], :subshape[2]]
 
     return array
 

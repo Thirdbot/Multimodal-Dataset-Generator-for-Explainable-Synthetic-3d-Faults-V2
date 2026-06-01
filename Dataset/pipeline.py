@@ -236,8 +236,8 @@ class DatasetPipeline(object):
             })
         return compact
 
-    @staticmethod
-    def supported_candidate_score(hypothesis, verification):
+    @classmethod
+    def supported_candidate_score(cls, hypothesis, verification):
         text = hypothesis.lower()
         score = float(verification["score"])
         bonus = 0.0
@@ -252,12 +252,70 @@ class DatasetPipeline(object):
             bonus += 0.05
         if any(token in text for token in ("x=", "y=", "z=", "throw", "voxels")):
             bonus -= 0.20
+        count_bonus = cls.count_specificity_bonus(text, verification)
+        bonus += count_bonus
         if "category" in text or text.startswith("the sample belongs to"):
             bonus -= 0.30
         if text.startswith("has_category:"):
             bonus -= 0.50
 
         return score + bonus
+
+    @classmethod
+    def count_specificity_bonus(cls, text, verification):
+        evidence_text = " ".join(
+            item.get("sentence", "")
+            for item in verification.get("retrieved_evidence", [])
+        ).lower()
+        bonus = 0.0
+        generic_terms = ("multiple", "several", "many")
+
+        mappings = [
+            ("fault", cls.extract_count(evidence_text, r"with (\d+) faults?"), "fault"),
+            ("closure", cls.extract_count(evidence_text, r"with (\d+) closures?"), "closure"),
+        ]
+
+        for _, count, noun in mappings:
+            if count is None:
+                continue
+            if any(term in text for term in generic_terms):
+                bonus -= 0.15
+            words = cls.count_words(count)
+            if count <= 12 and words and f"{words} {noun}" in text:
+                bonus += 0.18
+            elif re.search(rf"\b{count}\s+{noun}s?\b", text):
+                bonus += 0.10
+
+        return bonus
+
+    @staticmethod
+    def extract_count(text, pattern):
+        match = re.search(pattern, text)
+        if not match:
+            return None
+        try:
+            return int(match.group(1))
+        except ValueError:
+            return None
+
+    @staticmethod
+    def count_words(count):
+        mapping = {
+            0: "zero",
+            1: "one",
+            2: "two",
+            3: "three",
+            4: "four",
+            5: "five",
+            6: "six",
+            7: "seven",
+            8: "eight",
+            9: "nine",
+            10: "ten",
+            11: "eleven",
+            12: "twelve",
+        }
+        return mapping.get(count)
 
     @staticmethod
     def instruction_text():
