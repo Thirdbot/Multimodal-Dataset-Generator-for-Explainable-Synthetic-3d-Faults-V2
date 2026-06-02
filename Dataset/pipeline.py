@@ -34,6 +34,7 @@ class DatasetPipeline(object):
         self.graph_root = Path(graph_root)
         self.output_path = Path(output_path)
         self.task = task
+        self.nli_totals = {"entail": 0, "contradict": 0, "neutral": 0}
         self.llm_config = self.load_config(llm_config_path)
         self.nli_config = self.load_config(nli_config_path)
         self.rows = self.load_existing_rows()
@@ -48,6 +49,7 @@ class DatasetPipeline(object):
         seen = set()
         sample_id = self.sample_id_from_graph(graph_path)
         supported = []
+        nli_counts = {"entail": 0, "contradict": 0, "neutral": 0}
 
         for attempt in range(1, max_attempts + 1):
             generation = generate_hypotheses_for_graph(
@@ -67,6 +69,8 @@ class DatasetPipeline(object):
                 seen.add(normalized)
 
                 verification = self.verifier.verify_graph_claim(graph_path, hypothesis)
+                nli_bucket = self.nli_bucket(verification)
+                nli_counts[nli_bucket] += 1
                 if verbose:
                     logger.info(
                         f"[{sample_id}] {verification['status']} {verification['score']:.3f}: {hypothesis}"
@@ -126,6 +130,7 @@ class DatasetPipeline(object):
                 "tested_hypotheses": len(seen),
                 "supported_candidates": len(supported),
                 "nli_score": best["verification"]["score"],
+                "nli_counts": nli_counts,
                 "answer": best["hypothesis"],
             }
 
@@ -136,6 +141,7 @@ class DatasetPipeline(object):
             "attempts": max_attempts,
             "tested_hypotheses": len(seen),
             "supported_candidates": 0,
+            "nli_counts": nli_counts,
         }
 
     def process_graph(self, graph_path, max_attempts=5, batch_size=3, evidence_limit=12, verbose=False):
@@ -157,6 +163,7 @@ class DatasetPipeline(object):
             logger.warning(
                 f"[DATASET SKIP] -> Sample: {sample_id} Status: {status['status']}"
             )
+            self.accumulate_nli_counts(status.get("nli_counts", {}))
             self.log_summary(status)
             return status
 
@@ -165,17 +172,38 @@ class DatasetPipeline(object):
         logger.info(
             f"[DATASET SAVE] -> Sample: {sample_id} Output: {self.output_path}"
         )
+        self.accumulate_nli_counts(status.get("nli_counts", {}))
         self.log_summary(status)
         return status
 
+    def accumulate_nli_counts(self, counts):
+        for key in self.nli_totals:
+            self.nli_totals[key] += int(counts.get(key, 0) or 0)
+
+    @staticmethod
+    def nli_bucket(verification):
+        status = str(verification.get("status", "")).lower()
+        if status == "supported":
+            return "entail"
+        if status == "contradicted":
+            return "contradict"
+        return "neutral"
+
     def log_summary(self, status):
+        counts = status.get("nli_counts", {})
         logger.info(
             "[DATASET SUMMARY] -> "
             f"Sample: {status.get('sample_id')} "
             f"Task: {status.get('task')} "
             f"Status: {status.get('status')} "
             f"Tested: {status.get('tested_hypotheses', 0)} "
-            f"Supported: {status.get('supported_candidates', 0)}"
+            f"Supported: {status.get('supported_candidates', 0)} "
+            f"NLI(sample): entail={counts.get('entail', 0)} "
+            f"contradict={counts.get('contradict', 0)} "
+            f"neutral={counts.get('neutral', 0)} "
+            f"NLI(total): entail={self.nli_totals['entail']} "
+            f"contradict={self.nli_totals['contradict']} "
+            f"neutral={self.nli_totals['neutral']}"
         )
         if status.get("answer"):
             logger.info(
