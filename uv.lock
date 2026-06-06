@@ -2143,12 +2143,22 @@ wheels = [
 ]
 
 [[package]]
+name = "simplenlg"
+version = "0.2.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/06/42/4fbe010763a7f2a2db34aaa78be0baa4d7b8debfad745c6d0e3854e973a6/simplenlg-0.2.0.tar.gz", hash = "sha256:bc3b6490a32f83e9ec8920f2631981accf4c06ce7d796427e292a31e8250c856", size = 51437, upload-time = "2019-01-26T14:27:16.174Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/fb/81/2394ff7f3d562f2229e4b4859d66913296d96e409db1443f226aeaa840df/simplenlg-0.2.0-py3-none-any.whl", hash = "sha256:1d258cf6e76a20c0dc97a10775632d32cdd00ef3f7fe1ae8c96c657c4e505e88", size = 165135, upload-time = "2019-01-26T14:27:13.694Z" },
+]
+
+[[package]]
 name = "simulationv2"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "neo4j" },
     { name = "pyvista" },
+    { name = "simplenlg" },
     { name = "torch" },
     { name = "tqdm" },
     { name = "transformers" },
@@ -2184,6 +2194,7 @@ synthoseis = [
 requires-dist = [
     { name = "neo4j", specifier = ">=6.2.0" },
     { name = "pyvista", specifier = ">=0.48.4" },
+    { name = "simplenlg", specifier = ">=0.2.0" },
     { name = "torch", specifier = ">=2.12.0" },
     { name = "tqdm", specifier = ">=4.67.3" },
     { name = "transformers", specifier = ">=5.9.0" },

@@ -8,11 +8,11 @@ from yaml_helper import YAMLHelper
 
 
 class GraphSystem:
-    def __init__(self, traces_path=None):
+    def __init__(self):
         self.graph = nx.MultiDiGraph()
         self.traces_path = None
-    def build(self,trace_path):
-        self._add_trace(trace_path)
+    def build(self,trace_path,the_great_filter):
+        self._add_trace(trace_path,the_great_filter)
         self.traces_path = trace_path
         return self.graph
 
@@ -57,7 +57,7 @@ class GraphSystem:
             "edge_types": edge_types,
         }
 
-    def _add_trace(self, trace_path):
+    def _add_trace(self, trace_path,the_great_filter):
         data = json.loads(trace_path.read_text())
         model_rows = data.get("model_parameters", [])
         if not model_rows:
@@ -65,130 +65,35 @@ class GraphSystem:
 
         model = model_rows[0]
         model_id = model["model_id"]
-        ids = self._parse_model_id(model_id)
+        category = self._parse_model_id(model_id)
 
-        recipe_id = ids["recipe_id"]
-        sample_id = ids["sample_id"]
-        category = ids["category"]
-
-        recipe_node = f"recipe:{recipe_id}"
-        sample_node = f"sample:{sample_id}"
         category_node = f"category:{category}"
-        run_node = f"build_run:{model_id}"
-        model_node = f"model_parameters:{model_id}"
-        artifact_node = f"artifact:{model_id}:output_folder"
 
-        self.graph.add_node(recipe_node, label="Recipe", recipe_id=recipe_id)
-        self.graph.add_node(sample_node, label="Sample", sample_id=sample_id)
-        self.graph.add_node(category_node, label="Category", name=category)
-        self.graph.add_node(
-            run_node,
-            label="BuildRun",
-            model_id=model_id,
-            output_folder=model.get("work_subfolder"),
-            start_time=model.get("start_time"),
-            elapsed_time=model.get("elapsed_time"),
-        )
-        self.graph.add_node(
-            model_node,
-            label="ModelParameters",
-            **self._pick_model_properties(model),
-        )
-        self.graph.add_node(
-            artifact_node,
-            label="Artifact",
-            artifact_type="output_folder",
-            path=model.get("work_subfolder"),
-        )
+        self._add_by_filter(category_node,data,the_great_filter)
 
-        self.graph.add_edge(recipe_node, sample_node, type="DEFINES")
-        self.graph.add_edge(sample_node, category_node, type="HAS_CATEGORY")
-        self.graph.add_edge(sample_node, run_node, type="BUILT_AS")
-        self.graph.add_edge(run_node, model_node, type="HAS_MODEL_PARAMETERS")
-        self.graph.add_edge(run_node, artifact_node, type="PRODUCED")
+    def _add_by_filter(self,category_node,data,the_great_filter):
+        tables = the_great_filter.get("tables")
+        model_properties = self._pick(data.get("model_parameters",[{}])[0], the_great_filter.get("model_keys"))
+        if category_node == "category:boring":
+            model_properties.pop("number_faults", None)
+            model_properties.pop("fault_mode", None)
+        self.graph.add_node(category_node, **model_properties)  # category get its properties
+        for table in tables:
+            if table == "model_parameters":
+                continue
+            table_name = table.split('_')[0] # fault and closure
+            if data.get(table) is not None:
+                self.graph.add_edge(category_node,f"{table_name}",type=f"HAS_{table_name.upper()}")
+            for idx in range(len(data.get(table,[]))): # get all rows
+                self.graph.add_node(f"{table_name}_{idx}",**self._pick(data.get(table,[{}])[idx],the_great_filter.get(f"{table_name}_keys"))) # get keys by table name closure_list and fault_list
+                self.graph.add_edge(f"{table_name}",f"{table_name}_{idx}",type="REALIZED")
 
-        self._add_faults(run_node, model_id, data.get("fault_parameters", []))
-        self._add_closures(run_node, model_id, data.get("closure_parameters", []))
-
-    def _add_faults(self, run_node, model_id, faults):
-        fault_system_node = f"fault_system:{model_id}"
-        self.graph.add_node(
-            fault_system_node,
-            label="FaultSystem",
-            realized_faults=len(faults),
-        )
-        self.graph.add_edge(run_node, fault_system_node, type="REALIZED")
-
-        for index, fault in enumerate(faults, start=1):
-            fault_node = f"fault:{model_id}:{index}"
-            self.graph.add_node(
-                fault_node,
-                label="Fault",
-                fault_index=index,
-                **self._pick(fault, [
-                    "a",
-                    "b",
-                    "c",
-                    "x0",
-                    "y0",
-                    "z0",
-                    "throw",
-                    "tilt_pct",
-                    "shear_zone_width",
-                    "gouge_pctile",
-                ]),
-            )
-            self.graph.add_edge(fault_system_node, fault_node, type="HAS_FAULT")
-
-    def _add_closures(self, run_node, model_id, closures):
-        closure_system_node = f"closure_system:{model_id}"
-        self.graph.add_node(
-            closure_system_node,
-            label="ClosureSystem",
-            realized_closures=len(closures),
-        )
-        self.graph.add_edge(run_node, closure_system_node, type="REALIZED")
-
-        for index, closure in enumerate(closures, start=1):
-            closure_node = f"closure:{model_id}:{index}"
-            fluid = closure.get("fluid")
-            self.graph.add_node(
-                closure_node,
-                label="Closure",
-                closure_index=index,
-                **self._pick(closure, [
-                    "fluid",
-                    "n_voxels",
-                    "x_min",
-                    "x_max",
-                    "y_min",
-                    "y_max",
-                    "z_min",
-                    "z_max",
-                    "intersects_fault",
-                    "intersects_onlap",
-                    "intersects_salt",
-                    "intercept_avg",
-                    "gradient_avg",
-                ]),
-            )
-            self.graph.add_edge(closure_system_node, closure_node, type="HAS_CLOSURE")
-
-            if fluid:
-                fluid_node = f"fluid:{fluid}"
-                self.graph.add_node(fluid_node, label="Fluid", name=fluid)
-                self.graph.add_edge(closure_node, fluid_node, type="HAS_FLUID")
 
     def _parse_model_id(self, model_id):
         match = re.match(r"seismic__\d{4}_\d{4}_(recipe_\d+)_(.+)", model_id)
         if not match:
-            return {
-                "recipe_id": "unknown",
-                "sample_id": model_id,
-                "category": "unknown",
-            }
+            return "unknown"
 
-        recipe_id = match.group(1)
         sample_id = match.group(2)
         category = sample_id.split("_", 1)[0]
         if sample_id.startswith("fault_only_"):
@@ -202,46 +107,24 @@ class GraphSystem:
         elif sample_id.startswith("full_mixed_"):
             category = "full_mixed"
 
-        return {
-            "recipe_id": recipe_id,
-            "sample_id": sample_id,
-            "category": category,
-        }
-
-    def _pick_model_properties(self, model):
-        return self._pick(model, [
-            "cube_shape",
-            "incident_angles",
-            "number_faults",
-            "fault_mode",
-            "salt_inserted",
-            "number_onlap_episodes",
-            "onlaps_horizon_list",
-            "number_hc_closures",
-            "closure_voxel_count",
-            "closure_voxel_pct",
-            "sand_voxel_pct",
-            "sn_db",
-            "bandpass_bandlimit_low",
-            "bandpass_bandlimit_high",
-        ])
+        return category
 
     @staticmethod
     def _pick(source, keys):
         return {key: source.get(key) for key in keys if key in source}
 
 
-if __name__ == "__main__":
-    setting_path = Path(__file__).parent.parent / "settings.yaml"
-    yaml_helper = YAMLHelper(setting_path)
-    root = Path(__file__).parent.parent
-    traces_path = yaml_helper.get_data("traces_path")
-    traces_path = Path(traces_path)
-    trace_sample_path = sorted(traces_path.glob("*_db_extract.json"))
-    if trace_sample_path:
-        selected_samples = trace_sample_path[0]
-        graph_system = GraphSystem()
-        graph_system.build(selected_samples)
-        output_path = graph_system.save_to_json()
-        print(graph_system.summary())
-        print(f"saved graph to {output_path}")
+# if __name__ == "__main__":
+#     setting_path = Path(__file__).parent.parent / "settings.yaml"
+#     yaml_helper = YAMLHelper(setting_path)
+#     root = Path(__file__).parent.parent
+#     traces_path = yaml_helper.get_data("traces_path")
+#     traces_path = Path(traces_path)
+#     trace_sample_path = sorted(traces_path.glob("*_db_extract.json"))
+#     if trace_sample_path:
+#         selected_samples = trace_sample_path[0]
+#         graph_system = GraphSystem()
+#         graph_system.build(selected_samples,{})
+#         output_path = graph_system.save_to_json()
+#         print(graph_system.summary())
+#         print(f"saved graph to {output_path}")

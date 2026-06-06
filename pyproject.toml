@@ -10,6 +10,7 @@ requires-python = ">=3.11"
 dependencies = [
     "neo4j>=6.2.0",
     "pyvista>=0.48.4",
+    "simplenlg>=0.2.0",
     "torch>=2.12.0",
     "tqdm>=4.67.3",
     "transformers>=5.9.0",

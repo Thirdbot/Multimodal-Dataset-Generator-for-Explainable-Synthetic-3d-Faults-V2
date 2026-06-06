@@ -5,6 +5,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from Tracer.tracer import EvidenceTracer
+from NaturalTransform.text_transform import TextTransform
 
 
 DEFAULT_NLI_MODEL = "MoritzLaurer/DeBERTa-v3-base-mnli-fever-anli"
@@ -52,7 +53,7 @@ class NliGraphVerifier:
 
     def verify_graph_claim(self, graph_path, claim):
         tracer = EvidenceTracer(graph_path)
-        evidence = tracer.retrieve(claim, top_k=self.top_k)
+        evidence = TextTransform().relations_to_evidence(tracer.retrieve(claim, top_k=self.top_k))
         scored = self.score_pairs(evidence, claim)
         best_entailment = max(scored, key=lambda item: item["scores"]["entailment"])
         best_contradiction = max(scored, key=lambda item: item["scores"]["contradiction"])
@@ -81,7 +82,7 @@ class NliGraphVerifier:
         }
 
     def score_pairs(self, evidence_items, claim):
-        premises = [item["sentence"] for item in evidence_items]
+        premises = [item.get("sentence", item.get("text", "")) for item in evidence_items]
         hypotheses = [claim] * len(evidence_items)
         encoded = self.tokenizer(premises, hypotheses, padding=True, truncation=True, return_tensors="pt")
 

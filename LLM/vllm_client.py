@@ -9,89 +9,73 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from Tracer.tracer import EvidenceTracer
+from NaturalTransform.text_transform import TextTransform
 
 
 DEFAULT_VLLM_ENDPOINT = "http://localhost:8000/v1/chat/completions"
 
-
-def instruction_block(task="structural_interpretation"):
-    if task == "fault_detection":
-        return "Generate fault detection hypotheses grounded in the synthetic seismic sample evidence."
-    return "Generate explanatory structural seismic interpretation hypotheses grounded in the synthetic sample evidence."
+def select_prompt_evidence(tracer, evidence_limit=None, **_):
+    source_evidence = TextTransform().relations_to_evidence(tracer.structural_evidence())
+    return source_evidence if evidence_limit is None else source_evidence[:evidence_limit]
 
 
-def is_fault_evidence(item):
-    fact_name = str(item.get("fact_name", "")).lower()
-    sentence = str(item.get("sentence", "")).lower()
-    if "fault" in fact_name or "fault" in sentence:
-        return True
-    if fact_name == "has_category" and any(token in sentence for token in ("boring", "fault_only", "fault_complex")):
-        return True
-    return False
-
-
-def select_prompt_evidence(tracer, evidence_limit, task="structural_interpretation"):
-    source_evidence = tracer.structural_evidence()
-    if task == "fault_detection":
-        source_evidence = [item for item in source_evidence if is_fault_evidence(item)]
-
-    priority = {"relation": 0, "property": 1, "sample": 2}
-    selected = sorted(
-        source_evidence,
-        key=lambda item: (
-            priority.get(item.get("source"), 9),
-            str(item.get("fact_name", "")) == "HAS_CATEGORY",
-        ),
-    )
-    return selected[:evidence_limit]
-
-
-def build_hypothesis_prompt(graph_path, evidence_limit=12, hypothesis_count=5, task="structural_interpretation"):
+def build_hypothesis_prompt(graph_path, evidence_limit=None, hypothesis_count=5, question=None):
     tracer = EvidenceTracer(graph_path)
-    evidence = select_prompt_evidence(tracer, evidence_limit, task=task)
+    evidence = select_prompt_evidence(tracer, evidence_limit)
     evidence_lines = "\n".join(
-        f"- {item['fact_name']}: {item['sentence']}"
+        f"- {item.get('sentence', '')}"
         for item in evidence
-    ) or "- No fault evidence was found in the graph trace."
+    ) or "- No evidence was found."
     graph = tracer.graph
     sample_nodes = [node for node in graph.get("nodes", []) if node.get("label") == "Sample"]
     sample_id = sample_nodes[0].get("sample_id", graph_path.stem) if sample_nodes else Path(graph_path).stem
 
-    task_rules = ""
-    if task == "fault_detection":
-        task_rules = """- Focus only on whether faults are present and how they affect visible seismic structure.
-- Do not discuss closures, fluids, hydrocarbons, salt, or traps.
-- If the evidence states zero faults or no fault evidence, produce no-fault hypotheses.
-"""
+    question_block = f"\nQuestion:\n{question}\n" if question else ""
+    task_line = "Answer the question using the evidence." if question else "Generate natural interpretation hypotheses grounded in the evidence."
 
-    prompt = f"""Task: {instruction_block(task)}
+    prompt = f"""Task: {task_line}
 
 Rules:
 - Use only the evidence below.
-- Do not explain your reasoning.
-- Do not write analysis, notes, markdown, bullets, numbering, or prefaces.
+- Do not mention graph, metadata, database, model parameters, file paths, or prompts.
 - Return exactly {hypothesis_count} lines.
 - Each line must start with "H: ".
-- Each line must contain one standalone hypothesis.
-- Do not copy evidence as raw comma-separated key-value pairs.
-- Do not repeat the same hypothesis with different wording.
-- Write as a natural seismic interpretation statement that could later be used to supervise a vision-language model.
-- Mention how the observed properties combine into an interpretable structural scene.
-- Prefer directly observable structural wording such as shows, contains, has, includes, or is characterized by.
-- Each hypothesis may include a short evidence phrase using because, due to, or indicated by.
-- Prefer qualitative summaries over exact coordinates or parameter values.
-- If the evidence contains small counts, write them as words such as one, two, or three instead of digits.
-- If the evidence states a fault count or closure count, prefer that explicit count in words instead of vague phrases like multiple, several, or many.
-- Avoid exact x/y/z coordinates, voxel totals, throw values, and other dense numeric details unless there is no other way to make a correct statement.
-- Do not mention graph, metadata, database, model parameters, or file paths.
-- Do not repeat or paraphrase the task instructions.
-- Do not talk about evidence lists, arrays, prompts, or what you are trying to do.
-- Do not claim geological causality unless the evidence directly states causality.
-- Prefer claims that NLI can verify directly from one or two evidence sentences.
-- Each hypothesis should be one sentence of 18 to 45 words.
-- Stop after the final hypothesis line.
-- Never describe the output format.
-{task_rules}
+- Write one standalone sentence per line.
+- Keep the wording natural and concise.
+- Combine related evidence when possible.
+- Do not add facts that are not in the evidence.
+- If a question is provided, answer that question directly.
+
+Sample id: {sample_id}
+{question_block}
+
+Evidence:
+{evidence_lines}
+
+Output:"""
+    return prompt, evidence
+
+
+def build_question_prompt(graph_path, evidence_limit=None, question_count=5):
+    tracer = EvidenceTracer(graph_path)
+    evidence = select_prompt_evidence(tracer, evidence_limit)
+    evidence_lines = "\n".join(
+        f"- {item.get('sentence', '')}"
+        for item in evidence
+    ) or "- No evidence was found."
+    sample_id = Path(graph_path).stem
+
+    prompt = f"""Task: Generate natural questions that can be answered from the evidence.
+
+Rules:
+- Use only the evidence below.
+- Return exactly {question_count} lines.
+- Each line must start with "Q: ".
+- Write one standalone question per line.
+- Ask about visible or interpretable features supported by the evidence.
+- Do not ask why something formed or what caused it unless the evidence states that.
+- Do not mention graph, metadata, database, model parameters, file paths, or prompts.
+- Do not answer the question.
 
 Sample id: {sample_id}
 
@@ -188,6 +172,35 @@ def parse_hypotheses(raw_text):
     return hypotheses
 
 
+def clean_question_text(text):
+    text = re.sub(r"\s+", " ", text).strip()
+    match = re.search(r"(.+?\\?)(?:\\s|$)", text)
+    if match:
+        text = match.group(1).strip()
+    text = text.strip(" -*")
+    return text
+
+
+def parse_questions(raw_text):
+    questions = []
+    seen = set()
+    cleaned_text = remove_reasoning_text(raw_text)
+    marker_pattern = re.compile(r"(?:^|\n)\s*(?:[-*]|\d+[.)])?\s*\**\s*Q\s*:\s*", re.IGNORECASE)
+    matches = list(marker_pattern.finditer(cleaned_text))
+    if not matches:
+        return []
+
+    for index, match in enumerate(matches):
+        start = match.end()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(cleaned_text)
+        question = clean_question_text(cleaned_text[start:end])
+        normalized = question.lower()
+        if is_usable_question(question) and normalized not in seen:
+            questions.append(question)
+            seen.add(normalized)
+    return questions
+
+
 def is_usable_hypothesis(text):
     normalized = text.lower().strip()
     if len(normalized.split()) < 6:
@@ -277,6 +290,26 @@ def is_usable_hypothesis(text):
     return True
 
 
+def is_usable_question(text):
+    normalized = text.lower().strip()
+    if len(normalized.split()) < 4:
+        return False
+    if not normalized.endswith("?"):
+        return False
+    banned_phrases = [
+        "the graph",
+        "metadata",
+        "database",
+        "model parameter",
+        "file path",
+        "prompt",
+        "why did",
+        "what caused",
+        "how was",
+    ]
+    return not any(phrase in normalized for phrase in banned_phrases)
+
+
 def generate_hypotheses_for_graph(
     graph_path,
     endpoint=DEFAULT_VLLM_ENDPOINT,
@@ -289,13 +322,13 @@ def generate_hypotheses_for_graph(
     top_p=0.9,
     timeout=120,
     seed=42,
-    task="structural_interpretation",
+    question=None,
 ):
     prompt, evidence = build_hypothesis_prompt(
         graph_path,
         evidence_limit=evidence_limit,
         hypothesis_count=count,
-        task=task,
+        question=question,
     )
     raw_output = generate_with_vllm_endpoint(
         prompt,
@@ -314,4 +347,42 @@ def generate_hypotheses_for_graph(
         "evidence": evidence,
         "raw_output": raw_output,
         "hypotheses": parse_hypotheses(raw_output),
+    }
+
+
+def generate_questions_for_graph(
+    graph_path,
+    endpoint=DEFAULT_VLLM_ENDPOINT,
+    model=None,
+    api_key=None,
+    evidence_limit=None,
+    count=5,
+    max_new_tokens=1024,
+    temperature=0.7,
+    top_p=0.9,
+    timeout=120,
+    seed=42,
+):
+    prompt, evidence = build_question_prompt(
+        graph_path,
+        evidence_limit=evidence_limit,
+        question_count=count,
+    )
+    raw_output = generate_with_vllm_endpoint(
+        prompt,
+        endpoint=endpoint,
+        model=model,
+        api_key=api_key,
+        max_new_tokens=max_new_tokens,
+        temperature=temperature,
+        top_p=top_p,
+        timeout=timeout,
+        seed=seed,
+    )
+    return {
+        "graph_path": str(graph_path),
+        "prompt": prompt,
+        "evidence": evidence,
+        "raw_output": raw_output,
+        "questions": parse_questions(raw_output),
     }

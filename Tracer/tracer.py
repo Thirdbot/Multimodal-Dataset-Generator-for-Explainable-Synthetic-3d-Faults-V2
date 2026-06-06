@@ -1,21 +1,6 @@
-# graph tracing multihop for NLI and llm
-import argparse
 import json
 import re
 from pathlib import Path
-
-try:
-    from .evidence_template import (
-        property_template,
-        relation_template,
-        sample_template,
-    )
-except ImportError:
-    from evidence_template import (
-        property_template,
-        relation_template,
-        sample_template,
-    )
 
 
 root = Path(__file__).parent.parent
@@ -27,74 +12,92 @@ class EvidenceTracer(object):
         self.graph_path = Path(graph_path)
         self.graph = json.loads(self.graph_path.read_text())
         self.nodes = {node["id"]: node for node in self.graph.get("nodes", [])}
-        self.evidence = self.compose_evidence()
+        self.edges = self.graph.get("edges", [])
+        self.relations = self.trace()
 
-    def compose_evidence(self):
-        evidence = []
-        for node in self.graph.get("nodes", []):
-            item = self.node_to_evidence(node)
-            if item:
-                evidence.append(item)
+    def trace(self):
+        relations = []
+        for node in self.nodes.values():
+            relations.extend(self.trace_properties(node))
+        for edge in self.edges:
+            relation = self.trace_edge(edge)
+            if relation:
+                relations.append(relation)
+        return relations
 
-        for edge in self.graph.get("edges", []):
-            item = self.edge_to_evidence(edge)
-            if item:
-                evidence.append(item)
+    def trace_properties(self, node):
+        node_id = node["id"]
+        relations = []
+        for key, value in self.properties(node).items():
+            relations.append({
+                "trace_type": "property",
+                "source": node_id,
+                "edge": key,
+                "target": value,
+                "relation": [node_id, key, value],
+                "text": f"{self.clean_node_id(node_id)} {key} {value}",
+            })
+        return relations
 
-        return evidence
+    def trace_edge(self, edge):
+        source = edge.get("source")
+        target = edge.get("target")
+        edge_type = edge.get("type")
 
-    def structural_evidence(self):
-        prioritized = []
-        for item in self.evidence:
-            if item.get("source") == "property":
-                prioritized.append(item)
-                continue
-            if item.get("source") != "relation":
-                continue
-            if item.get("fact_name") in {"HAS_CATEGORY", "REALIZED", "HAS_FAULT", "HAS_CLOSURE", "HAS_FLUID"}:
-                prioritized.append(item)
-        return prioritized
+        if source not in self.nodes or target not in self.nodes:
+            return None
+
+        return {
+            "trace_type": "edge",
+            "source": source,
+            "edge": edge_type,
+            "target": target,
+            "source_properties": self.properties(self.nodes[source]),
+            "target_properties": self.properties(self.nodes[target]),
+            "relation": [source, edge_type, target],
+            "text": " ".join([
+                self.clean_node_id(source),
+                edge_type,
+                self.clean_node_id(target),
+            ]),
+        }
 
     def retrieve(self, claim, top_k=8):
         claim_tokens = self.tokenize(claim)
-        scored = []
-        evidence = self.structural_evidence()
-        for item in evidence:
-            text = f"{item['fact_name']} {item['sentence']}"
-            score = len(claim_tokens & self.tokenize(text)) / max(len(claim_tokens), 1)
-            scored.append((score, item))
+        scored = [
+            (self.score(claim_tokens, relation), relation)
+            for relation in self.relations
+        ]
+        scored.sort(key=lambda item: item[0], reverse=True)
+        selected = [relation for score, relation in scored if score > 0]
+        return selected[:top_k] if selected else [relation for _, relation in scored[:top_k]]
 
-        scored.sort(key=lambda x: x[0], reverse=True)
-        selected = [item for score, item in scored if score > 0]
-        return selected[:top_k] if selected else [item for _, item in scored[:top_k]]
-
-    def node_to_evidence(self, node):
-        label = node.get("label")
-        if label == "Sample":
-            return self.make_evidence("sample", sample_template(node), "sample", node.get("sample_id"), vlm_visible=False, node=node)
-        if label in {"Category", "ModelParameters", "FaultSystem", "Fault", "ClosureSystem", "Closure", "Fluid"}:
-            return self.make_evidence("property", property_template(node), label, node.get("name", ""), vlm_visible=False, node=node)
-        return None
-
-    def edge_to_evidence(self, edge):
-        edge_type = edge.get("type")
-        source_node = self.nodes.get(edge.get("source"), {})
-        target_node = self.nodes.get(edge.get("target"), {})
-
-        if edge_type in {"HAS_CATEGORY", "REALIZED", "HAS_FAULT", "HAS_CLOSURE", "HAS_FLUID"}:
-            sentence = relation_template(edge, source_node, target_node)
-            return self.make_evidence("relation", sentence, edge_type, edge.get("metric_family", ""), vlm_visible=False, edge=edge)
-        return None
+    def structural_evidence(self):
+        return self.relations
 
     @staticmethod
-    def make_evidence(source, sentence, fact_name, value, **kwargs):
+    def properties(node):
         return {
-            "source": source,
-            "sentence": sentence,
-            "fact_name": fact_name,
-            "value": value if value is not None else "",
-            **kwargs,
+            key: value
+            for key, value in node.items()
+            if key not in {"id", "model_id"}
         }
+
+    @staticmethod
+    def score(claim_tokens, relation):
+        relation_tokens = EvidenceTracer.tokenize(relation.get("text", ""))
+        return len(claim_tokens & relation_tokens) / max(len(claim_tokens), 1)
+
+    @staticmethod
+    def clean_node_id(node_id):
+        node_id = str(node_id)
+        if node_id.startswith("category:"):
+            return "category"
+        if node_id.startswith("fault_") or node_id == "fault":
+            return "fault"
+        if node_id.startswith("closure_") or node_id == "closure":
+            return "closure"
+        return node_id
 
     @staticmethod
     def tokenize(text):
@@ -109,16 +112,5 @@ def first_graph():
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("graph", nargs="?", default=None)
-    parser.add_argument("--claim", default=None)
-    parser.add_argument("--top-k", type=int, default=8)
-    args = parser.parse_args()
-
-    graph_path = Path(args.graph) if args.graph else first_graph()
-    tracer = EvidenceTracer(graph_path)
-    if args.claim:
-        evidence = tracer.retrieve(args.claim, args.top_k)
-    else:
-        evidence = tracer.structural_evidence()
-    print(json.dumps(evidence, indent=2, default=str))
+    tracer = EvidenceTracer(first_graph())
+    print(json.dumps(tracer.structural_evidence(), indent=2, default=str))

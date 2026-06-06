@@ -300,19 +300,10 @@ def align_overlay_mask(overlay_mask, target_shape):
     return aligned
 
 
-def choose_overlay_source(sample_path, source_row, graph, fault_segments_item, task="structural_interpretation"):
+def choose_overlay_source(sample_path, source_row, graph, fault_segments_item):
     evidence = source_row.get("evidence", [])
     answer = str(source_row.get("answer", "")).lower()
     fact_names = [str(item.get("fact_name", "")) for item in evidence]
-
-    if task == "fault_detection":
-        if fault_segments_item is None:
-            return None
-        return {
-            "kind": "fault",
-            "item": fault_segments_item,
-            "color": "#ef4444",
-        }
 
     target_closure = None
     for node in graph.get("nodes", []):
@@ -496,6 +487,7 @@ def multimodal_row(source_row, image_path, overlay_image_path, mask_image_path, 
     instruction = source_row["instruction"]
     answer = source_row["answer"]
     sample_id = source_row["sample_id"]
+    row_id = source_row.get("row_id", sample_id)
     trace = source_row.get("trace", {})
     verification = source_row.get("verification", {})
     deciding_evidence = trace.get("deciding_evidence") or {}
@@ -503,10 +495,11 @@ def multimodal_row(source_row, image_path, overlay_image_path, mask_image_path, 
         deciding_evidence = source_row["evidence"][0]
 
     return {
-        "id": sample_id,
+        "id": row_id,
+        "row_id": row_id,
         "sample_id": sample_id,
         "instruction": instruction,
-        "input": "",
+        "question": source_row.get("question", instruction),
         "answer": answer,
         "image": image_path.as_posix(),
         "overlay_image": overlay_image_path.as_posix() if overlay_image_path else "",
@@ -539,6 +532,9 @@ def multimodal_row(source_row, image_path, overlay_image_path, mask_image_path, 
             "graph_trace": trace.get("graph_trace", source_row.get("evidence", [])),
             "llm_prompt": trace.get("llm_prompt", ""),
             "llm_raw_output": trace.get("llm_raw_output", ""),
+            "question_prompt": trace.get("question_prompt", ""),
+            "question_raw_output": trace.get("question_raw_output", ""),
+            "llm_question": trace.get("llm_question", source_row.get("question", instruction)),
             "llm_answer": trace.get("llm_answer", answer),
             "nli_status": verification.get("status", ""),
             "nli_score": verification.get("score", ""),
@@ -585,7 +581,7 @@ def is_no_fault_answer(text):
     return any(phrase in text for phrase in no_fault_phrases)
 
 
-def export_dataset(verified_path, output_path, image_dir, limit=None, task="structural_interpretation"):
+def export_dataset(verified_path, output_path, image_dir, limit=None):
     rows = load_verified_rows(verified_path)
     image_dir = Path(image_dir)
     output_path = Path(output_path)
@@ -605,27 +601,22 @@ def export_dataset(verified_path, output_path, image_dir, limit=None, task="stru
             sample_path = resolve_sample_folder(sample_id)
             seismic_item = select_seismic_item(sample_path)
             fault_segments_item = select_fault_segments_item(sample_path)
-            if task == "fault_detection" and "fault" not in str(row.get("answer", "")).lower():
-                raise ValueError("fault_detection row does not contain a fault statement")
-            if task == "fault_detection" and fault_segments_item is None and not is_no_fault_answer(row.get("answer", "")):
-                raise ValueError("positive fault_detection row has no fault mask")
-
             volume = load_array(seismic_item)
             graph_path = row.get("metadata", {}).get("graph_path")
             graph = load_graph(graph_path) if graph_path else {"nodes": [], "edges": []}
-            overlay_source = choose_overlay_source(sample_path, row, graph, fault_segments_item, task=task)
+            overlay_source = choose_overlay_source(sample_path, row, graph, fault_segments_item)
             overlay_volume = load_array(overlay_source["item"]) if overlay_source else None
-            view_graph = graph if task != "fault_detection" or fault_segments_item is not None else {"nodes": [], "edges": []}
             views = build_views(
                 volume,
-                graph=view_graph,
+                graph=graph,
                 target_volume=overlay_volume,
                 target_source=overlay_source["kind"] if overlay_source else "amplitude_max",
             )
 
-            image_path = image_dir / f"{sample_id}.png"
-            overlay_image_path = image_dir / f"{sample_id}_overlay.png"
-            mask_image_path = image_dir / f"{sample_id}_mask.png"
+            row_id = row.get("row_id", sample_id)
+            image_path = image_dir / f"{row_id}.png"
+            overlay_image_path = image_dir / f"{row_id}_overlay.png"
+            mask_image_path = image_dir / f"{row_id}_mask.png"
             seismic_relpath = seismic_item["group_path"].relative_to(sample_path).as_posix()
             render_panel(
                 sample_id=sample_id,
@@ -669,7 +660,6 @@ def export_dataset(verified_path, output_path, image_dir, limit=None, task="stru
                 overlay_kind=overlay_kind,
                 slice_indices=views["indices"],
             )
-            exported_row["metadata"]["task"] = task
             if overlay_image_path is not None:
                 exported_row["messages"][0]["content"].append(
                     {"type": "image", "image": overlay_image_path.as_posix()}
@@ -705,9 +695,10 @@ def export_dataset(verified_path, output_path, image_dir, limit=None, task="stru
 def write_csv(output_path, rows):
     fieldnames = [
         "id",
+        "row_id",
         "sample_id",
         "instruction",
-        "input",
+        "question",
         "answer",
         "image",
         "overlay_image",
@@ -722,8 +713,10 @@ def write_csv(output_path, rows):
         "graph_path",
         "seismic_array",
         "overlay_array",
+        "llm_question",
         "llm_answer",
         "llm_raw_output",
+        "question_raw_output",
         "nli_status",
         "nli_score",
         "nli_model",
@@ -746,9 +739,10 @@ def write_csv(output_path, rows):
             view_selection = view_indices.get("methods", {})
             writer.writerow({
                 "id": row["id"],
+                "row_id": row.get("row_id", row["id"]),
                 "sample_id": row["sample_id"],
                 "instruction": row["instruction"],
-                "input": row["input"],
+                "question": row.get("question", row["instruction"]),
                 "answer": row["answer"],
                 "image": row["image"],
                 "overlay_image": row.get("overlay_image", ""),
@@ -763,8 +757,10 @@ def write_csv(output_path, rows):
                 "graph_path": metadata.get("graph_path", ""),
                 "seismic_array": metadata.get("seismic_array", ""),
                 "overlay_array": metadata.get("overlay_array", ""),
+                "llm_question": trace.get("llm_question", row.get("question", row["instruction"])),
                 "llm_answer": trace.get("llm_answer", row["answer"]),
                 "llm_raw_output": trace.get("llm_raw_output", ""),
+                "question_raw_output": trace.get("question_raw_output", ""),
                 "nli_status": trace.get("nli_status", ""),
                 "nli_score": trace.get("nli_score", ""),
                 "nli_model": trace.get("nli_model", ""),
@@ -786,7 +782,6 @@ def parse_args():
     parser.add_argument("--output", default=str(DEFAULT_OUTPUT))
     parser.add_argument("--image-dir", default=str(DEFAULT_IMAGE_DIR))
     parser.add_argument("--limit", type=int, default=None)
-    parser.add_argument("--task", default="structural_interpretation", choices=["structural_interpretation", "fault_detection"])
     return parser.parse_args()
 
 
@@ -797,7 +792,6 @@ def main():
         output_path=args.output,
         image_dir=args.image_dir,
         limit=args.limit,
-        task=args.task,
     )
     print(json.dumps(result, indent=2))
 

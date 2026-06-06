@@ -111,5 +111,4 @@ if __name__ == "__main__":
 
     # control initialized template
     sample_control = SampleControl(categorical_parameter,**high_level_controls)
-    # sample_control.load_recipe(Path(recipes_path) / "f0e5bfe6bb074c74b9b9617aaa5d9e60.yaml")
     sample_control.populate(recipes_path,config_path,seed=42)
