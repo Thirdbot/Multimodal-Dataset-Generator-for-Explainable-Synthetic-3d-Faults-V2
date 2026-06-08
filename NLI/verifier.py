@@ -54,7 +54,13 @@ class NliGraphVerifier:
     def verify_graph_claim(self, graph_path, claim):
         tracer = EvidenceTracer(graph_path)
         evidence = TextTransform().relations_to_evidence(tracer.retrieve(claim, top_k=self.top_k))
+        if not evidence:
+            return self.empty_result(claim)
+
         scored = self.score_pairs(evidence, claim)
+        if not scored:
+            return self.empty_result(claim)
+
         best_entailment = max(scored, key=lambda item: item["scores"]["entailment"])
         best_contradiction = max(scored, key=lambda item: item["scores"]["contradiction"])
 
@@ -81,7 +87,28 @@ class NliGraphVerifier:
             "model": self.model_name,
         }
 
+    def empty_result(self, claim):
+        return {
+            "claim": claim,
+            "status": "insufficient_evidence",
+            "score": 0.0,
+            "deciding_evidence": {},
+            "retrieved_evidence": [],
+            "thresholds": {
+                "entailment": self.entailment_threshold,
+                "contradiction": self.contradiction_threshold,
+            },
+            "model": self.model_name,
+        }
+
     def score_pairs(self, evidence_items, claim):
+        evidence_items = [
+            item for item in evidence_items
+            if str(item.get("sentence", item.get("text", ""))).strip()
+        ]
+        if not evidence_items:
+            return []
+
         premises = [item.get("sentence", item.get("text", "")) for item in evidence_items]
         hypotheses = [claim] * len(evidence_items)
         encoded = self.tokenizer(premises, hypotheses, padding=True, truncation=True, return_tensors="pt")

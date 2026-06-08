@@ -1,5 +1,6 @@
 import json
 import shutil
+import hashlib
 
 import yaml
 from watchdog.events import FileSystemEventHandler
@@ -15,6 +16,7 @@ from watchdog.observers import Observer
 SYNTHOSEIS_ROOT = Path(__file__).parent.parent / "third_party" / "synthoseis"
 sys.path.insert(0, str(SYNTHOSEIS_ROOT))
 from main import build_model
+from synthoseis_config_guard import guarded_build_model
 
 
 class ConfigRunner(FileSystemEventHandler):
@@ -102,11 +104,13 @@ class ConfigRunner(FileSystemEventHandler):
     def build_sample(self, sample_path, run_id, seed):
         logger.info(f"[BUILD START] -> Run: {run_id}")
         try:
-            build_model(
+            sample_seed = self.sample_seed(seed, sample_path.stem)
+            guarded_build_model(
+                build_model,
                 user_json=str(sample_path),
                 run_id=run_id,
                 test_mode=None,
-                # seed=seed,
+                seed=sample_seed,
             )
             logger.info(f"[BUILD DONE] -> Run: {run_id}")
             success_configs = self.project_folder / 'success.yaml'
@@ -139,6 +143,10 @@ class ConfigRunner(FileSystemEventHandler):
             logger.info(f"[TRACK FAILED] -> Path: {failed_configs}")
 
             return False
+
+    def sample_seed(self, seed, sample_name):
+        digest = hashlib.sha256(f"{seed}:{sample_name}".encode("utf-8")).hexdigest()
+        return int(digest[:8], 16)
 
     # events like delete ,create ,update recipes
     def on_created(self, event):

@@ -1,5 +1,6 @@
 import json
 import re
+import copy
 from pathlib import Path
 
 import networkx as nx
@@ -11,20 +12,28 @@ class GraphSystem:
     def __init__(self):
         self.graph = nx.MultiDiGraph()
         self.traces_path = None
+
     def build(self,trace_path,the_great_filter):
         self._add_trace(trace_path,the_great_filter)
         self.traces_path = trace_path
         return self.graph
 
-    def save_to_json(self, output_path=None):
+    def change_build(self, view, image_assets=None):
+        copy_system = GraphSystem()
+        copy_system.graph = copy.deepcopy(self.graph)
+        copy_system.traces_path = self.traces_path
+        copy_system._project_positions(view, image_assets=image_assets)
+        return copy_system
+
+    def save_to_json(self,sub_folder='properties_graph', suffix='properties_graph'):
         if self.traces_path is None:
             raise Exception("No trace path provided")
         self.traces_path = Path(self.traces_path)
 
-        sub_folder = 'properties_graph'
+
         sub_folder = self.traces_path.parent / sub_folder
         sub_folder.mkdir(parents=True, exist_ok=True)
-        output_path = sub_folder / f"{self.traces_path.stem}_properties_graph.json"
+        output_path = sub_folder / f"{self.traces_path.stem}_{suffix}.json"
 
         payload = {
             "nodes": [
@@ -38,6 +47,56 @@ class GraphSystem:
         }
         output_path.write_text(json.dumps(payload, indent=2, default=str))
         return output_path
+
+    def _project_positions(self, view, image_assets=None):
+        for node_id, attrs in self.graph.nodes(data=True):
+            attrs["view"] = view
+            if str(node_id).startswith("category:"):
+                self._add_view_asset_attrs(attrs, view, image_assets)
+            if view == "inline":
+                self._project_point(attrs, "y0", "z0")
+                self._project_extent(attrs, "y_min", "y_max", "z_min", "z_max")
+                self._drop_3d_position_keys(attrs)
+            elif view == "crossline":
+                self._project_point(attrs, "x0", "z0")
+                self._project_extent(attrs, "x_min", "x_max", "z_min", "z_max")
+                self._drop_3d_position_keys(attrs)
+
+    @staticmethod
+    def _project_point(attrs, source_x, source_y):
+        if source_x in attrs and source_y in attrs:
+            attrs["x"] = attrs.get(source_x)
+            attrs["y"] = attrs.get(source_y)
+
+    @staticmethod
+    def _project_extent(attrs, source_x_min, source_x_max, source_y_min, source_y_max):
+        required = {source_x_min, source_x_max, source_y_min, source_y_max}
+        if required.issubset(attrs):
+            attrs["x_min"] = attrs.get(source_x_min)
+            attrs["x_max"] = attrs.get(source_x_max)
+            attrs["y_min"] = attrs.get(source_y_min)
+            attrs["y_max"] = attrs.get(source_y_max)
+
+    @staticmethod
+    def _drop_3d_position_keys(attrs):
+        for key in {"x0", "y0", "z0", "z_min", "z_max"}:
+            attrs.pop(key, None)
+
+    @staticmethod
+    def _add_view_asset_attrs(attrs, view, image_assets):
+        if not image_assets:
+            return
+        view_asset = image_assets.get("views", {}).get(view, {})
+        attrs["fixed_axis"] = view_asset.get("fixed_axis", view)
+        attrs["fixed_index"] = view_asset.get("slice_index")
+        attrs["selection_method"] = view_asset.get("selection_method", "")
+        attrs["image_path"] = view_asset.get("image_path", "")
+        attrs["overlay_image_path"] = view_asset.get("overlay_image_path", "")
+        attrs["mask_image_path"] = view_asset.get("mask_image_path", "")
+        attrs["overlay_kind"] = image_assets.get("overlay_kind", "")
+        attrs["overlay_array"] = image_assets.get("overlay_array", "")
+        attrs["overlay_arrays"] = image_assets.get("overlay_arrays", [])
+        attrs["overlay_components"] = view_asset.get("overlay_components", [])
 
     def summary(self):
         labels = {}

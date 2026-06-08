@@ -1,6 +1,6 @@
 {
   "model": "MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli",
-  "entailment_threshold": 0.72,
-  "contradiction_threshold": 0.72,
-  "top_k": 8
+  "entailment_threshold": 0.90,
+  "contradiction_threshold": 0.90,
+  "top_k": 16
 }

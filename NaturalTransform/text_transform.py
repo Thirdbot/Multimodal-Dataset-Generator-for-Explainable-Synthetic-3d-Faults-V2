@@ -21,6 +21,17 @@ class TextTransform(object):
         "salt_noise_stretch_factor",
         "intercept_avg",
         "gradient_avg",
+        "view",
+        "fixed_axis",
+        "fixed_index",
+        "selection_method",
+        "image_path",
+        "overlay_image_path",
+        "mask_image_path",
+        "overlay_kind",
+        "overlay_array",
+        "overlay_arrays",
+        "overlay_components",
     }
 
     PHRASES = {
@@ -75,6 +86,11 @@ class TextTransform(object):
                 y = self.number_text(group["y0"].get("target"))
                 z = self.number_text(group["z0"].get("target"))
                 sentences.append(self.realise(source, "sit", f"near x={x}, y={y}, and z={z}"))
+            elif all(key in group for key in ("x", "y")):
+                source = self.node_name(source_id)
+                x = self.number_text(group["x"].get("target"))
+                y = self.number_text(group["y"].get("target"))
+                sentences.append(self.realise(source, "sit", f"near x={x} and y={y}"))
 
         for source_id, group in self.extent_groups(relations).items():
             required = {"x_min", "x_max", "y_min", "y_max", "z_min", "z_max"}
@@ -87,6 +103,13 @@ class TextTransform(object):
                 z0 = self.number_text(group["z_min"].get("target"))
                 z1 = self.number_text(group["z_max"].get("target"))
                 sentences.append(self.realise(source, "span", f"x={x0} to {x1}, y={y0} to {y1}, and z={z0} to {z1}"))
+            elif {"x_min", "x_max", "y_min", "y_max"}.issubset(group):
+                source = self.node_name(source_id)
+                x0 = self.number_text(group["x_min"].get("target"))
+                x1 = self.number_text(group["x_max"].get("target"))
+                y0 = self.number_text(group["y_min"].get("target"))
+                y1 = self.number_text(group["y_max"].get("target"))
+                sentences.append(self.realise(source, "span", f"x={x0} to {x1} and y={y0} to {y1}"))
 
         return sentences
 
@@ -94,7 +117,7 @@ class TextTransform(object):
         groups = {}
         for relation in relations:
             edge = relation.get("edge")
-            if edge not in {"x0", "y0", "z0"}:
+            if edge not in {"x0", "y0", "z0", "x", "y"}:
                 continue
             groups.setdefault(relation.get("source"), {})[edge] = relation
         return groups
@@ -316,7 +339,7 @@ class TextTransform(object):
 
     @staticmethod
     def is_position_edge(edge):
-        return str(edge) in {"x0", "y0", "z0"}
+        return str(edge) in {"x0", "y0", "z0", "x", "y"}
 
     @staticmethod
     def is_extent_edge(edge):

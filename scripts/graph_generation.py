@@ -11,14 +11,12 @@ import yaml
 from yaml_helper import YAMLHelper
 from low_level_tracer import LowLevelTracer
 from graph_system import GraphSystem
+from sample_image_generation import create_sample_images
 
 CATEGORY_FILTERS = {
     "boring": {
         "tables": {"model_parameters"},
         "model_keys": {
-            "model_id",
-            "cube_shape",
-            "incident_angles",
             "number_faults",
             "fault_mode",
             "salt_inserted",
@@ -29,30 +27,19 @@ CATEGORY_FILTERS = {
             "closure_voxel_pct",
             "sand_voxel_pct",
             "sand_layer_percent_a_posteriori",
-            "sn_db",
-            "bandpass_bandlimit_low",
-            "bandpass_bandlimit_high",
         },
     },
     "fault_only": {
         "tables": {"model_parameters", "fault_parameters"},
         "model_keys": {
-            "model_id",
             "number_faults",
             "fault_mode",
             "n_voxels_faults",
             "n_voxels_fault_intersections",
             "number_fault_intersections",
             "fault_voxel_count_list",
-            "sn_db",
-            "bandpass_bandlimit_low",
-            "bandpass_bandlimit_high",
         },
         "fault_keys": {
-            "model_id",
-            "a",
-            "b",
-            "c",
             "x0",
             "y0",
             "z0",
@@ -65,22 +52,14 @@ CATEGORY_FILTERS = {
     "fault_complex": {
         "tables": {"model_parameters", "fault_parameters"},
         "model_keys": {
-            "model_id",
             "number_faults",
             "fault_mode",
             "n_voxels_faults",
             "n_voxels_fault_intersections",
             "number_fault_intersections",
             "fault_voxel_count_list",
-            "sn_db",
-            "bandpass_bandlimit_low",
-            "bandpass_bandlimit_high",
         },
         "fault_keys": {
-            "model_id",
-            "a",
-            "b",
-            "c",
             "x0",
             "y0",
             "z0",
@@ -93,9 +72,7 @@ CATEGORY_FILTERS = {
     "salt_only": {
         "tables": {"model_parameters", "closure_parameters"},
         "model_keys": {
-            "model_id",
             "salt_inserted",
-            "salt_noise_stretch_factor",
             "number_hc_closures",
             "closure_voxel_count",
             "closure_voxel_pct",
@@ -105,12 +82,8 @@ CATEGORY_FILTERS = {
             "closure_voxel_pct_brine",
             "closure_voxel_pct_oil",
             "closure_voxel_pct_gas",
-            "sn_db",
-            "bandpass_bandlimit_low",
-            "bandpass_bandlimit_high",
         },
         "closure_keys": {
-            "model_id",
             "fluid",
             "n_voxels",
             "x_min",
@@ -120,16 +93,12 @@ CATEGORY_FILTERS = {
             "z_min",
             "z_max",
             "intersects_salt",
-            "intercept_avg",
-            "gradient_avg",
         },
     },
     "salt_fault_mixed": {
         "tables": {"model_parameters", "fault_parameters", "closure_parameters"},
         "model_keys": {
-            "model_id",
             "salt_inserted",
-            "salt_noise_stretch_factor",
             "number_faults",
             "fault_mode",
             "n_voxels_faults",
@@ -139,15 +108,8 @@ CATEGORY_FILTERS = {
             "number_hc_closures",
             "closure_voxel_count",
             "closure_voxel_pct",
-            "sn_db",
-            "bandpass_bandlimit_low",
-            "bandpass_bandlimit_high",
         },
         "fault_keys": {
-            "model_id",
-            "a",
-            "b",
-            "c",
             "x0",
             "y0",
             "z0",
@@ -157,7 +119,6 @@ CATEGORY_FILTERS = {
             "gouge_pctile",
         },
         "closure_keys": {
-            "model_id",
             "fluid",
             "n_voxels",
             "x_min",
@@ -168,25 +129,18 @@ CATEGORY_FILTERS = {
             "z_max",
             "intersects_fault",
             "intersects_salt",
-            "intercept_avg",
-            "gradient_avg",
         },
     },
     "onlap": {
         "tables": {"model_parameters", "closure_parameters"},
         "model_keys": {
-            "model_id",
             "number_onlap_episodes",
             "onlaps_horizon_list",
             "number_hc_closures",
             "closure_voxel_count",
             "closure_voxel_pct",
-            "sn_db",
-            "bandpass_bandlimit_low",
-            "bandpass_bandlimit_high",
         },
         "closure_keys": {
-            "model_id",
             "fluid",
             "n_voxels",
             "x_min",
@@ -196,38 +150,20 @@ CATEGORY_FILTERS = {
             "z_min",
             "z_max",
             "intersects_onlap",
-            "intercept_avg",
-            "gradient_avg",
         },
     },
     "depositional": {
         "tables": {"model_parameters", "closure_parameters"},
         "model_keys": {
-            "model_id",
             "number_fan_episodes",
             "fan_horizon_list",
             "sand_voxel_pct",
             "sand_layer_percent_a_posteriori",
-            "sand_layer_thickness_a_priori",
-            "sand_unit_thickness_a_priori",
-            "sand_unit_thickness_a_posteriori",
-            "sand_unit_thickness_mean",
-            "sand_unit_thickness_std",
-            "sand_unit_thickness_min",
-            "sand_unit_thickness_max",
-            "shale_unit_thickness_mean",
-            "shale_unit_thickness_std",
-            "shale_unit_thickness_min",
-            "shale_unit_thickness_max",
             "number_hc_closures",
             "closure_voxel_count",
             "closure_voxel_pct",
-            "sn_db",
-            "bandpass_bandlimit_low",
-            "bandpass_bandlimit_high",
         },
         "closure_keys": {
-            "model_id",
             "fluid",
             "n_voxels",
             "x_min",
@@ -236,14 +172,11 @@ CATEGORY_FILTERS = {
             "y_max",
             "z_min",
             "z_max",
-            "intercept_avg",
-            "gradient_avg",
         },
     },
     "full_mixed": {
         "tables": {"model_parameters", "fault_parameters", "closure_parameters"},
         "model_keys": {
-            "model_id",
             "number_faults",
             "fault_mode",
             "n_voxels_faults",
@@ -251,7 +184,6 @@ CATEGORY_FILTERS = {
             "number_fault_intersections",
             "fault_voxel_count_list",
             "salt_inserted",
-            "salt_noise_stretch_factor",
             "number_onlap_episodes",
             "onlaps_horizon_list",
             "number_fan_episodes",
@@ -267,15 +199,8 @@ CATEGORY_FILTERS = {
             "closure_voxel_pct_brine",
             "closure_voxel_pct_oil",
             "closure_voxel_pct_gas",
-            "sn_db",
-            "bandpass_bandlimit_low",
-            "bandpass_bandlimit_high",
         },
         "fault_keys": {
-            "model_id",
-            "a",
-            "b",
-            "c",
             "x0",
             "y0",
             "z0",
@@ -285,7 +210,6 @@ CATEGORY_FILTERS = {
             "gouge_pctile",
         },
         "closure_keys": {
-            "model_id",
             "fluid",
             "n_voxels",
             "x_min",
@@ -297,8 +221,6 @@ CATEGORY_FILTERS = {
             "intersects_fault",
             "intersects_salt",
             "intersects_onlap",
-            "intercept_avg",
-            "gradient_avg",
         },
     },
 }
@@ -364,7 +286,7 @@ class GraphGeneration(FileSystemEventHandler):
             if f"_{category}_" in sample_name or sample_name.startswith(f"{category}_"):
                 return category
         return "unknown"
-    # 3d graph generation
+
     def trace_sample(self, folder):
         try:
             logger.info(f"[TRACE START] -> Sample: {folder.name}")
@@ -378,6 +300,11 @@ class GraphGeneration(FileSystemEventHandler):
             the_great_filter = CATEGORY_FILTERS.get(category, {})
             properties_graph.build(low_trace_path,the_great_filter=the_great_filter) # filtering by
             properties_graph_path = properties_graph.save_to_json()
+            # generate 2d images from 3d
+            image_assets = create_sample_images(folder, graph_path=properties_graph_path)
+            for view in ["inline", "crossline"]:
+                graph_2d = properties_graph.change_build(view, image_assets=image_assets)
+                graph_2d.save_to_json(sub_folder="views_graph", suffix=f"{view}_graph")
 
             logger.info(f"[TRACE DONE] -> Graph: {properties_graph_path}")
             return True

@@ -22,7 +22,7 @@ from NLI.verifier import (
 from scripts.logger_color import logger
 
 
-default_graph_root = ROOT / "traces" / "properties_graph"
+default_graph_root = ROOT / "traces" / "views_graph"
 default_output = ROOT / "Dataset" / "verified_hypotheses.jsonl"
 llm_config_path = ROOT / "LLM" / "config.json"
 nli_config_path = ROOT / "NLI" / "config.json"
@@ -123,10 +123,12 @@ class DatasetPipeline(object):
 
     def row_from_supported_item(self, graph_path, sample_id, item, seen, supported):
         evidence = self.selected_evidence(item["verification"])
-        row_id = self.row_id(sample_id, item["question"], item["hypothesis"])
+        view = self.view_from_graph(graph_path)
+        row_id = self.row_id(f"{sample_id}:{view}", item["question"], item["hypothesis"])
         return {
             "row_id": row_id,
             "sample_id": sample_id,
+            "view": view,
             "instruction": item["question"],
             "question": item["question"],
             "answer": item["hypothesis"],
@@ -137,6 +139,8 @@ class DatasetPipeline(object):
             },
             "metadata": {
                 "graph_path": graph_path.as_posix(),
+                "view_graph_path": graph_path.as_posix(),
+                "view": view,
                 "category": self.category_from_graph(graph_path),
                 "attempt": item["attempt"],
                 "question_count": len(item["question_generation"].get("questions", [])),
@@ -173,7 +177,7 @@ class DatasetPipeline(object):
         )
 
         if rows:
-            self.remove_rows_for_sample(self.sample_id_from_graph(graph_path))
+            self.remove_rows_for_graph(graph_path)
             for row in rows:
                 self.rows[row["row_id"]] = row
             self.write_rows()
@@ -222,12 +226,24 @@ class DatasetPipeline(object):
 
     def remove_graph(self, graph_path):
         sample_id = self.sample_id_from_graph(graph_path)
-        removed = self.remove_rows_for_sample(sample_id)
+        removed = self.remove_rows_for_graph(graph_path)
         if not removed:
             return False
         self.write_rows()
-        logger.info(f"[DATASET DELETE] -> Sample: {sample_id} Rows: {removed}")
+        logger.info(f"[DATASET DELETE] -> Graph: {Path(graph_path).name} Sample: {sample_id} Rows: {removed}")
         return True
+
+    def remove_rows_for_graph(self, graph_path):
+        graph_path = Path(graph_path).as_posix()
+        keys = [
+            key
+            for key, row in self.rows.items()
+            if row.get("metadata", {}).get("graph_path") == graph_path
+            or row.get("metadata", {}).get("view_graph_path") == graph_path
+        ]
+        for key in keys:
+            self.rows.pop(key, None)
+        return len(keys)
 
     def remove_rows_for_sample(self, sample_id):
         keys = [key for key, row in self.rows.items() if row.get("sample_id") == sample_id]
@@ -306,13 +322,26 @@ class DatasetPipeline(object):
 
     @staticmethod
     def category_from_graph(graph_path):
-        name = Path(graph_path).stem.replace("_properties_graph", "").replace("_db_extract", "")
-        match = re.search(r"recipe_\d+_(.+)", name)
+        name = DatasetPipeline.sample_id_from_graph(graph_path)
+        match = re.search(r"recipe_\d+_(.+?)(?:_[0-9a-f]{32})?$", name)
         return match.group(1) if match else "unknown"
 
     @staticmethod
     def sample_id_from_graph(graph_path):
-        return Path(graph_path).stem.replace("_properties_graph", "").replace("_db_extract", "")
+        stem = Path(graph_path).stem
+        for suffix in ("_properties_graph", "_inline_graph", "_crossline_graph"):
+            if stem.endswith(suffix):
+                stem = stem.removesuffix(suffix)
+        return stem.replace("_db_extract", "")
+
+    @staticmethod
+    def view_from_graph(graph_path):
+        name = Path(graph_path).name
+        if name.endswith("_inline_graph.json"):
+            return "inline"
+        if name.endswith("_crossline_graph.json"):
+            return "crossline"
+        return "volume"
 
     @staticmethod
     def normalize_text(text):
@@ -353,12 +382,12 @@ class DatasetWatcher(FileSystemEventHandler):
             self.handle_path(path)
 
     def handle_deleted(self, path):
-        if path.name.endswith("_properties_graph.json"):
+        if self.is_graph_file(path):
             self.processed_mtimes.pop(path.as_posix(), None)
             self.pipeline.remove_graph(path)
 
     def handle_path(self, path):
-        if not path.name.endswith("_properties_graph.json") or not path.exists():
+        if not self.is_graph_file(path) or not path.exists():
             return
         key = path.as_posix()
         current_mtime = path.stat().st_mtime
@@ -375,8 +404,12 @@ class DatasetWatcher(FileSystemEventHandler):
         )
 
     def process_existing(self):
-        for graph_path in sorted(self.graph_root.glob("*_properties_graph.json")):
+        for graph_path in sorted(self.graph_root.glob("*_graph.json")):
             self.handle_path(graph_path)
+
+    @staticmethod
+    def is_graph_file(path):
+        return path.name.endswith("_inline_graph.json") or path.name.endswith("_crossline_graph.json")
 
     def run(self):
         self.graph_root.mkdir(parents=True, exist_ok=True)
@@ -397,7 +430,7 @@ class DatasetWatcher(FileSystemEventHandler):
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Watch properties graphs and generate verified dataset rows.")
+    parser = argparse.ArgumentParser(description="Watch projected view graphs and generate verified dataset rows.")
     parser.add_argument("--graph-root", default=str(default_graph_root))
     parser.add_argument("--output", default=str(default_output))
     parser.add_argument("--max-attempts", type=int, default=10)
