@@ -25,6 +25,18 @@ from scripts.visualize_sample import list_arrays
 DEFAULT_IMAGE_DIR = ROOT / "Dataset" / "multimodal_images"
 
 
+IMAGE_REQUIREMENTS = {
+    "boring": set(),
+    "fault_only": {"fault"},
+    "fault_complex": {"fault"},
+    "salt_only": {"salt"},
+    "onlap": {"onlap"},
+    "depositional": {"depositional"},
+    "salt_fault_mixed": {"fault", "salt"},
+    "full_mixed": {"fault", "salt", "closure", "onlap"},
+}
+
+
 def create_sample_images(sample_path, graph_path=None, image_dir=DEFAULT_IMAGE_DIR):
     sample_path = Path(sample_path)
     sample_id = sample_path.name
@@ -104,6 +116,76 @@ def create_sample_images(sample_path, graph_path=None, image_dir=DEFAULT_IMAGE_D
     assets_path = sample_image_dir / "assets.json"
     assets_path.write_text(json.dumps(assets, indent=2, default=str))
     return assets
+
+
+def ensure_sample_images(sample_id, graph_path=None, image_dir=DEFAULT_IMAGE_DIR):
+    sample_path = ROOT / "outputs" / sample_id
+    assets_path = Path(image_dir) / sample_id / "assets.json"
+    if assets_path.exists():
+        assets = json.loads(assets_path.read_text())
+    else:
+        assets = create_sample_images(sample_path, graph_path=graph_path, image_dir=image_dir)
+
+    valid, reason = validate_sample_images(assets)
+    if valid:
+        return assets
+
+    # Cached assets can be stale after graph/image logic changes.
+    assets = create_sample_images(sample_path, graph_path=graph_path, image_dir=image_dir)
+    valid, reason = validate_sample_images(assets)
+    if not valid:
+        raise ValueError(reason)
+    return assets
+
+
+def validate_sample_images(assets):
+    sample_id = assets.get("sample_id", "")
+    category = category_from_sample_name(sample_id)
+    kinds = {
+        item.get("kind")
+        for item in assets.get("overlay_arrays", [])
+        if item.get("kind")
+    }
+
+    if category == "boring":
+        if kinds:
+            return False, "boring sample should not have overlay masks"
+        return validate_base_views(assets)
+
+    required = IMAGE_REQUIREMENTS.get(category, set())
+    if category in {"salt_fault_mixed", "full_mixed"}:
+        if not kinds.intersection(required):
+            return False, f"{category} sample should have at least one intended overlay"
+    elif required and not required.issubset(kinds):
+        return False, f"{category} sample missing required overlay: {sorted(required - kinds)}"
+
+    valid, reason = validate_base_views(assets)
+    if not valid:
+        return valid, reason
+    return validate_overlay_views(assets, expected_overlay=bool(required))
+
+
+def validate_base_views(assets):
+    for view in ("inline", "crossline"):
+        info = assets.get("views", {}).get(view, {})
+        image_path = info.get("image_path")
+        if not image_path or not Path(image_path).exists():
+            return False, f"missing {view} image"
+    return True, "ok"
+
+
+def validate_overlay_views(assets, expected_overlay):
+    for view in ("inline", "crossline"):
+        info = assets.get("views", {}).get(view, {})
+        overlay_path = info.get("overlay_image_path")
+        mask_path = info.get("mask_image_path")
+        if expected_overlay and (not overlay_path or not mask_path):
+            return False, f"missing {view} overlay or mask"
+        if overlay_path and not Path(overlay_path).exists():
+            return False, f"missing {view} overlay image"
+        if mask_path and not Path(mask_path).exists():
+            return False, f"missing {view} mask image"
+    return True, "ok"
 
 
 def choose_sample_overlay(sample_path, sample_id):

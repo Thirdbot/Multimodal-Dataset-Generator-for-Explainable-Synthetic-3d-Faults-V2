@@ -13,10 +13,16 @@ OUTPUTS_ROOT = ROOT / "outputs"
 
 def create_images_for_row(row, image_dir):
     sample_id = row["sample_id"]
-    sample_path = resolve_sample_folder(sample_id)
     cached = load_sample_assets(sample_id, image_dir)
     if cached:
         return normalize_cached_assets(cached)
+
+    # Dataset export should use the sample-level assets created by graph_generation.py
+    # or the hybrid pipeline precheck. This keeps overlays tied to sample intent.
+    if row.get("image_assets"):
+        return normalize_cached_assets(row["image_assets"])
+
+    sample_path = resolve_sample_folder(sample_id)
 
     seismic_item = select_seismic_item(sample_path)
     fault_segments_item = select_fault_segments_item(sample_path)

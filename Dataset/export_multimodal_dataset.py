@@ -36,8 +36,8 @@ def export_dataset(verified_path, output_path, image_dir, limit=None):
     skipped = []
     for row in source_rows:
         try:
-            if not is_exportable_answer(row.get("answer", "")):
-                raise ValueError("answer is incomplete or not training-ready")
+            if not is_hybrid_verified_row(row):
+                raise ValueError("row is not a hybrid verified row")
             image_info = create_images_for_row(row, image_dir)
             for view, view_info in views_for_row(row, image_info):
                 exported.append(multimodal_row(row, image_info, view, view_info))
@@ -69,15 +69,21 @@ def multimodal_row(source_row, image_info, view, view_info):
     instruction = source_row["instruction"]
     answer = source_row["answer"]
     sample_id = source_row["sample_id"]
+    if not str(instruction).strip():
+        raise ValueError("missing instruction")
+    if not str(answer).strip():
+        raise ValueError("missing answer")
     source_row_id = source_row.get("row_id", sample_id)
     row_id = f"{source_row_id}_{view}"
     trace = source_row.get("trace", {})
     verification = source_row.get("verification", {})
-    deciding_evidence = trace.get("deciding_evidence") or {}
+    deciding_evidence = trace.get("deciding_evidence") or trace.get("answer_evidence", [{}])[0] or {}
     if not deciding_evidence and source_row.get("evidence"):
         deciding_evidence = source_row["evidence"][0]
 
     image_path = view_info["image_path"].as_posix()
+    if not image_path:
+        raise ValueError(f"missing {view} image")
     overlay_image_path = view_info["overlay_image_path"].as_posix() if view_info["overlay_image_path"] else ""
     mask_image_path = view_info["mask_image_path"].as_posix() if view_info["mask_image_path"] else ""
     graph_path = source_row.get("metadata", {}).get("graph_path", "")
@@ -124,18 +130,18 @@ def multimodal_row(source_row, image_info, view, view_info):
             "render_type": "single_view_seismic_slice",
         },
         "trace": {
-            "graph_trace": trace.get("graph_trace", source_row.get("evidence", [])),
+            "graph_trace": trace.get("graph_trace", trace.get("graph_evidence", source_row.get("evidence", []))),
             "question_prompt": trace.get("question_prompt", ""),
             "question_raw_output": trace.get("question_raw_output", ""),
             "llm_question": trace.get("llm_question", source_row.get("question", instruction)),
             "llm_prompt": trace.get("llm_prompt", ""),
             "llm_raw_output": trace.get("llm_raw_output", ""),
             "llm_answer": trace.get("llm_answer", answer),
-            "nli_status": verification.get("status", ""),
+            "nli_status": verification.get("status", verification.get("verdict", "")),
             "nli_score": verification.get("score", ""),
             "nli_model": trace.get("nli_model", ""),
             "nli_deciding_evidence": deciding_evidence,
-            "nli_retrieved_evidence": trace.get("retrieved_evidence", source_row.get("evidence", [])),
+            "nli_retrieved_evidence": trace.get("retrieved_evidence", trace.get("answer_evidence", source_row.get("evidence", []))),
         },
     }
 
@@ -163,15 +169,16 @@ def views_for_row(row, image_info):
     return list(image_info.get("views", {}).items())
 
 
-def is_exportable_answer(text):
-    text = str(text or "").strip()
-    if len(text.split()) < 6:
-        return False
-    if text[-1:] not in {".", "!", "?"}:
-        return False
-    bad_endings = ("because", "due to", "indicating", "showing", "suggesting", "with", "including")
-    lowered = text.lower()
-    return not any(lowered.endswith(f" {ending}.") or lowered == f"{ending}." for ending in bad_endings)
+def is_hybrid_verified_row(row):
+    trace = row.get("trace", {})
+    verification = row.get("verification", {})
+    return bool(
+        row.get("question")
+        and row.get("answer")
+        and trace.get("question_evidence")
+        and trace.get("answer_evidence")
+        and verification.get("score") is not None
+    )
 
 
 def write_csv(output_path, rows):

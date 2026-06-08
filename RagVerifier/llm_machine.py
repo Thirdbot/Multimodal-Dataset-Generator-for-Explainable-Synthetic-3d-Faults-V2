@@ -152,9 +152,9 @@ def parse_atomic_sentences(text):
 class LLMMachine:
     def __init__(self):
         self.DEFAULT_VLLM_ENDPOINT = "http://localhost:8000/v1"
-        self.temp = 0.1 # lower the better logic
+        self.temp = 0.2 # lower the better logic
         self.top_p = 0.95 # higher the better fluency
-        self.max_tok = 512
+        self.max_tok = 256
         self.thinking_enable = False
         self.presence_penalty = 1 # -2,2 avoid repetition
         self.frequency_penalty = 0.2 # -2,2 more natural
@@ -162,7 +162,7 @@ class LLMMachine:
 
         self.client = ChatOpenAI(base_url=self.DEFAULT_VLLM_ENDPOINT,
                                  api_key="None",
-                                 model="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+                                 model="Qwen/Qwen2.5-1.5B-Instruct",
                                  temperature=self.temp,
                                  frequency_penalty=self.frequency_penalty,
                                  presence_penalty=self.presence_penalty,
@@ -182,6 +182,23 @@ class LLMMachine:
         return "\n".join(doc.page_content for doc in docs)
 
 
+    def question_generation(self):
+        q_query_engine = (
+                {
+                    "evidence":itemgetter("evidence"),
+                } | ChatPromptTemplate.from_template(question_generation_prompt) | self.client | StrOutputParser()
+        )
+        return  q_query_engine
+
+    def answer_generation(self):
+        q_answer_engine = (
+            {
+                "evidence":itemgetter("evidence"),
+                "question":itemgetter("question"),
+            } | ChatPromptTemplate.from_template(hypothesis_qa_prompt) | self.client | StrOutputParser()
+        )
+        return q_answer_engine
+
     def retrieve_many(self, retrieval):
         def _retrieve(query_text):
             queries = [line.strip() for line in str(query_text).splitlines() if line.strip()]
@@ -199,23 +216,6 @@ class LLMMachine:
             return docs
 
         return _retrieve
-
-    def question_generation(self):
-        q_query_engine = (
-                {
-                    "evidence":itemgetter("evidence"),
-                } | ChatPromptTemplate.from_template(question_generation_prompt) | self.client | StrOutputParser()
-        )
-        return  q_query_engine
-
-    def answer_generation(self):
-        q_answer_engine = (
-            {
-                "evidence":itemgetter("evidence"),
-                "question":itemgetter("question"),
-            } | ChatPromptTemplate.from_template(hypothesis_qa_prompt) | self.client | StrOutputParser()
-        )
-        return q_answer_engine
 
 if __name__ == "__main__":
 

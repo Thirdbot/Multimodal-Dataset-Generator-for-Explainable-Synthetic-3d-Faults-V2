@@ -8,8 +8,8 @@ from pathlib import Path
 from graph_retriever.strategies import Eager
 from langchain_core.vectorstores import InMemoryVectorStore
 from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_core.documents import Document
 from langchain_graph_retriever import GraphRetriever
+from langchain_core.documents import Document
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -26,7 +26,13 @@ class Rag:
             model_name="all-MiniLM-L6-v2",  # GeoGPT-Research-Project/GeoEmbedding
             model_kwargs={"trust_remote_code": True},
         )
-        self.strategy = Eager(k=8, start_k=1,select_k=8, max_depth=3)
+        self.strategy = Eager(
+            k=12,
+            start_k=4,
+            select_k=12,
+            max_depth=2,
+        )
+
 
     def generator_rag(self,graph_path="traces/views_graph"):
         for graph in self.get_graph(graph_directory=graph_path):
@@ -44,7 +50,11 @@ class Rag:
         source_evidence = TextTransform().relations_to_evidence(tracer.structural_evidence())  # get graph in text
         content = self.prepare_content(source_evidence)
         vector_store = self.vector_store_from_rag(content)
-        edges = {(item["edge"],item["edge"]) for item in source_evidence}
+        edges = {
+            ("edge", "edge"),
+            ("source", "source"),
+            ("target", "target"),
+        }
         return vector_store, edges
 
     def vector_store_from_rag(self,content):
@@ -94,4 +104,5 @@ class Rag:
 
 if __name__ == "__main__":
     rag = Rag(embedding_model="all-MiniLM-L6-v2")
-    next(list(rag.generator_rag()))
+    selected_graph = rag.get_graph()[0]
+    print(rag.get_all(selected_graph))
