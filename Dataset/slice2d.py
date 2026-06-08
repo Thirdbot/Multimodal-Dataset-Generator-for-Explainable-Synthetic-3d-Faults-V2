@@ -306,94 +306,40 @@ def align_overlay_mask(overlay_mask, target_shape):
 
 
 def save_panel(sample_id, seismic_name, views, output_path):
-    fig, axes = plt.subplots(1, 3, figsize=(14, 5), dpi=180)
-    fig.patch.set_facecolor("black")
-    for ax, view in zip(axes, ("inline", "crossline", "timeslice")):
-        subtitle = view_label(view, views["indices"])
-        ax.imshow(views[view], cmap="gray", aspect="auto", origin="lower")
-        ax.set_title(subtitle, color="white", fontsize=10)
-        ax.set_xticks([])
-        ax.set_yticks([])
-        ax.set_facecolor("black")
-    fig.suptitle(f"{sample_id}\n{seismic_name}", color="white", fontsize=11)
-    save_figure(fig, output_path)
+    image = np.hstack([views[view] for view in ("inline", "crossline", "timeslice")])
+    save_gray_image(image, output_path)
 
 
 def save_overlay_panel(sample_id, seismic_name, views, overlay_views, overlay_kind, overlay_color, output_path):
-    fig, axes = plt.subplots(1, 3, figsize=(14, 5), dpi=180)
-    fig.patch.set_facecolor("black")
-    rgb = np.array(plt.matplotlib.colors.to_rgb(overlay_color), dtype=np.float32)
-    for ax, view in zip(axes, ("inline", "crossline", "timeslice")):
-        image = views[view]
-        overlay_mask = align_overlay_mask(overlay_views[view], image.shape)
-        base_rgb = np.dstack([image, image, image])
-        alpha = overlay_mask[..., None] * 0.55
-        composite = base_rgb * (1.0 - alpha) + (np.ones_like(base_rgb) * rgb) * alpha
-        ax.imshow(composite, aspect="auto", origin="lower")
-        ax.set_title(view_label(view, views["indices"]), color="white", fontsize=10)
-        ax.set_xticks([])
-        ax.set_yticks([])
-        ax.set_facecolor("black")
-    fig.suptitle(f"{sample_id}\n{seismic_name} + {overlay_kind}", color="white", fontsize=11)
-    save_figure(fig, output_path)
+    image = np.hstack([
+        overlay_image(views[view], overlay_views[view], overlay_color)
+        for view in ("inline", "crossline", "timeslice")
+    ])
+    save_rgb_image(image, output_path)
 
 
 def save_mask_panel(sample_id, overlay_views, overlay_kind, output_path):
-    fig, axes = plt.subplots(1, 3, figsize=(14, 5), dpi=180)
-    fig.patch.set_facecolor("black")
-    for ax, view in zip(axes, ("inline", "crossline", "timeslice")):
-        ax.imshow(overlay_views[view], cmap="gray", aspect="auto", origin="lower")
-        ax.set_title(view.title(), color="white", fontsize=10)
-        ax.set_xticks([])
-        ax.set_yticks([])
-        ax.set_facecolor("black")
-    fig.suptitle(f"{sample_id}\n{overlay_kind} mask", color="white", fontsize=11)
-    save_figure(fig, output_path)
+    image = np.hstack([overlay_views[view] for view in ("inline", "crossline", "timeslice")])
+    save_gray_image(image, output_path)
 
 
 def save_single_image(sample_id, seismic_name, view, views, output_path):
-    fig, ax = plt.subplots(1, 1, figsize=(6, 6), dpi=180)
-    fig.patch.set_facecolor("black")
-    ax.imshow(views[view], cmap="gray", aspect="auto", origin="lower")
-    ax.set_xticks([])
-    ax.set_yticks([])
-    ax.set_facecolor("black")
-    save_figure(fig, output_path)
+    save_gray_image(views[view], output_path)
 
 
 def save_single_overlay(sample_id, seismic_name, view, views, overlay_views, overlay_kind, overlay_color, output_path):
-    fig, ax = plt.subplots(1, 1, figsize=(6, 6), dpi=180)
-    fig.patch.set_facecolor("black")
-    image = views[view]
-    overlay_mask = align_overlay_mask(overlay_views[view], image.shape)
-    rgb = np.array(plt.matplotlib.colors.to_rgb(overlay_color), dtype=np.float32)
-    base_rgb = np.dstack([image, image, image])
-    alpha = overlay_mask[..., None] * 0.55
-    composite = base_rgb * (1.0 - alpha) + (np.ones_like(base_rgb) * rgb) * alpha
-    ax.imshow(composite, aspect="auto", origin="lower")
-    ax.set_xticks([])
-    ax.set_yticks([])
-    ax.set_facecolor("black")
-    save_figure(fig, output_path)
+    save_rgb_image(overlay_image(views[view], overlay_views[view], overlay_color), output_path)
 
 
 def save_single_mask(sample_id, view, overlay_views, overlay_kind, output_path, overlay_color="#ef4444"):
-    fig, ax = plt.subplots(1, 1, figsize=(6, 6), dpi=180)
-    fig.patch.set_facecolor("black")
     mask = overlay_views[view] > 0
     rgb = np.array(plt.matplotlib.colors.to_rgb(overlay_color), dtype=np.float32)
     image = np.zeros((*mask.shape, 3), dtype=np.float32)
     image[mask] = rgb
-    ax.imshow(image, aspect="auto", origin="lower")
-    ax.set_xticks([])
-    ax.set_yticks([])
-    ax.set_facecolor("black")
-    save_figure(fig, output_path)
+    save_rgb_image(image, output_path)
 
 
 def save_composite_overlay(sample_id, seismic_name, view, views, overlay_components, output_path):
-    fig, ax = plt.subplots(1, 1, figsize=(6, 6), dpi=180)
-    fig.patch.set_facecolor("black")
     image = views[view]
     composite = np.dstack([image, image, image])
 
@@ -403,17 +349,10 @@ def save_composite_overlay(sample_id, seismic_name, view, views, overlay_compone
         alpha = overlay_mask[..., None] * 0.55
         composite = composite * (1.0 - alpha) + (np.ones_like(composite) * rgb) * alpha
 
-    overlay_kind = "+".join(component["kind"] for component in overlay_components)
-    ax.imshow(composite, aspect="auto", origin="lower")
-    ax.set_xticks([])
-    ax.set_yticks([])
-    ax.set_facecolor("black")
-    save_figure(fig, output_path)
+    save_rgb_image(composite, output_path)
 
 
 def save_composite_mask(sample_id, view, overlay_components, output_path):
-    fig, ax = plt.subplots(1, 1, figsize=(6, 6), dpi=180)
-    fig.patch.set_facecolor("black")
     first_mask = overlay_components[0]["views"][view]
     image = np.zeros((*first_mask.shape, 3), dtype=np.float32)
 
@@ -422,12 +361,27 @@ def save_composite_mask(sample_id, view, overlay_components, output_path):
         rgb = np.array(plt.matplotlib.colors.to_rgb(component["color"]), dtype=np.float32)
         image[mask] = rgb
 
-    overlay_kind = "+".join(component["kind"] for component in overlay_components)
-    ax.imshow(image, aspect="auto", origin="lower")
-    ax.set_xticks([])
-    ax.set_yticks([])
-    ax.set_facecolor("black")
-    save_figure(fig, output_path)
+    save_rgb_image(image, output_path)
+
+
+def overlay_image(image, overlay_mask, overlay_color):
+    overlay_mask = align_overlay_mask(overlay_mask, image.shape)
+    rgb = np.array(plt.matplotlib.colors.to_rgb(overlay_color), dtype=np.float32)
+    base_rgb = np.dstack([image, image, image])
+    alpha = overlay_mask[..., None] * 0.55
+    return base_rgb * (1.0 - alpha) + (np.ones_like(base_rgb) * rgb) * alpha
+
+
+def save_gray_image(image, output_path):
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.imsave(output_path, np.flipud(image), cmap="gray", vmin=0.0, vmax=1.0)
+
+
+def save_rgb_image(image, output_path):
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.imsave(output_path, np.flipud(np.clip(image, 0.0, 1.0)))
 
 
 def view_label(view, indices):
