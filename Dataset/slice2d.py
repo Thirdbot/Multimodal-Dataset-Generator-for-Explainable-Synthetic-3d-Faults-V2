@@ -355,11 +355,9 @@ def save_single_image(sample_id, seismic_name, view, views, output_path):
     fig, ax = plt.subplots(1, 1, figsize=(6, 6), dpi=180)
     fig.patch.set_facecolor("black")
     ax.imshow(views[view], cmap="gray", aspect="auto", origin="lower")
-    ax.set_title(view_label(view, views["indices"]), color="white", fontsize=10)
     ax.set_xticks([])
     ax.set_yticks([])
     ax.set_facecolor("black")
-    fig.suptitle(f"{sample_id}\n{seismic_name}", color="white", fontsize=9)
     save_figure(fig, output_path)
 
 
@@ -373,11 +371,9 @@ def save_single_overlay(sample_id, seismic_name, view, views, overlay_views, ove
     alpha = overlay_mask[..., None] * 0.55
     composite = base_rgb * (1.0 - alpha) + (np.ones_like(base_rgb) * rgb) * alpha
     ax.imshow(composite, aspect="auto", origin="lower")
-    ax.set_title(view_label(view, views["indices"]), color="white", fontsize=10)
     ax.set_xticks([])
     ax.set_yticks([])
     ax.set_facecolor("black")
-    fig.suptitle(f"{sample_id}\n{seismic_name} + {overlay_kind}", color="white", fontsize=9)
     save_figure(fig, output_path)
 
 
@@ -389,11 +385,9 @@ def save_single_mask(sample_id, view, overlay_views, overlay_kind, output_path, 
     image = np.zeros((*mask.shape, 3), dtype=np.float32)
     image[mask] = rgb
     ax.imshow(image, aspect="auto", origin="lower")
-    ax.set_title(view.title(), color="white", fontsize=10)
     ax.set_xticks([])
     ax.set_yticks([])
     ax.set_facecolor("black")
-    fig.suptitle(f"{sample_id}\n{overlay_kind} mask", color="white", fontsize=9)
     save_figure(fig, output_path)
 
 
@@ -411,11 +405,9 @@ def save_composite_overlay(sample_id, seismic_name, view, views, overlay_compone
 
     overlay_kind = "+".join(component["kind"] for component in overlay_components)
     ax.imshow(composite, aspect="auto", origin="lower")
-    ax.set_title(view_label(view, views["indices"]), color="white", fontsize=10)
     ax.set_xticks([])
     ax.set_yticks([])
     ax.set_facecolor("black")
-    fig.suptitle(f"{sample_id}\n{seismic_name} + {overlay_kind}", color="white", fontsize=9)
     save_figure(fig, output_path)
 
 
@@ -432,11 +424,9 @@ def save_composite_mask(sample_id, view, overlay_components, output_path):
 
     overlay_kind = "+".join(component["kind"] for component in overlay_components)
     ax.imshow(image, aspect="auto", origin="lower")
-    ax.set_title(view.title(), color="white", fontsize=10)
     ax.set_xticks([])
     ax.set_yticks([])
     ax.set_facecolor("black")
-    fig.suptitle(f"{sample_id}\n{overlay_kind} mask", color="white", fontsize=9)
     save_figure(fig, output_path)
 
 
