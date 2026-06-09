@@ -8,7 +8,9 @@ authors = [
 ]
 requires-python = ">=3.11"
 dependencies = [
+    "datasets>=4.4.1",
     "graph-retriever>=0.8.0",
+    "huggingface-hub>=1.1.5",
     "langchain-graph-retriever>=0.8.0",
     "langchain-huggingface>=1.1.0",
     "longtracer>=0.2.0",
