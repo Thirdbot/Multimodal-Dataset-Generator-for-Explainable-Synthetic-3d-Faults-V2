@@ -42,9 +42,9 @@ class TextTransform(object):
         "gouge_pctile": ("{source}", "show", "gouge near the {value} percentile"),
         "sand_voxel_pct": ("sand-prone interval", "make up", "about {value} percent of the section"),
         "sand_layer_percent_a_posteriori": ("sand-prone layering", "make up", "about {value} of the section"),
-        "closure_voxel_pct": ("closure area", "cover", "about {value} percent of the section"),
-        "closure_voxel_count": ("closure area", "cover", "about {value} voxels"),
-        "n_voxels": ("{source}", "cover", "about {value} voxels"),
+        "closure_voxel_pct": ("closure expression", "cover", "about {value} percent of the section"),
+        "closure_voxel_count": ("closure expression", "cover", "about {value} voxels"),
+        "n_voxels": ("{source}", "occupy", "about {value} voxels"),
         "n_voxels_faults": ("fault zone", "cover", "about {value} voxels"),
         "fluid": ("{source}", "contain", "{value}"),
     }
@@ -218,7 +218,7 @@ class TextTransform(object):
         if edge == "number_hc_closures":
             if self.is_false_value(target):
                 return None
-            return self.realise("the section", "show", self.count_phrase(target, "hydrocarbon closure"))
+            return self.realise("the section", "contain", self.count_phrase(target, "hydrocarbon closure"))
 
         if edge == "number_onlap_episodes":
             if self.is_false_value(target):
