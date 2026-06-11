@@ -22,8 +22,6 @@ OBJECT_ZARR_CANDIDATES = {
       "fault": [
           "fault_segments_*.zarr",              # best fault object mask
           "fault_intersection_segments_*.zarr", # fault intersections
-          "fault_segments_throw_*.zarr",        # throw-valued fault volume
-          "fault_segments_azimuth_*.zarr",      # azimuth-valued fault volume
       ],
       "closure": [
           "closures/oil.zarr",
@@ -40,7 +38,7 @@ OBJECT_ZARR_CANDIDATES = {
       "salt": [
           # only if Synthoseis writes a salt label in that build.
           # If none exists, infer from closures/intersects_salt graph data, not image mask.
-          "*salt*.zarr",
+          "salt_[0-9]*.zarr",
       ],
       "lithology": [
           "geology/faulted_lithology.zarr",
@@ -104,41 +102,6 @@ class GraphImageExtractor:
                     objects.append(item)
         return objects
 
-    @staticmethod
-    def _get_coordinate(graph_objects,object_type):
-        """Return object coordinates as [{"id": ..., "x": ..., "y": ..., "z": ...}]."""
-        coordinates = []
-        for graph_object in graph_objects:
-            object_id = graph_object.get("id", "")
-            if not object_id.startswith(f"{object_type}_"):
-                continue
-
-            if object_type == "closure":
-                x = GraphImageExtractor._range_center(graph_object, "x")
-                y = GraphImageExtractor._range_center(graph_object, "y")
-                z = GraphImageExtractor._range_center(graph_object, "z")
-            else:
-                x = graph_object.get("x", graph_object.get("x0"))
-                y = graph_object.get("y", graph_object.get("y0"))
-                z = graph_object.get("z", graph_object.get("z0"))
-
-            coordinates.append({
-                "id": object_id,
-                "x": x,
-                "y": y,
-                "z": z,
-            })
-
-        return coordinates
-
-    @staticmethod
-    def _range_center(graph_object,axis):
-        low = graph_object.get(f"{axis}_min")
-        high = graph_object.get(f"{axis}_max")
-        if low is None or high is None:
-            return graph_object.get(axis, graph_object.get(f"{axis}0"))
-        return (float(low) + float(high)) / 2
-
     def extract_object_images(self):
         # Future hook: extract 3D object arrays, create 2D object crops/masks,
         # and write view-specific graph coordinates for VLM dataset rows.
@@ -159,10 +122,11 @@ class GraphImageExtractor:
             type_sliced_objects = []
             for pattern in patterns:
                 for match_sample in self.build_folder_path.glob(pattern):
+                    if object_type == "fault" and self._is_fault_property_volume(match_sample):
+                        continue
                     # load 1 object and slice it
                     property_object = self._load_sample_object(match_sample)
-                    obj_coordinate = self._get_coordinate(sample_object_properties,object_type)
-                    slices = self._object_slicing(base_volume,property_object,obj_coordinate)
+                    slices = self._object_slicing(base_volume,property_object)
                     type_sliced_objects.extend(slices)
             selected_type_slices = self._select_average_mask_slices(
                 type_sliced_objects,
@@ -172,6 +136,11 @@ class GraphImageExtractor:
             self.make_image(sample_name, object_type, selected_type_slices)
             selected_objects.update(selected_type_slices)
         return selected_objects
+
+    @staticmethod
+    def _is_fault_property_volume(path):
+        name = Path(path).name
+        return "fault_segments_throw_" in name or "fault_segments_azimuth_" in name
 
     def _extract_basic(self):
         # Extract original 3D object arrays from Synthoseis build folder
@@ -192,7 +161,7 @@ class GraphImageExtractor:
             all_patterns.extend(patterns)
         return all_patterns
 
-    def _object_slicing(self,basic_obj,prop_obj,obj_coordinate):
+    def _object_slicing(self,basic_obj,prop_obj):
         # Slice 3D object arrays and create 2D object crops/masks
         basic_array = self._as_array(basic_obj)
         prop_array = self._as_array(prop_obj)
@@ -211,28 +180,21 @@ class GraphImageExtractor:
 
         prop_mask = np.nan_to_num(prop_array, nan=0.0) != 0
 
-        for coord in obj_coordinate:
-            # will have all object coordinates for each object type present in the mask object, so if there are 7 objs in properties, this will find 7 objs by coordinate iteratively
-            object_mask = self._map_coordinate_to_mask(prop_mask, coord)
-            if object_mask.any():
-                inline_index = int(object_mask.sum(axis=(1, 2)).argmax())
-                crossline_index = int(object_mask.sum(axis=(0, 2)).argmax())
-                timeslice_index = int(object_mask.sum(axis=(0, 1)).argmax())
-            else:
-                inline_index = common_shape[0] // 2
-                crossline_index = common_shape[1] // 2
-                timeslice_index = common_shape[2] // 2
+
+        if prop_mask.any():
+            inline_index = int(prop_mask.sum(axis=(1, 2)).argmax())
+            crossline_index = int(prop_mask.sum(axis=(0, 2)).argmax())
+            timeslice_index = int(prop_mask.sum(axis=(0, 1)).argmax())
             sliced = {
-                "id": coord["id"],
                 "basic": {
                     "inline": basic_array[inline_index, :, :],
                     "crossline": basic_array[:, crossline_index, :],
                     "timeslice": basic_array[:, :, timeslice_index],
                 },
                 "mask": {
-                    "inline": object_mask[inline_index, :, :],
-                    "crossline": object_mask[:, crossline_index, :],
-                    "timeslice": object_mask[:, :, timeslice_index],
+                    "inline": prop_mask[inline_index, :, :],
+                    "crossline": prop_mask[:, crossline_index, :],
+                    "timeslice": prop_mask[:, :, timeslice_index],
                 },
             }
             sliced_objects.append(sliced)
@@ -240,27 +202,20 @@ class GraphImageExtractor:
 
     def _select_average_mask_slices(self,slices,object_type,object_properties):
         # Group slice candidates by object id and prefer candidates close to expected object size.
-        grouped = {}
-        for sliced in slices:
-            grouped.setdefault(sliced["id"], []).append(sliced)
+        candidates = [
+            candidate
+            for candidate in slices
+            if self._slice_mask_area(candidate) > 0
+        ]
+        if not candidates:
+            return {}
 
-        selected = {}
-        for object_id, candidates in grouped.items():
-            non_empty = [
-                candidate
-                for candidate in candidates
-                if self._slice_mask_area(candidate) > 0
-            ]
-            candidates = non_empty or candidates
-            expected_area = self._expected_voxel_count(object_id, object_type, object_properties)
-            if expected_area is None:
-                areas = [self._slice_mask_area(candidate) for candidate in candidates]
-                expected_area = float(np.mean(areas)) if areas else 0.0
-            selected[object_id] = min(
+        return {
+            object_type: max(
                 candidates,
-                key=lambda candidate: abs(self._slice_mask_area(candidate) - expected_area),
+                key=self._slice_mask_area,
             )
-        return selected
+        }
 
     def _expected_voxel_count(self,object_id,object_type,object_properties):
         if object_type == "fault":
