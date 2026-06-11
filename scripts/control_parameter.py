@@ -1,3 +1,9 @@
+"""Build high-level recipes and low-level Synthoseis config JSON files.
+
+This script is the first stage of the local generation workflow:
+settings.yaml -> category controls -> build_configs/*.json + recipes/*.yaml.
+"""
+
 from pathlib import Path
 import uuid
 
@@ -78,7 +84,7 @@ quality_check_output = {
     'cleanup_intermediates': None, # no clean-up for labels
 }
 
-# read only
+# Holds the mutable Synthoseis parameter template and category-specific presets.
 class CategoricalParameter:
 
     def __init__(self, **kwargs):
@@ -172,14 +178,14 @@ class CategoricalParameter:
         self.kwargs["min_number_faults"] = min_number_faults
         self.kwargs["max_number_faults"] = max_number_faults
 
-    def check_value(self):
+    def _check_value(self):
         all_none = {k for k,v in self.kwargs.items() if v is None}
         if all_none:
             raise Exception(f"{all_none} are None")
         else:
             print("config checking passed!!")
 
-    def expose(self):
+    def _expose(self):
         """
         print out whole parameter for 1 sample
         :return: Dictionary
@@ -280,7 +286,7 @@ class CategoricalParameter:
         self.kwargs["max_number_faults"] = f_max
         self.kwargs["closure_types"] = ["simple", "faulted", "onlap"]
 
-# read-write only
+# Turns population/ratio intent into concrete recipe files and per-sample configs.
 class SampleControl:
     def __init__(self,categorical_parameter, **kwargs):
         self.kwargs = kwargs
@@ -293,10 +299,10 @@ class SampleControl:
         set sample name to build's id and its category
         :param name:
         :param category:
-        :return: parameters of Synthoseis configs
+        :return: parameters of Synthoseis build_configs
         """
         self.categorical_parameter.set(category)
-        return self.categorical_parameter.expose()
+        return self.categorical_parameter._expose()
 
     def _manage_population(self):
         """
@@ -348,11 +354,11 @@ class SampleControl:
 
         return population ,types_ratio
 
-    def populate(self,recipe_path,config_path,seed=42):
-        recipe_path = Path(recipe_path)
-        config_path = Path(config_path)
+    def populate(self,recipes_path,build_configs_path):
+        recipes_path = Path(recipes_path)
+        build_configs_path = Path(build_configs_path)
 
-        run_number = len(list(recipe_path.iterdir()))
+        run_number = len(list(recipes_path.iterdir()))
 
         counts = {}
 
@@ -371,31 +377,30 @@ class SampleControl:
         recipe_name = f"recipe_{run_number}"
         recipe_config = {
             'population': {
-                'seed': seed,
                 'amount':self.population_amount},
             'category_ratio': self.ratio_configs,
             'category_counts': counts,
             'category_order': list(counts.keys())
         }
 
-        recipe_name_path = recipe_path / f"{recipe_name}.yaml"
+        recipe_name_path = recipes_path / f"{recipe_name}.yaml"
         recipe_name_path.touch(exist_ok=True)
-        configs_list = []
+        sample_names = []
 
         logger.info(f"[Populating] from file {recipe_name} At {recipe_name_path}")
         for category,amount in counts.items():
             # loop in amount
             for _ in range(amount):
                 name = f"{category}_{uuid.uuid4().hex}"
-                config_name_path = config_path / f"{name}.json"
+                build_config_path = build_configs_path / f"{name}.json"
                 config = self._run_category(category) # generate sample with unique id with its type
-                with open(config_name_path,'w') as f:
+                with open(build_config_path,'w') as f:
                     json.dump(config,f,indent=2)
-                configs_list.append(name)
+                sample_names.append(name)
             logger.debug(f"[Populating]: Category {category} Amount {amount}")
 
         recipe_config["population"].update({
-            "samples": configs_list,
+            "samples": sample_names,
         })
         with open(recipe_name_path, 'w') as f:
             yaml.dump(recipe_config, f)
@@ -410,18 +415,18 @@ low_level_controls = structural |structural_properties |fault_controls |geo_body
 # (you can set some type to not exists by set 0.0)
 
 high_level_controls = {
-    'sample_population': 9, # amount of sample that will be populated
+    'sample_population': 6, # amount of sample that will be populated
     # each sample that is randomly created or mixed category will be ratio
     # all-faulted has different fault-line that it will be ratio, salt-fault will be ratio
     'sample_types': [
                      "boring",
-                     "fault_only",
-                     "fault_complex",
-                     # "salt_only",
-                     # "salt_fault_mixed",
-                     # "onlap",
-                     # "depositional",
-                     # "full_mixed"
+                     # "fault_only",
+                     # "fault_complex",
+                     "salt_only",
+                     "salt_fault_mixed",
+                     "onlap",
+                     "depositional",
+                     "full_mixed"
     ], # for dataset generations each generation will be ratio in same amount
     'ratio_per_types':{
         # "boring":0.0,
@@ -437,14 +442,16 @@ high_level_controls = {
 
 
 if __name__ == "__main__":
+    # CLI entry point: load settings, initialize the parameter template, then
+    # populate a recipe plus the referenced JSON build configs.
     setting_path = Path(__file__).parent.parent.joinpath('settings.yaml')
     yaml_helper = YAMLHelper(setting_path)
 
     recipes_path = yaml_helper.get_data('recipes_path' )# store all high-level configuration (type-sample)
-    config_path = yaml_helper.get_data('config_path') # store all low-level configuration (samples)
+    build_configs_path = yaml_helper.get_data('build_configs_path') # store all low-level configuration (samples)
 
-    output_path = yaml_helper.get_data('output_path') # store all generated samples
-    work_path = yaml_helper.get_data('work_path') # store as tmp
+    samples_path = yaml_helper.get_data('samples_path') # store all generated samples
+    temp_builds_path = yaml_helper.get_data('temp_builds_path') # store as tmp
 
     ## initialize values
     cube_shape = yaml_helper.get_data('cube_shape')
@@ -501,8 +508,8 @@ if __name__ == "__main__":
 
     categorical_parameter.initialize(
         project="example",
-        project_folder=output_path,
-        work_folder=work_path,
+        project_folder=samples_path,
+        work_folder=temp_builds_path,
         cube_shape=cube_shape,
         initial_layer_stdev=initial_layer_stdev,
         incident_angles=incident_angles,
@@ -541,4 +548,4 @@ if __name__ == "__main__":
     # control initialized template
     sample_control = SampleControl(categorical_parameter,**high_level_controls)
     # sample_control.load_recipe(Path(recipes_path) / "f0e5bfe6bb074c74b9b9617aaa5d9e60.yaml")
-    sample_control.populate(recipes_path,config_path,seed=42)
+    sample_control.populate(recipes_path,build_configs_path)

@@ -1,9 +1,13 @@
+"""Shared colored logger and simple watchdog event reporter."""
+
 import logging
 import sys
 
 from watchdog.events import FileSystemEventHandler, DirDeletedEvent, FileDeletedEvent
 
 class Color(logging.Formatter):
+    """Logging formatter that colors messages by severity level."""
+
     GREY = "\x1b[38;20m"
     CYAN = "\x1b[36;20m"
     GREEN = "\x1b[32;20m"
@@ -40,6 +44,8 @@ logger.addHandler(console_handler)
 logging.getLogger("watchdog").setLevel(logging.DEBUG)
 
 class SilentWatcher(FileSystemEventHandler):
+    """Watchdog handler that reports file create/modify/delete events."""
+
     def on_any_event(self, event):
 
         if event.is_directory:

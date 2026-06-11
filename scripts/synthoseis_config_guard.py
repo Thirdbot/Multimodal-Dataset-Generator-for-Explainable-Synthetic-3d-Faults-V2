@@ -1,3 +1,10 @@
+"""Runtime guard around Synthoseis config/build behavior.
+
+The wrapper normalizes category intent before calling third_party/synthoseis.
+It also temporarily patches fault generation so no-fault and low-fault-count
+categories behave according to the generated config.
+"""
+
 import json
 import sys
 import tempfile
@@ -47,7 +54,8 @@ CATEGORY_RULES = {
 }
 
 
-def category_from_name(path):
+def _category_from_name(path):
+    """Infer a dataset category from a config filename."""
     stem = Path(path).stem
     for category in sorted(CATEGORY_RULES, key=len, reverse=True):
         if stem == category or stem.startswith(f"{category}_") or f"_{category}_" in stem:
@@ -55,12 +63,13 @@ def category_from_name(path):
     return None
 
 
-def normalized_config(config_path):
+def _normalized_config(config_path):
+    """Load JSON config and apply category-level guard rules."""
     config_path = Path(config_path)
     with open(config_path, "r") as file:
         config = json.load(file)
 
-    category = category_from_name(config_path)
+    category = _category_from_name(config_path)
     if category in CATEGORY_RULES:
         config.update(CATEGORY_RULES[category])
 
@@ -82,12 +91,13 @@ def normalized_config(config_path):
 
 
 @contextmanager
-def fault_settings_override(build_rules):
+def _fault_settings_override(build_rules):
+    """Temporarily patch Synthoseis fault settings during one build call."""
     from datagenerator.Parameters import Parameters
 
     original_fault_settings = Parameters._fault_settings
 
-    def guarded_fault_settings(self):
+    def _guarded_fault_settings(self):
         if build_rules["no_faults"]:
             self.low_fault_throw = 0.0
             self.high_fault_throw = 0.0
@@ -121,7 +131,7 @@ def fault_settings_override(build_rules):
 
         return original_fault_settings(self)
 
-    Parameters._fault_settings = guarded_fault_settings
+    Parameters._fault_settings = _guarded_fault_settings
     try:
         yield
     finally:
@@ -129,7 +139,8 @@ def fault_settings_override(build_rules):
 
 
 def guarded_build_model(build_model, user_json, run_id, test_mode=None, rpm_factors=None, seed=None):
-    config, build_rules = normalized_config(user_json)
+    """Call Synthoseis build_model with a guarded temporary config file."""
+    config, build_rules = _normalized_config(user_json)
 
     with tempfile.NamedTemporaryFile(
         mode="w",
@@ -142,7 +153,7 @@ def guarded_build_model(build_model, user_json, run_id, test_mode=None, rpm_fact
         guarded_json = file.name
 
     try:
-        with fault_settings_override(build_rules):
+        with _fault_settings_override(build_rules):
             return build_model(
                 user_json=guarded_json,
                 run_id=run_id,
@@ -152,17 +163,3 @@ def guarded_build_model(build_model, user_json, run_id, test_mode=None, rpm_fact
             )
     finally:
         Path(guarded_json).unlink(missing_ok=True)
-
-
-if __name__ == "__main__":
-    from main import build_model
-
-    if len(sys.argv) < 3:
-        raise SystemExit(
-            "usage: python scripts/synthoseis_config_guard.py configs/sample.json run_id [seed]"
-        )
-
-    config_file = sys.argv[1]
-    run_id = sys.argv[2]
-    seed = int(sys.argv[3]) if len(sys.argv) > 3 else None
-    guarded_build_model(build_model, config_file, run_id, seed=seed)

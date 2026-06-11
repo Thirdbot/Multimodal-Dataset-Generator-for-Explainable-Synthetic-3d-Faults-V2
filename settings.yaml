@@ -1,9 +1,9 @@
 paths:
-  config_path: configs
+  build_configs_path: build_configs
   recipes_path: recipes
-  output_path: outputs
-  work_path: 'outputs/tmp'
-  traces_path: traces
+  samples_path: builds
+  temp_builds_path: 'builds/tmp'
+  graphs_path: graphs
 
 control:
   cube_shape: [100, 100, 500] # small size
@@ -23,7 +23,7 @@ control:
   bandwidth_ord: 4
   broadband_qc_volume: False
   extra_qc_plots: False
-  verbose: True
+  verbose: False # no print statements
   model_qc_volumes: True
   model_store_in_memory: False
   cleanup_intermediates: False

@@ -2,7 +2,7 @@
 __pycache__/
 *.pyc
 
-outputs/
+builds/
 data/
 runs/
 *.zarr/
@@ -16,9 +16,10 @@ runs/
 .env
 
 .idea/
-configs/
+build_configs/
+build_objects/
 recipes/
-traces/
+graphs/
 Dataset/*.csv
 Dataset/*.jsonl
 Dataset/multimodal_images

@@ -1,3 +1,9 @@
+"""Copy Synthoseis dependency declarations into this project's uv group.
+
+This is a maintenance helper for syncing third_party/synthoseis dependencies
+into the local [dependency-groups].synthoseis lock workflow.
+"""
+
 import tomllib
 import subprocess
 from pathlib import Path

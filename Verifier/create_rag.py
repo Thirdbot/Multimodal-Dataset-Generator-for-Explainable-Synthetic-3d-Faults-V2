@@ -34,7 +34,7 @@ class Rag:
         )
 
 
-    def generator_rag(self,graph_path="traces/views_graph"):
+    def generator_rag(self,graph_path="graphs/views_graph"):
         for graph in self.get_graph(graph_directory=graph_path):
             yield self.mapping_graph_rag(graph) # generate 1 rag at a time
 
@@ -73,7 +73,7 @@ class Rag:
         return self.format_docs(content)
 
     @staticmethod
-    def get_graph(graph_directory="traces/properties_graph"):
+    def get_graph(graph_directory="graphs/properties_graph"):
         graph_paths = Path(graph_directory).resolve()
         return list(graph_paths.iterdir())
 

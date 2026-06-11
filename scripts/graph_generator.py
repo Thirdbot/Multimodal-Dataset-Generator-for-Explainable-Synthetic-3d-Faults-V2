@@ -1,5 +1,9 @@
-# run watchdog over outputs of complete built only --extract db and build properties graph
-# watch dog each extract.json to make graph using graph_generation.py
+"""Extract DB metadata from completed builds and convert it into graph JSON.
+
+This script watches success.yaml, traces each successful Synthoseis build's
+parameters.db, filters the extracted tables by sample category, and writes a
+properties graph for downstream evidence/RAG/dataset generation.
+"""
 
 import time
 from pathlib import Path
@@ -9,10 +13,10 @@ from watchdog.observers import Observer
 from logger_color import logger
 import yaml
 from yaml_helper import YAMLHelper
-from low_level_tracer import LowLevelTracer
+from low_level_tracer import ParameterDbTracer
 from graph_system import GraphSystem
-from sample_image_generation import create_sample_images
 
+# Per-category table/key filters for DB-derived graph content.
 CATEGORY_FILTERS = {
     "boring": {
         "tables": {"model_parameters"},
@@ -225,32 +229,35 @@ CATEGORY_FILTERS = {
     },
 }
 
-class GraphGeneration(FileSystemEventHandler):
+class BuildGraphGenerator(FileSystemEventHandler):
+    """Watchdog handler for success.yaml updates emitted by the build stage."""
+
     def __init__(self):
         self.already_traced = set()
         self.last_success_mtime = None
 
     def on_any_event(self, event):
-        self.trace_success_file(event)
+        self._trace_success_file(event)
 
     def on_created(self, event):
-        self.trace_success_file(event)
+        self._trace_success_file(event)
 
     def on_modified(self, event):
-        self.trace_success_file(event)
+        self._trace_success_file(event)
 
     def on_moved(self, event):
-        self.trace_success_file(event)
+        self._trace_success_file(event)
 
-    def trace_success_file(self, event):
+    def _trace_success_file(self, event):
         if event.is_directory:
             return
 
         path = Path(getattr(event, "dest_path", event.src_path))
 
-        self.trace_success_path(path)
+        self._trace_success_path(path)
 
-    def trace_success_path(self, path):
+    def _trace_success_path(self, path):
+        """Read success.yaml and trace any newly completed build folders."""
         path = Path(path)
 
         if path.name != 'success.yaml':
@@ -269,47 +276,46 @@ class GraphGeneration(FileSystemEventHandler):
 
         self.last_success_mtime = current_mtime
 
-        for folder in data.get("success_build_obj", []):
-            folder = Path(folder)
-            if not folder.exists():
-                logger.warning(f"[TRACE SKIP] -> Missing folder: {folder}")
+        for build_folder in data.get("success_build_obj", []):
+            build_folder = Path(build_folder)
+            if not build_folder.exists():
+                logger.warning(f"[TRACE SKIP] -> Missing folder: {build_folder}")
                 continue
 
-            if folder in self.already_traced:
+            if build_folder in self.already_traced:
                 continue
 
-            if self.trace_sample(folder):
-                self.already_traced.add(folder)
+            if self._trace_sample(build_folder):
+                self.already_traced.add(build_folder)
 
-    def category_from_sample_name(self,sample_name):
+    def _category_from_sample_name(self,sample_name):
         for category in sorted(CATEGORY_FILTERS, key=len, reverse=True):
             if f"_{category}_" in sample_name or sample_name.startswith(f"{category}_"):
                 return category
         return "unknown"
 
-    def trace_sample(self, folder):
+    def _trace_sample(self, build_folder):
+        """Extract one build's DB tables and save its filtered properties graph."""
         try:
-            logger.info(f"[TRACE START] -> Sample: {folder.name}")
+            logger.info(f"[TRACE START] -> Sample: {build_folder.name}")
 
-            low_tracker = LowLevelTracer(folder)
-            low_tracker.save_to_json()
-            low_trace_path = low_tracker.trace_sample_path
+            # create graphs
+            db_tracer = ParameterDbTracer(build_folder)
+            db_tracer.save_to_json()
+            db_extract_path = db_tracer.db_extract_path
 
             properties_graph = GraphSystem()
-            category = self.category_from_sample_name(folder.name)
-            the_great_filter = CATEGORY_FILTERS.get(category, {})
-            properties_graph.build(low_trace_path,the_great_filter=the_great_filter) # filtering by
+            category = self._category_from_sample_name(build_folder.name)
+            category_filter = CATEGORY_FILTERS.get(category, {})
+            properties_graph.build(db_extract_path,category_filter=category_filter) # filtering by
+            # create property graph
             properties_graph_path = properties_graph.save_to_json()
-            # generate 2d images from 3d
-            image_assets = create_sample_images(folder, graph_path=properties_graph_path)
-            for view in ["inline", "crossline"]:
-                graph_2d = properties_graph.change_build(view, image_assets=image_assets)
-                graph_2d.save_to_json(sub_folder="views_graph", suffix=f"{view}_graph")
-
+            # generate 2d images from 3d for each object in graphs that has position slice an individual one, and it corresponds mask and one with all objects in it with three angles (inline, crossline, horizontal)
+            pass
             logger.info(f"[TRACE DONE] -> Graph: {properties_graph_path}")
             return True
         except Exception as exc:
-            logger.error(f"[TRACE FAILED] -> Sample: {folder} Error: {exc}")
+            logger.error(f"[TRACE FAILED] -> Sample: {build_folder} Error: {exc}")
             return False
 
     def on_deleted(self, event):
@@ -318,41 +324,42 @@ class GraphGeneration(FileSystemEventHandler):
             return
 
 
-def watch_over_outputs(successful_path):
-    observe = Observer()
-    successful_path = Path(successful_path)
+def watch_success_tracker(success_tracker_path):
+    """Run the graph-generation watcher around the build success tracker."""
+    observer = Observer()
+    success_tracker_path = Path(success_tracker_path)
 
-    if successful_path.parent.exists():
-        logger.info(f"[NOW MONITORING] -> Path: {successful_path}")
+    if success_tracker_path.parent.exists():
+        logger.info(f"[NOW MONITORING] -> Path: {success_tracker_path}")
 
-        graph = GraphGeneration()
-        if successful_path.exists():
-            graph.trace_success_path(successful_path)
-        observe.schedule(graph, successful_path.parent, recursive=False)
+        graph_generator = BuildGraphGenerator()
+        if success_tracker_path.exists():
+            graph_generator._trace_success_path(success_tracker_path)
+        observer.schedule(graph_generator, success_tracker_path.parent, recursive=False)
     else:
-        logger.warning(f"file {successful_path} does not exist")
+        logger.warning(f"file {success_tracker_path} does not exist")
 
-    observe.start()
+    observer.start()
     try:
         while True:
-            graph.trace_success_path(successful_path)
+            graph_generator._trace_success_path(success_tracker_path)
             time.sleep(1)
     except KeyboardInterrupt:
         logger.error(f"[STOPPING]")
     finally:
-        observe.stop()
-    observe.join()
+        observer.stop()
+    observer.join()
 
 
 if __name__ == "__main__":
     root = Path(__file__).parent.parent
     setting_path = root.joinpath('settings.yaml')
     yaml_helper = YAMLHelper(setting_path)
-    output_path = yaml_helper.get_data('output_path')
-    output_path = Path(output_path)
-    if not output_path.is_absolute():
-        output_path = root / output_path
-    successful_path = output_path / 'success.yaml'
+    samples_path = yaml_helper.get_data('samples_path')
+    samples_path = Path(samples_path)
+    if not samples_path.is_absolute():
+        samples_path = root / samples_path
+    success_tracker_path = samples_path / 'success.yaml'
 
     # watch over update in recipes
-    watch_over_outputs(successful_path)
+    watch_success_tracker(success_tracker_path)

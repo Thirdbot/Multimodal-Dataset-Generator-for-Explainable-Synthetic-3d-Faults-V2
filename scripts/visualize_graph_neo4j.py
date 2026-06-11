@@ -1,3 +1,9 @@
+"""Import a graph JSON file into Neo4j for browser visualization.
+
+The script maps JSON nodes/edges to generic Neo4j GraphNode labels and relation
+types while preserving original labels/types as properties for inspection.
+"""
+
 import argparse
 import json
 import os
@@ -10,7 +16,8 @@ from yaml_helper import YAMLHelper
 ROOT = Path(__file__).parent.parent
 
 
-def safe_label(value):
+def _safe_label(value):
+    """Convert arbitrary graph labels into valid Neo4j label tokens."""
     text = re.sub(r"[^0-9A-Za-z_]", "_", str(value or "Unknown"))
     if not text:
         text = "Unknown"
@@ -19,7 +26,8 @@ def safe_label(value):
     return text
 
 
-def safe_rel_type(value):
+def _safe_rel_type(value):
+    """Convert arbitrary edge types into valid Neo4j relationship tokens."""
     text = re.sub(r"[^0-9A-Za-z_]", "_", str(value or "RELATED_TO"))
     if not text:
         text = "RELATED_TO"
@@ -28,26 +36,28 @@ def safe_rel_type(value):
     return text.upper()
 
 
-def latest_graph(graph_root):
+def _latest_graph(graph_root):
+    """Select the newest properties graph when no explicit path is provided."""
     graph_paths = sorted(graph_root.glob("*_properties_graph.json"))
     if not graph_paths:
         raise FileNotFoundError(f"no properties graphs found under {graph_root}")
     return graph_paths[-1]
 
 
-def load_graph_payload(graph_path):
+def _load_graph_payload(graph_path):
+    """Load graph JSON and ensure nodes/edges collections exist."""
     payload = json.loads(graph_path.read_text())
     payload.setdefault("nodes", [])
     payload.setdefault("edges", [])
     return payload
 
 
-def clear_database(driver, database):
+def _clear_database(driver, database):
     with driver.session(database=database) as session:
         session.run("MATCH (n) DETACH DELETE n")
 
 
-def create_constraint(driver, database):
+def _create_constraint(driver, database):
     query = """
     CREATE CONSTRAINT graph_node_id_unique IF NOT EXISTS
     FOR (n:GraphNode)
@@ -57,9 +67,10 @@ def create_constraint(driver, database):
         session.run(query)
 
 
-def merge_node(driver, database, node):
+def _merge_node(driver, database, node):
+    """Create or update one graph node in Neo4j."""
     node_id = node["id"]
-    label = safe_label(node.get("label", "Unknown"))
+    label = _safe_label(node.get("label", "Unknown"))
     props = {key: value for key, value in node.items() if key not in {"id", "label"}}
     props["source_label"] = node.get("label", "Unknown")
 
@@ -71,8 +82,9 @@ def merge_node(driver, database, node):
         session.run(query, id=node_id, props=props)
 
 
-def merge_edge(driver, database, edge):
-    rel_type = safe_rel_type(edge.get("type", "RELATED_TO"))
+def _merge_edge(driver, database, edge):
+    """Create or update one graph edge in Neo4j."""
+    rel_type = _safe_rel_type(edge.get("type", "RELATED_TO"))
     source = edge["source"]
     target = edge["target"]
     props = {key: value for key, value in edge.items() if key not in {"source", "target", "type"}}
@@ -89,6 +101,7 @@ def merge_edge(driver, database, edge):
 
 
 def import_graph(graph_path, uri, user, password, database, clear=False):
+    """Connect to Neo4j and import all nodes/edges from one graph JSON."""
     try:
         from neo4j import GraphDatabase
     except ImportError as exc:
@@ -96,20 +109,20 @@ def import_graph(graph_path, uri, user, password, database, clear=False):
             "neo4j driver is not installed. Install it with: uv add neo4j"
         ) from exc
 
-    payload = load_graph_payload(graph_path)
+    payload = _load_graph_payload(graph_path)
     driver = GraphDatabase.driver(uri, auth=(user, password))
 
     try:
         driver.verify_connectivity()
         if clear:
-            clear_database(driver, database)
-        create_constraint(driver, database)
+            _clear_database(driver, database)
+        _create_constraint(driver, database)
 
         for node in payload["nodes"]:
-            merge_node(driver, database, node)
+            _merge_node(driver, database, node)
 
         for edge in payload["edges"]:
-            merge_edge(driver, database, edge)
+            _merge_edge(driver, database, edge)
     finally:
         driver.close()
 
@@ -122,7 +135,7 @@ def import_graph(graph_path, uri, user, password, database, clear=False):
     }
 
 
-def parse_args():
+def _parse_args():
     parser = argparse.ArgumentParser(
         description="Load a properties graph JSON into Neo4j for browser visualization."
     )
@@ -159,16 +172,17 @@ def parse_args():
     return parser.parse_args()
 
 
-def resolve_graph_path(graph_path_arg):
+def _resolve_graph_path(graph_path_arg):
+    """Resolve an explicit graph path or choose the latest configured graph."""
     if graph_path_arg:
         return Path(graph_path_arg).expanduser().resolve()
 
     yaml_helper = YAMLHelper(ROOT / "settings.yaml")
-    graph_root = Path(yaml_helper.get_data("traces_path")) / "properties_graph"
-    return latest_graph(graph_root)
+    graph_root = Path(yaml_helper.get_data("graphs_path")) / "properties_graph"
+    return _latest_graph(graph_root)
 
 
-def print_browser_queries():
+def _print_browser_queries():
     print()
     print("Neo4j Browser queries:")
     print("MATCH (n:GraphNode) RETURN n LIMIT 50;")
@@ -178,8 +192,8 @@ def print_browser_queries():
 
 
 def main():
-    args = parse_args()
-    graph_path = resolve_graph_path(args.graph_path)
+    args = _parse_args()
+    graph_path = _resolve_graph_path(args.graph_path)
     result = import_graph(
         graph_path=graph_path,
         uri=args.uri,
@@ -190,7 +204,7 @@ def main():
     )
 
     print(json.dumps(result, indent=2))
-    print_browser_queries()
+    _print_browser_queries()
 
 
 if __name__ == "__main__":

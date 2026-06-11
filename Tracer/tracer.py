@@ -4,7 +4,7 @@ from pathlib import Path
 
 
 root = Path(__file__).parent.parent
-graph_root = root / "traces" / "properties_graph"
+graph_root = root / "graphs" / "properties_graph"
 
 
 class EvidenceTracer(object):

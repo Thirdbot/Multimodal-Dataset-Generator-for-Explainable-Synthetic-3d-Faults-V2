@@ -8,7 +8,7 @@ from scripts.visualize_sample import list_arrays, load_array
 
 
 ROOT = Path(__file__).resolve().parent.parent
-OUTPUTS_ROOT = ROOT / "outputs"
+OUTPUTS_ROOT = ROOT / "builds"
 
 
 def create_images_for_row(row, image_dir):
@@ -17,7 +17,7 @@ def create_images_for_row(row, image_dir):
     if cached:
         return normalize_cached_assets(cached)
 
-    # Dataset export should use the sample-level assets created by graph_generation.py
+    # Dataset export should use the sample-level assets created by graph_generator.py
     # or the hybrid pipeline precheck. This keeps overlays tied to sample intent.
     if row.get("image_assets"):
         return normalize_cached_assets(row["image_assets"])

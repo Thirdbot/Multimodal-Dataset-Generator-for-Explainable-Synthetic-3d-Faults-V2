@@ -1,3 +1,10 @@
+"""Small graph builder for DB-extracted Synthoseis metadata.
+
+GraphSystem turns low-level JSON table dumps into NetworkX graph objects and
+serializes them as simple node/edge JSON. It can also project 3D graph fields
+into inline/crossline view graphs when image assets are available.
+"""
+
 import json
 import re
 import copy
@@ -9,31 +16,36 @@ from yaml_helper import YAMLHelper
 
 
 class GraphSystem:
+    """Build, project, summarize, and save a filtered metadata graph."""
+
     def __init__(self):
         self.graph = nx.MultiDiGraph()
-        self.traces_path = None
+        self.db_extract_path = None
 
-    def build(self,trace_path,the_great_filter):
-        self._add_trace(trace_path,the_great_filter)
-        self.traces_path = trace_path
+    def build(self,db_extract_path,category_filter):
+        """Load a DB extraction JSON and build a graph using a category filter."""
+        self._add_db_extract(db_extract_path,category_filter)
+        self.db_extract_path = db_extract_path
         return self.graph
 
     def change_build(self, view, image_assets=None):
+        """Return a projected copy of the 3D graph for one 2D view."""
         copy_system = GraphSystem()
         copy_system.graph = copy.deepcopy(self.graph)
-        copy_system.traces_path = self.traces_path
+        copy_system.db_extract_path = self.db_extract_path
         copy_system._project_positions(view, image_assets=image_assets)
         return copy_system
 
-    def save_to_json(self,sub_folder='properties_graph', suffix='properties_graph'):
-        if self.traces_path is None:
-            raise Exception("No trace path provided")
-        self.traces_path = Path(self.traces_path)
+    def save_to_json(self,graph_subfolder='properties_graph', suffix='properties_graph'):
+        """Serialize the current NetworkX graph under the graphs directory."""
+        if self.db_extract_path is None:
+            raise Exception("No DB extraction path provided")
+        self.db_extract_path = Path(self.db_extract_path)
 
 
-        sub_folder = self.traces_path.parent / sub_folder
-        sub_folder.mkdir(parents=True, exist_ok=True)
-        output_path = sub_folder / f"{self.traces_path.stem}_{suffix}.json"
+        graph_subfolder = self.db_extract_path.parent / graph_subfolder
+        graph_subfolder.mkdir(parents=True, exist_ok=True)
+        graph_path = graph_subfolder / f"{self.db_extract_path.stem}_{suffix}.json"
 
         payload = {
             "nodes": [
@@ -45,10 +57,11 @@ class GraphSystem:
                 for source, target, attrs in self.graph.edges(data=True)
             ],
         }
-        output_path.write_text(json.dumps(payload, indent=2, default=str))
-        return output_path
+        graph_path.write_text(json.dumps(payload, indent=2, default=str))
+        return graph_path
 
     def _project_positions(self, view, image_assets=None):
+        """Project stored 3D position fields into 2D image-coordinate fields."""
         for node_id, attrs in self.graph.nodes(data=True):
             attrs["view"] = view
             if str(node_id).startswith("category:"):
@@ -116,8 +129,8 @@ class GraphSystem:
             "edge_types": edge_types,
         }
 
-    def _add_trace(self, trace_path,the_great_filter):
-        data = json.loads(trace_path.read_text())
+    def _add_db_extract(self, db_extract_path,category_filter):
+        data = json.loads(db_extract_path.read_text())
         model_rows = data.get("model_parameters", [])
         if not model_rows:
             return
@@ -128,11 +141,12 @@ class GraphSystem:
 
         category_node = f"category:{category}"
 
-        self._add_by_filter(category_node,data,the_great_filter)
+        self._add_by_filter(category_node,data,category_filter)
 
-    def _add_by_filter(self,category_node,data,the_great_filter):
-        tables = the_great_filter.get("tables")
-        model_properties = self._pick(data.get("model_parameters",[{}])[0], the_great_filter.get("model_keys"))
+    def _add_by_filter(self,category_node,data,category_filter):
+        """Add category, object-system, and realized-object nodes from tables."""
+        tables = category_filter.get("tables")
+        model_properties = self._pick(data.get("model_parameters",[{}])[0], category_filter.get("model_keys"))
         if category_node == "category:boring":
             model_properties.pop("number_faults", None)
             model_properties.pop("fault_mode", None)
@@ -144,7 +158,7 @@ class GraphSystem:
             if data.get(table) is not None:
                 self.graph.add_edge(category_node,f"{table_name}",type=f"HAS_{table_name.upper()}")
             for idx in range(len(data.get(table,[]))): # get all rows
-                self.graph.add_node(f"{table_name}_{idx}",**self._pick(data.get(table,[{}])[idx],the_great_filter.get(f"{table_name}_keys"))) # get keys by table name closure_list and fault_list
+                self.graph.add_node(f"{table_name}_{idx}",**self._pick(data.get(table,[{}])[idx],category_filter.get(f"{table_name}_keys"))) # get keys by table name closure_list and fault_list
                 self.graph.add_edge(f"{table_name}",f"{table_name}_{idx}",type="REALIZED")
 
 
@@ -177,13 +191,13 @@ class GraphSystem:
 #     setting_path = Path(__file__).parent.parent / "settings.yaml"
 #     yaml_helper = YAMLHelper(setting_path)
 #     root = Path(__file__).parent.parent
-#     traces_path = yaml_helper.get_data("traces_path")
-#     traces_path = Path(traces_path)
-#     trace_sample_path = sorted(traces_path.glob("*_db_extract.json"))
-#     if trace_sample_path:
-#         selected_samples = trace_sample_path[0]
+#     graphs_path = yaml_helper.get_data("graphs_path")
+#     graphs_path = Path(graphs_path)
+#     db_extract_paths = sorted(graphs_path.glob("*_db_extract.json"))
+#     if db_extract_paths:
+#         selected_samples = db_extract_paths[0]
 #         graph_system = GraphSystem()
 #         graph_system.build(selected_samples,{})
-#         output_path = graph_system.save_to_json()
+#         graph_path = graph_system.save_to_json()
 #         print(graph_system.summary())
-#         print(f"saved graph to {output_path}")
+#         print(f"saved graph to {graph_path}")

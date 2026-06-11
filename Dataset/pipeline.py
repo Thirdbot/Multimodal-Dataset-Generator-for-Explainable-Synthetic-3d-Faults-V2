@@ -11,12 +11,12 @@ from watchdog.observers import Observer
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from RagVerifier.generator_pipeline import HybridRagWorkflow
+from Verifier.generator_pipeline import HybridRagWorkflow
 from Dataset.export_multimodal_dataset import export_dataset
 from scripts.logger_color import logger
 
 
-DEFAULT_GRAPH_ROOT = ROOT / "traces" / "properties_graph"
+DEFAULT_GRAPH_ROOT = ROOT / "graphs" / "properties_graph"
 DEFAULT_OUTPUT = ROOT / "Dataset" / "verified_hypotheses.jsonl"
 DEFAULT_CSV_OUTPUT = ROOT / "Dataset" / "multimodal_verified_dataset.csv"
 DEFAULT_IMAGE_DIR = ROOT / "Dataset" / "multimodal_images"
@@ -189,7 +189,7 @@ class DatasetWatcher(FileSystemEventHandler):
         if self.processed_mtimes.get(key) == current_mtime:
             return
 
-        # Let graph_generation.py finish writing before reading the graph.
+        # Let graph_generator.py finish writing before reading the graph.
         time.sleep(0.2)
         self.processed_mtimes[key] = current_mtime
         self.pipeline.process_graph(

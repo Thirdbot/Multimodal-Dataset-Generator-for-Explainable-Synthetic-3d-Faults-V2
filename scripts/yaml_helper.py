@@ -1,7 +1,16 @@
+"""Convenience reader for settings.yaml and recipe YAML files.
+
+YAMLHelper flattens nested YAML keys for lookups and resolves path-like values
+relative to the YAML file location while leaving known non-path config values
+unchanged.
+"""
+
 import yaml
 import pandas as pd
 
 class YAMLHelper:
+    """Read YAML config values by key, including nested settings keys."""
+
     def __init__(self,yaml_path):
         self.yaml_path = yaml_path
         # take root from setting path (root-level)
@@ -27,6 +36,7 @@ class YAMLHelper:
         return data.values()
 
     def get_data(self,target):
+        """Return a target value, resolving path settings relative to root."""
         data = self._read_yaml()
         # level-1 sub handle
         df = pd.json_normalize(data).to_dict(orient='records')[0]

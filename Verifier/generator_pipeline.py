@@ -9,13 +9,13 @@ from longtracer import LongTracer, check
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from scripts.sample_image_generation import ensure_sample_images, validate_sample_images
-from RagVerifier.create_rag import Rag
-from RagVerifier.llm_machine import LLMMachine, parse_numbered_lines
-from RagVerifier.rag_verifier import best_doc_score, score_qa_evidence, serialize_docs
+from scripts.images_generator import ensure_sample_images, validate_sample_images
+from Verifier.create_rag import Rag
+from Verifier.llm_machine import LLMMachine, parse_numbered_lines
+from Verifier.rag_verifier import best_doc_score, score_qa_evidence, serialize_docs
 
 
-DEFAULT_GRAPH_ROOT = ROOT / "traces" / "properties_graph"
+DEFAULT_GRAPH_ROOT = ROOT / "graphs" / "properties_graph"
 DEFAULT_OUTPUT = ROOT / "Dataset" / "hybrid_verified_qa.jsonl"
 
 
