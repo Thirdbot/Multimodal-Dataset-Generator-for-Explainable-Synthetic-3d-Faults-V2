@@ -19,7 +19,7 @@ from graph_system import GraphSystem
 # Per-category table/key filters for DB-derived graph content.
 CATEGORY_FILTERS = {
     "boring": {
-        "tables": {"model_parameters"},
+        "tables": {"model_parameters", "closure_parameters"},
         "model_keys": {
             "number_faults",
             "fault_mode",
@@ -32,9 +32,22 @@ CATEGORY_FILTERS = {
             "sand_voxel_pct",
             "sand_layer_percent_a_posteriori",
         },
+        "closure_keys": {
+            "fluid",
+            "n_voxels",
+            "x_min",
+            "x_max",
+            "y_min",
+            "y_max",
+            "z_min",
+            "z_max",
+            "intersects_fault",
+            "intersects_onlap",
+            "intersects_salt",
+        },
     },
     "fault_only": {
-        "tables": {"model_parameters", "fault_parameters"},
+        "tables": {"model_parameters", "fault_parameters", "closure_parameters"},
         "model_keys": {
             "number_faults",
             "fault_mode",
@@ -51,10 +64,23 @@ CATEGORY_FILTERS = {
             "tilt_pct",
             "shear_zone_width",
             "gouge_pctile",
+        },
+        "closure_keys": {
+            "fluid",
+            "n_voxels",
+            "x_min",
+            "x_max",
+            "y_min",
+            "y_max",
+            "z_min",
+            "z_max",
+            "intersects_fault",
+            "intersects_onlap",
+            "intersects_salt",
         },
     },
     "fault_complex": {
-        "tables": {"model_parameters", "fault_parameters"},
+        "tables": {"model_parameters", "fault_parameters", "closure_parameters"},
         "model_keys": {
             "number_faults",
             "fault_mode",
@@ -71,6 +97,19 @@ CATEGORY_FILTERS = {
             "tilt_pct",
             "shear_zone_width",
             "gouge_pctile",
+        },
+        "closure_keys": {
+            "fluid",
+            "n_voxels",
+            "x_min",
+            "x_max",
+            "y_min",
+            "y_max",
+            "z_min",
+            "z_max",
+            "intersects_fault",
+            "intersects_onlap",
+            "intersects_salt",
         },
     },
     "salt_only": {
