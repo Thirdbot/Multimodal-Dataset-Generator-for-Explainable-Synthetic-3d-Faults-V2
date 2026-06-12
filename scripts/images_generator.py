@@ -176,6 +176,11 @@ class GraphImageExtractor:
                 sample_object_properties,
             )
             self.make_image(sample_name, object_type, selected_type_slices)
+            self._save_object_positions(
+                sample_name,
+                object_type,
+                self._position_records(sample_name, object_type, selected_type_slices),
+            )
             selected_objects.update(selected_type_slices)
         return selected_objects
 
@@ -621,6 +626,57 @@ class GraphImageExtractor:
                 self._save_png(object_folder / f"{view}.png", basic_slice, cmap="gray")
                 self._save_png(object_folder / f"{view}_mask.png", mask_slice.astype(float), cmap="Reds")
                 self._save_overlay(object_folder / f"{view}_overlay.png", basic_slice, mask_slice)
+
+    def _position_records(self,sample_name,object_type,selected_slices):
+        records = []
+        for object_id, sliced in selected_slices.items():
+            object_folder = Path(object_type) / self._safe_filename(object_id)
+            for view in ("inline", "crossline", "timeslice"):
+                mask_slice = np.asarray(sliced["mask"][view], dtype=bool)
+                bbox = self._mask_bbox(mask_slice)
+                if bbox is None:
+                    continue
+                records.append({
+                    "sample_id": sample_name,
+                    "object_type": object_type,
+                    "object_id": str(object_id),
+                    "view": view,
+                    "image_path": (object_folder / f"{view}.png").as_posix(),
+                    "mask_path": (object_folder / f"{view}_mask.png").as_posix(),
+                    "overlay_path": (object_folder / f"{view}_overlay.png").as_posix(),
+                    "bbox": bbox,
+                    "center": {
+                        "x": (bbox["x_min"] + bbox["x_max"]) / 2,
+                        "y": (bbox["y_min"] + bbox["y_max"]) / 2,
+                    },
+                })
+        return records
+
+    def _save_object_positions(self,sample_name,object_type,records):
+        if not records:
+            return
+        output_path = self.image2d_path / sample_name / f"{object_type}_object_position.json"
+        payload = {
+            "sample_id": sample_name,
+            "object_type": object_type,
+            "objects": records,
+        }
+        output_path.write_text(json.dumps(payload, indent=2))
+
+    @staticmethod
+    def _mask_bbox(mask_slice):
+        coords = np.argwhere(mask_slice)
+        if coords.size == 0:
+            return None
+
+        y_min, x_min = coords.min(axis=0)
+        y_max, x_max = coords.max(axis=0)
+        return {
+            "x_min": int(x_min),
+            "y_min": int(y_min),
+            "x_max": int(x_max),
+            "y_max": int(y_max),
+        }
 
     @staticmethod
     def _normalize_image(image):

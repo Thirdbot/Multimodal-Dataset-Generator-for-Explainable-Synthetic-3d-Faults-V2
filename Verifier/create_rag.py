@@ -104,5 +104,5 @@ class Rag:
 
 if __name__ == "__main__":
     rag = Rag(embedding_model="all-MiniLM-L6-v2")
-    selected_graph = rag.get_graph()[0]
+    selected_graph = rag.get_graph('graphs/properties_2d_graph')[0]
     print(rag.get_all(selected_graph))

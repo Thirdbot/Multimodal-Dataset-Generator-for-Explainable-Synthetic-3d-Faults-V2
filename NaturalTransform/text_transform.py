@@ -18,6 +18,13 @@ class TextTransform(object):
         "bandpass_bandlimit_low",
         "bandpass_bandlimit_high",
         "fault_voxel_count_list",
+        "closure_voxel_count",
+        "closure_voxel_count_brine",
+        "closure_voxel_count_oil",
+        "closure_voxel_count_gas",
+        "n_voxels",
+        "n_voxels_faults",
+        "n_voxels_fault_intersections",
         "salt_noise_stretch_factor",
         "intercept_avg",
         "gradient_avg",
@@ -26,12 +33,16 @@ class TextTransform(object):
         "fixed_index",
         "selection_method",
         "image_path",
+        "mask_path",
+        "overlay_path",
         "overlay_image_path",
         "mask_image_path",
         "overlay_kind",
         "overlay_array",
         "overlay_arrays",
         "overlay_components",
+        "wrapper_source",
+        "original_fault_index",
     }
 
     PHRASES = {
@@ -80,38 +91,49 @@ class TextTransform(object):
         sentences = []
 
         for source_id, group in self.position_groups(relations).items():
-            if all(key in group for key in ("x0", "y0", "z0")):
-                source = self.node_name(source_id)
-                x = self.number_text(group["x0"].get("target"))
-                y = self.number_text(group["y0"].get("target"))
-                z = self.number_text(group["z0"].get("target"))
-                sentences.append(self.realise(source, "sit", f"near x={x}, y={y}, and z={z}"))
-            elif all(key in group for key in ("x", "y")):
-                source = self.node_name(source_id)
-                x = self.number_text(group["x"].get("target"))
-                y = self.number_text(group["y"].get("target"))
-                sentences.append(self.realise(source, "sit", f"near x={x} and y={y}"))
+            sentence = self.position_sentence(source_id, group)
+            if sentence:
+                sentences.append(sentence)
 
         for source_id, group in self.extent_groups(relations).items():
-            required = {"x_min", "x_max", "y_min", "y_max", "z_min", "z_max"}
-            if required.issubset(group):
-                source = self.node_name(source_id)
-                x0 = self.number_text(group["x_min"].get("target"))
-                x1 = self.number_text(group["x_max"].get("target"))
-                y0 = self.number_text(group["y_min"].get("target"))
-                y1 = self.number_text(group["y_max"].get("target"))
-                z0 = self.number_text(group["z_min"].get("target"))
-                z1 = self.number_text(group["z_max"].get("target"))
-                sentences.append(self.realise(source, "span", f"x={x0} to {x1}, y={y0} to {y1}, and z={z0} to {z1}"))
-            elif {"x_min", "x_max", "y_min", "y_max"}.issubset(group):
-                source = self.node_name(source_id)
-                x0 = self.number_text(group["x_min"].get("target"))
-                x1 = self.number_text(group["x_max"].get("target"))
-                y0 = self.number_text(group["y_min"].get("target"))
-                y1 = self.number_text(group["y_max"].get("target"))
-                sentences.append(self.realise(source, "span", f"x={x0} to {x1} and y={y0} to {y1}"))
+            sentence = self.extent_sentence(source_id, group)
+            if sentence:
+                sentences.append(sentence)
 
         return sentences
+
+    def position_sentence(self, source_id, group):
+        source = self.node_name(source_id)
+        if all(key in group for key in ("x0", "y0", "z0")):
+            x = self.number_text(group["x0"].get("target"))
+            y = self.number_text(group["y0"].get("target"))
+            z = self.number_text(group["z0"].get("target"))
+            return self.realise(source, "sit", f"near x={x}, y={y}, and z={z}")
+        if all(key in group for key in ("x", "y")):
+            x = self.number_text(group["x"].get("target"))
+            y = self.number_text(group["y"].get("target"))
+            return self.realise(source, "sit", f"near x={x} and y={y}")
+        return None
+
+    def extent_sentence(self, source_id, group):
+        source = self.node_name(source_id)
+        required_3d = {"x_min", "x_max", "y_min", "y_max", "z_min", "z_max"}
+        if required_3d.issubset(group):
+            x0 = self.number_text(group["x_min"].get("target"))
+            x1 = self.number_text(group["x_max"].get("target"))
+            y0 = self.number_text(group["y_min"].get("target"))
+            y1 = self.number_text(group["y_max"].get("target"))
+            z0 = self.number_text(group["z_min"].get("target"))
+            z1 = self.number_text(group["z_max"].get("target"))
+            return self.realise(source, "span", f"x={x0} to {x1}, y={y0} to {y1}, and z={z0} to {z1}")
+        required_2d = {"x_min", "x_max", "y_min", "y_max"}
+        if required_2d.issubset(group):
+            x0 = self.number_text(group["x_min"].get("target"))
+            x1 = self.number_text(group["x_max"].get("target"))
+            y0 = self.number_text(group["y_min"].get("target"))
+            y1 = self.number_text(group["y_max"].get("target"))
+            return self.realise(source, "occupy", f"the area from x={x0} to {x1} and y={y0} to {y1}")
+        return None
 
     def position_groups(self, relations):
         groups = {}
@@ -133,7 +155,11 @@ class TextTransform(object):
 
     def relations_to_evidence(self, relations):
         evidence = []
+        skip = self.grouped_relation_ids(relations)
+        evidence.extend(self.grouped_position_evidence(relations))
         for relation in relations:
+            if id(relation) in skip:
+                continue
             sentence = self.relation_to_sentence(relation)
             if not sentence:
                 continue
@@ -145,6 +171,43 @@ class TextTransform(object):
                 "sentence": sentence,
             })
         return evidence
+
+    def grouped_position_evidence(self, relations):
+        evidence = []
+        for source_id, group in self.position_groups(relations).items():
+            sentence = self.position_sentence(source_id, group)
+            if sentence:
+                evidence.append(self.group_evidence(source_id, "position", group, sentence))
+        for source_id, group in self.extent_groups(relations).items():
+            sentence = self.extent_sentence(source_id, group)
+            if sentence:
+                evidence.append(self.group_evidence(source_id, "extent", group, sentence))
+        return evidence
+
+    def group_evidence(self, source_id, fact_name, group, sentence):
+        return {
+            "trace_type": "property_group",
+            "source": source_id,
+            "edge": fact_name,
+            "target": {
+                key: relation.get("target")
+                for key, relation in group.items()
+            },
+            "relation": [
+                source_id,
+                fact_name,
+                {
+                    key: relation.get("target")
+                    for key, relation in group.items()
+                },
+            ],
+            "fact_name": fact_name,
+            "value": {
+                key: relation.get("target")
+                for key, relation in group.items()
+            },
+            "sentence": sentence,
+        }
 
     def relation_to_sentence(self, relation):
         edge = relation.get("edge")
@@ -252,11 +315,11 @@ class TextTransform(object):
         if node_id.startswith("category:"):
             return "the section"
         if node_id == "fault":
-            return "the faults"
+            return "the fault zone"
         if node_id.startswith("fault_"):
             return f"fault {int(node_id.rsplit('_', 1)[1]) + 1}"
         if node_id == "closure":
-            return "the closures"
+            return "the closure zone"
         if node_id.startswith("closure_"):
             return f"closure {int(node_id.rsplit('_', 1)[1]) + 1}"
         return node_id.replace("_", " ")

@@ -4,7 +4,7 @@ from pathlib import Path
 
 
 root = Path(__file__).parent.parent
-graph_root = root / "graphs" / "properties_graph"
+graph_root = root / "graphs" / "properties_2d_graph"
 
 
 class EvidenceTracer(object):
@@ -105,7 +105,7 @@ class EvidenceTracer(object):
 
 
 def first_graph():
-    graph_paths = sorted(graph_root.glob("*_properties_graph.json"))
+    graph_paths = sorted(graph_root.glob("*_properties_*.json"))
     if not graph_paths:
         raise FileNotFoundError(f"no properties graph found in {graph_root}")
     return graph_paths[0]
