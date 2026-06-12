@@ -14,12 +14,27 @@ import numpy as np
 from scipy import ndimage
 import matplotlib.pyplot as plt
 
-GRAPH_OBJECT_TYPES = [  "closure",
-                 "fault",
-                ]
+GRAPH_OBJECT_TYPES = [
+    "closure",
+    "fault",
+]
+
+ENTITY_OBJECT_TYPES = {
+    "fault",
+    "closure",
+    "salt",
+    "onlap",
+}
+
+FLUID_CLOSURE_PATTERNS = {
+    "oil": "closures/oil.zarr",
+    "gas": "closures/gas.zarr",
+    "brine": "closures/brine.zarr",
+}
 
 OBJECT_ZARR_CANDIDATES = {
       "fault": [
+          "faults/fault_*.zarr",               # per-fault masks written by wrapper
           "fault_segments_*.zarr",              # best fault object mask
           "fault_intersection_segments_*.zarr", # fault intersections
       ],
@@ -27,9 +42,6 @@ OBJECT_ZARR_CANDIDATES = {
           "closures/oil.zarr",
           "closures/gas.zarr",
           "closures/brine.zarr",
-          "closures/hc_labels.zarr",
-          "all_closure_segments_*.zarr",
-          "hc_closures_augmented_*.zarr",
       ],
       "onlap": [
           "onlap_segments_*.zarr",
@@ -103,8 +115,11 @@ class GraphImageExtractor:
         return objects
 
     def extract_object_images(self):
-        # Future hook: extract 3D object arrays, create 2D object crops/masks,
-        # and write view-specific graph coordinates for VLM dataset rows.
+        # Extract global and per-entity 2D views from generated 3D arrays.
+        #
+        # Global arrays are still useful for broad context. Individual entities
+        # are only emitted when the array/graph gives enough information to map
+        # one graph object to one mask component.
         sample_name = self.build_folder_path.stem
         basic_objects = self._extract_basic()
 
@@ -113,21 +128,48 @@ class GraphImageExtractor:
         if not basic_objects:
             return []
 
-        base_volume = basic_objects[0]
+        base_volume = self._prepare_3d_array(self._as_array(basic_objects[0]))
 
         selected_objects = {}
         for object_type,patterns in OBJECT_ZARR_CANDIDATES.items():
+            if object_type == "fault":
+                self._warn_missing_wrapper_faults(sample_name)
             self.image2d_path.joinpath(sample_name,object_type).mkdir(parents=True, exist_ok=True) # create folder for each object type and sample for 2d images
             self.image3d_path.joinpath(sample_name,object_type).mkdir(parents=True, exist_ok=True) # create folder for each object type and sample for 3d objects
-            type_sliced_objects = []
+            type_sliced_objects = {}
+            type_global_mask = None
             for pattern in patterns:
                 for match_sample in self.build_folder_path.glob(pattern):
+                    if self._is_empty_zarr_store(match_sample):
+                        continue
                     if object_type == "fault" and self._is_fault_property_volume(match_sample):
                         continue
-                    # load 1 object and slice it
+                    # Load one generated object volume and split it into useful
+                    # global/individual masks depending on object type.
                     property_object = self._load_sample_object(match_sample)
-                    slices = self._object_slicing(base_volume,property_object)
-                    type_sliced_objects.extend(slices)
+                    property_array = self._prepare_3d_array(self._as_array(property_object))
+                    if object_type == "closure":
+                        type_global_mask = self._merge_mask_arrays(type_global_mask, property_array)
+                        slices = self._closure_individual_slices(
+                            base_volume,
+                            property_array,
+                            match_sample,
+                            sample_object_properties,
+                        )
+                    else:
+                        slices = self._entity_slices(
+                            base_volume,
+                            property_array,
+                            object_type,
+                            match_sample,
+                            sample_object_properties,
+                        )
+                    self._merge_slices(type_sliced_objects, slices)
+            if object_type == "closure" and type_global_mask is not None and type_global_mask.any():
+                self._merge_slices(
+                    type_sliced_objects,
+                    {"closure": self._slice_by_mask(base_volume, type_global_mask)},
+                )
             selected_type_slices = self._select_average_mask_slices(
                 type_sliced_objects,
                 object_type,
@@ -137,10 +179,72 @@ class GraphImageExtractor:
             selected_objects.update(selected_type_slices)
         return selected_objects
 
+    def _warn_missing_wrapper_faults(self,sample_name):
+        expected_faults = self._expected_fault_count()
+        if expected_faults <= 0:
+            return
+
+        wrapper_faults = list(self.build_folder_path.glob("faults/fault_*.zarr"))
+        if len(wrapper_faults) >= expected_faults:
+            return
+
+        print(
+            "[MISSING WRAPPER FAULTS] -> "
+            f"Sample: {sample_name} expected {expected_faults}, found {len(wrapper_faults)}. "
+            "Rebuild this sample through guarded_build_model; existing global fault_segments cannot be split reliably."
+        )
+
+    def _expected_fault_count(self):
+        for node in self._get_nodes():
+            value = node.get("number_faults")
+            if value is None:
+                continue
+            try:
+                return int(float(value))
+            except (TypeError, ValueError):
+                return 0
+        return len([node for node in self._get_object_nodes() if node.get("id", "").startswith("fault_")])
+
     @staticmethod
     def _is_fault_property_volume(path):
         name = Path(path).name
         return "fault_segments_throw_" in name or "fault_segments_azimuth_" in name
+
+    @staticmethod
+    def _is_empty_zarr_store(path):
+        # Some Synthoseis outputs are metadata-only Zarr stores with all-zero
+        # fill. They cannot produce a mask, so skip them before xarray opens.
+        path = Path(path)
+        if path.suffix != ".zarr" or not path.is_dir():
+            return False
+        for item in path.rglob("*"):
+            if item.is_file() and item.name != "zarr.json":
+                return False
+        return True
+
+    def _merge_slices(self,target,new_slices):
+        for object_id, sliced in new_slices.items():
+            if object_id not in target:
+                target[object_id] = sliced
+                continue
+            if target[object_id].get("wrapper_source") and not sliced.get("wrapper_source"):
+                continue
+            if sliced.get("wrapper_source") and not target[object_id].get("wrapper_source"):
+                target[object_id] = sliced
+                continue
+            if self._slice_mask_area(sliced) > self._slice_mask_area(target[object_id]):
+                target[object_id] = sliced
+
+    def _merge_mask_arrays(self,current,new_array):
+        new_mask = np.nan_to_num(new_array, nan=0.0) != 0
+        if current is None:
+            return new_mask
+
+        common_shape = tuple(min(a, b) for a, b in zip(current.shape, new_mask.shape))
+        merged = np.zeros(common_shape, dtype=bool)
+        merged |= current[:common_shape[0], :common_shape[1], :common_shape[2]]
+        merged |= new_mask[:common_shape[0], :common_shape[1], :common_shape[2]]
+        return merged
 
     def _extract_basic(self):
         # Extract original 3D object arrays from Synthoseis build folder
@@ -148,6 +252,8 @@ class GraphImageExtractor:
         store_objs = []
         for pattern in all_patterns:
             for match_sample in self.build_folder_path.glob(pattern):
+                if self._is_empty_zarr_store(match_sample):
+                    continue
                 data = self._load_sample_object(match_sample)
                 store_objs.append(data)
             if store_objs:
@@ -161,61 +267,175 @@ class GraphImageExtractor:
             all_patterns.extend(patterns)
         return all_patterns
 
+    def _entity_slices(self,base_array,property_array,object_type,source_path,object_properties):
+        # Always keep the global object-type view. Individual entity views are
+        # added beside it when graph/object masks can separate them reliably.
+        slices = self._global_slices(base_array, property_array, object_type)
+
+        if object_type == "closure":
+            individual = self._closure_individual_slices(base_array, property_array, source_path, object_properties)
+            slices.update(individual)
+            return slices
+
+        if object_type == "fault":
+            individual = self._direct_fault_slices(base_array, property_array, source_path)
+            if individual:
+                slices.update(individual)
+                return slices
+            individual = self._fault_individual_slices(base_array, property_array, object_properties)
+            slices.update(individual)
+            return slices
+
+        if object_type in {"salt", "onlap"}:
+            individual = self._component_individual_slices(base_array, property_array, object_type)
+            slices.update(individual)
+            return slices
+
+        return slices
+
     def _object_slicing(self,basic_obj,prop_obj):
         # Slice 3D object arrays and create 2D object crops/masks
-        basic_array = self._as_array(basic_obj)
-        prop_array = self._as_array(prop_obj)
-        sliced_objects = []
+        basic_array = self._prepare_3d_array(self._as_array(basic_obj))
+        prop_array = self._prepare_3d_array(self._as_array(prop_obj))
+        return list(self._global_slices(basic_array, prop_array, "object").values())
 
-        if basic_array.ndim > 3:
-            basic_array = np.squeeze(basic_array)
-        if prop_array.ndim > 3:
-            prop_array = np.squeeze(prop_array)
-        if basic_array.ndim != 3 or prop_array.ndim != 3:
-            raise ValueError("basic_obj and prop_obj must resolve to 3D arrays")
-
+    def _global_slices(self,basic_array,prop_array,object_type):
+        # One mask for the whole generated entity class.
         common_shape = tuple(min(a, b) for a, b in zip(basic_array.shape, prop_array.shape))
         basic_array = basic_array[:common_shape[0], :common_shape[1], :common_shape[2]]
         prop_array = prop_array[:common_shape[0], :common_shape[1], :common_shape[2]]
 
         prop_mask = np.nan_to_num(prop_array, nan=0.0) != 0
 
-
         if prop_mask.any():
-            inline_index = int(prop_mask.sum(axis=(1, 2)).argmax())
-            crossline_index = int(prop_mask.sum(axis=(0, 2)).argmax())
-            timeslice_index = int(prop_mask.sum(axis=(0, 1)).argmax())
-            sliced = {
-                "basic": {
-                    "inline": basic_array[inline_index, :, :],
-                    "crossline": basic_array[:, crossline_index, :],
-                    "timeslice": basic_array[:, :, timeslice_index],
-                },
-                "mask": {
-                    "inline": prop_mask[inline_index, :, :],
-                    "crossline": prop_mask[:, crossline_index, :],
-                    "timeslice": prop_mask[:, :, timeslice_index],
-                },
-            }
-            sliced_objects.append(sliced)
-        return sliced_objects
+            return {object_type: self._slice_by_mask(basic_array, prop_mask)}
+        return {}
 
-    def _select_average_mask_slices(self,slices,object_type,object_properties):
-        # Group slice candidates by object id and prefer candidates close to expected object size.
-        candidates = [
-            candidate
-            for candidate in slices
-            if self._slice_mask_area(candidate) > 0
-        ]
-        if not candidates:
+    def _fault_individual_slices(self,base_array,property_array,object_properties):
+        # Synthoseis final fault_segments is often a combined binary mask. Do
+        # not turn that into fake fault_0/fault_1 masks. Individual faults are
+        # expected from the wrapper-generated faults/fault_*.zarr files. This
+        # fallback is only for true label-map volumes.
+        fault_objects = [obj for obj in object_properties if obj.get("id", "").startswith("fault_")]
+        if not fault_objects:
             return {}
 
-        return {
-            object_type: max(
-                candidates,
-                key=self._slice_mask_area,
+        prop_mask = np.nan_to_num(property_array, nan=0.0)
+        if not np.any(prop_mask):
+            return {}
+
+        label_masks = self._label_masks(prop_mask)
+        if not label_masks:
+            return {}
+
+        selected = {}
+        used = set()
+        for fault in sorted(fault_objects, key=lambda item: self._object_index(item.get("id")) or 0):
+            expected_count = self._expected_voxel_count(fault.get("id"), "fault", object_properties)
+            best_index, best_mask = self._best_mask_for_object(label_masks, fault, expected_count, used)
+            if best_mask is None:
+                continue
+            used.add(best_index)
+            selected[fault["id"]] = self._slice_by_mask(base_array, best_mask)
+        return selected
+
+    def _direct_fault_slices(self,base_array,property_array,source_path):
+        # Wrapper-generated fault volumes are already one file per fault.
+        match = re.match(r"fault_(\d+)\.zarr$", Path(source_path).name)
+        if not match or Path(source_path).parent.name != "faults":
+            return {}
+
+        fault_id = f"fault_{int(match.group(1))}"
+        fault_mask = np.nan_to_num(property_array, nan=0.0) != 0
+        if not fault_mask.any():
+            return {}
+        sliced = self._slice_by_mask(base_array, fault_mask)
+        sliced["wrapper_source"] = True
+        return {fault_id: sliced}
+
+    def _closure_individual_slices(self,base_array,property_array,source_path,object_properties):
+        # Closure graph nodes already contain fluid type, bounding box, and
+        # voxel count. Those three fields are enough to find the matching
+        # component inside the oil/gas/brine closure masks.
+        source_fluid = self._closure_fluid_from_path(source_path)
+        if source_fluid is None:
+            return {}
+
+        closure_mask = np.nan_to_num(property_array, nan=0.0) != 0
+        if not closure_mask.any():
+            return {}
+
+        selected = {}
+        closure_objects = [obj for obj in object_properties if obj.get("id", "").startswith("closure_")]
+        for closure in closure_objects:
+            fluid = str(closure.get("fluid", "")).lower()
+            if fluid != source_fluid:
+                continue
+
+            object_mask = self._bbox_mask(closure_mask, closure)
+            if not object_mask.any():
+                continue
+
+            component_masks = self._connected_component_masks(object_mask)
+            _, best_mask = self._best_mask_for_object(
+                component_masks,
+                closure,
+                closure.get("n_voxels"),
+                set(),
             )
+            if best_mask is None:
+                continue
+            selected[closure["id"]] = self._slice_by_mask(base_array, best_mask)
+        return selected
+
+    @staticmethod
+    def _closure_fluid_from_path(path):
+        path = Path(path)
+        if path.parent.name != "closures":
+            return None
+        if path.name in {"oil.zarr", "gas.zarr", "brine.zarr"}:
+            return path.stem
+        return None
+
+    def _component_individual_slices(self,base_array,property_array,object_type):
+        # Salt and onlap do not currently have stable per-object graph ids.
+        # Split disconnected components and name them by component order.
+        prop_mask = np.nan_to_num(property_array, nan=0.0) != 0
+        selected = {}
+        for index, component_mask in enumerate(self._connected_component_masks(prop_mask)):
+            selected[f"{object_type}_{index}"] = self._slice_by_mask(base_array, component_mask)
+        return selected
+
+    def _slice_by_mask(self,basic_array,mask):
+        common_shape = tuple(min(a, b) for a, b in zip(basic_array.shape, mask.shape))
+        basic_array = basic_array[:common_shape[0], :common_shape[1], :common_shape[2]]
+        mask = mask[:common_shape[0], :common_shape[1], :common_shape[2]]
+
+        inline_index = int(mask.sum(axis=(1, 2)).argmax())
+        crossline_index = int(mask.sum(axis=(0, 2)).argmax())
+        timeslice_index = int(mask.sum(axis=(0, 1)).argmax())
+        return {
+            "basic": {
+                "inline": basic_array[inline_index, :, :],
+                "crossline": basic_array[:, crossline_index, :],
+                "timeslice": basic_array[:, :, timeslice_index],
+            },
+            "mask": {
+                "inline": mask[inline_index, :, :],
+                "crossline": mask[:, crossline_index, :],
+                "timeslice": mask[:, :, timeslice_index],
+            },
         }
+
+    def _select_average_mask_slices(self,slices,object_type,object_properties):
+        # Global slices and individual slices are already keyed. Empty masks are
+        # dropped, but object-level global views remain as fallback.
+        candidates = {
+            object_id: candidate
+            for object_id, candidate in slices.items()
+            if self._slice_mask_area(candidate) > 0
+        }
+        return candidates
 
     def _expected_voxel_count(self,object_id,object_type,object_properties):
         if object_type == "fault":
@@ -240,6 +460,128 @@ class GraphImageExtractor:
             if isinstance(value, str):
                 return [float(item) for item in re.findall(r"-?\d+(?:\.\d+)?", value)]
         return []
+
+    @staticmethod
+    def _prepare_3d_array(array):
+        array = np.asarray(array)
+        if array.ndim > 3:
+            array = np.squeeze(array)
+        if array.ndim != 3:
+            raise ValueError("object array must resolve to a 3D array")
+        return array
+
+    @staticmethod
+    def _label_masks(array):
+        # Use integer labels only when the volume looks like an actual label map.
+        # Float-valued volumes such as throw/azimuth should not become labels.
+        values = np.unique(array[np.isfinite(array)])
+        values = values[values != 0]
+        if values.size == 0:
+            return []
+        if values.size == 1 and np.isclose(values[0], 1):
+            return []
+        if values.size > 256:
+            return []
+        if not np.allclose(values, np.round(values)):
+            return []
+        return [array == value for value in values]
+
+    @staticmethod
+    def _connected_component_masks(mask):
+        labels, number_labels = ndimage.label(mask)
+        masks = []
+        for label_id in range(1, number_labels + 1):
+            component = labels == label_id
+            if component.any():
+                masks.append(component)
+        return masks
+
+    def _best_mask_for_object(self,masks,graph_object,expected_count,used_indexes):
+        best_index = None
+        best_mask = None
+        best_score = None
+        expected_count = self._as_float(expected_count)
+        expected_index = self._object_center_index(graph_object, masks[0].shape) if masks else None
+
+        for index, mask in enumerate(masks):
+            if index in used_indexes:
+                continue
+
+            count = float(mask.sum())
+            count_score = 0.0
+            if expected_count and expected_count > 0:
+                count_score = abs(count - expected_count) / expected_count
+
+            distance_score = 0.0
+            if expected_index is not None:
+                coords = np.argwhere(mask)
+                if coords.size == 0:
+                    continue
+                distance_score = float(np.linalg.norm(coords.mean(axis=0) - expected_index)) / max(mask.shape)
+
+            score = count_score + distance_score
+            if best_score is None or score < best_score:
+                best_score = score
+                best_index = index
+                best_mask = mask
+
+        return best_index, best_mask
+
+    def _bbox_mask(self,mask,graph_object):
+        # Restrict closure masks to the DB bounding box before component search.
+        x_min = self._axis_value(graph_object, "x_min", 0)
+        x_max = self._axis_value(graph_object, "x_max", mask.shape[0] - 1)
+        y_min = self._axis_value(graph_object, "y_min", 0)
+        y_max = self._axis_value(graph_object, "y_max", mask.shape[1] - 1)
+        z_min = self._axis_value(graph_object, "z_min", 0)
+        z_max = self._axis_value(graph_object, "z_max", mask.shape[2] - 1)
+
+        bounded = np.zeros_like(mask, dtype=bool)
+        x0, x1 = self._clip_range(x_min, x_max, mask.shape[0])
+        y0, y1 = self._clip_range(y_min, y_max, mask.shape[1])
+        z0, z1 = self._clip_range(z_min, z_max, mask.shape[2])
+        bounded[x0:x1, y0:y1, z0:z1] = mask[x0:x1, y0:y1, z0:z1]
+        return bounded
+
+    def _object_center_index(self,graph_object,shape):
+        if all(key in graph_object for key in ("x_min", "x_max", "y_min", "y_max", "z_min", "z_max")):
+            return np.array([
+                sum(self._clip_range(graph_object["x_min"], graph_object["x_max"], shape[0])) / 2.0,
+                sum(self._clip_range(graph_object["y_min"], graph_object["y_max"], shape[1])) / 2.0,
+                sum(self._clip_range(graph_object["z_min"], graph_object["z_max"], shape[2])) / 2.0,
+            ])
+
+        if all(key in graph_object for key in ("x0", "y0", "z0")):
+            return np.array(self._coordinate_to_index(
+                {"x": graph_object["x0"], "y": graph_object["y0"], "z": graph_object["z0"]},
+                shape,
+            ))
+
+        return None
+
+    @staticmethod
+    def _axis_value(graph_object,key,default):
+        value = graph_object.get(key, default)
+        if value is None:
+            return default
+        return value
+
+    @staticmethod
+    def _clip_range(low,high,size):
+        low = int(np.clip(round(float(low)), 0, size - 1))
+        high = int(np.clip(round(float(high)), 0, size - 1))
+        if high < low:
+            low, high = high, low
+        return low, min(high + 1, size)
+
+    @staticmethod
+    def _as_float(value):
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
 
     @staticmethod
     def _object_index(object_id):

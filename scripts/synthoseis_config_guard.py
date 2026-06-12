@@ -6,6 +6,7 @@ categories behave according to the generated config.
 """
 
 import json
+import os
 import sys
 import tempfile
 from contextlib import contextmanager
@@ -138,6 +139,53 @@ def _fault_settings_override(build_rules):
         Parameters._fault_settings = original_fault_settings
 
 
+@contextmanager
+def _individual_fault_output_override():
+    """Temporarily write per-fault masks without editing Synthoseis internals."""
+    from datagenerator.Faults import Faults
+    from datagenerator.output_writer import write_volume_to_zarr
+
+    original_get_displacement_vector = Faults.get_displacement_vector
+
+    def _guarded_get_displacement_vector(self, semi_axes, origin, throw, tilt, wb, index, fp):
+        result = original_get_displacement_vector(self, semi_axes, origin, throw, tilt, wb, index, fp)
+        (
+            displacement,
+            displacement_classification,
+            interpolation,
+            hockey_stick,
+            fault_segm,
+            ellipsoid,
+            fp,
+        ) = result
+
+        if getattr(self.cfg, "model_qc_volumes", False):
+            # Match Synthoseis build_faults thresholding before the fault is
+            # merged into the cumulative fault_planes volume.
+            fault_mask = (
+                (fault_segm > 0.25)
+                & (displacement_classification > 1.0)
+            ).astype("uint8")
+            if fault_mask.any():
+                out_dir = Path(self.cfg.work_subfolder) / "faults"
+                out_dir.mkdir(parents=True, exist_ok=True)
+                write_volume_to_zarr(
+                    fault_mask,
+                    os.path.join(out_dir, f"fault_{index:02d}.zarr"),
+                    name="data",
+                    dims=("inline", "crossline", "time"),
+                    attrs={"fault_index": int(index)},
+                )
+
+        return result
+
+    Faults.get_displacement_vector = _guarded_get_displacement_vector
+    try:
+        yield
+    finally:
+        Faults.get_displacement_vector = original_get_displacement_vector
+
+
 def guarded_build_model(build_model, user_json, run_id, test_mode=None, rpm_factors=None, seed=None):
     """Call Synthoseis build_model with a guarded temporary config file."""
     config, build_rules = _normalized_config(user_json)
@@ -153,7 +201,7 @@ def guarded_build_model(build_model, user_json, run_id, test_mode=None, rpm_fact
         guarded_json = file.name
 
     try:
-        with _fault_settings_override(build_rules):
+        with _fault_settings_override(build_rules), _individual_fault_output_override():
             return build_model(
                 user_json=guarded_json,
                 run_id=run_id,

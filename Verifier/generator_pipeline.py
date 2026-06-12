@@ -9,7 +9,6 @@ from longtracer import LongTracer, check
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from scripts.images_generator import ensure_sample_images, validate_sample_images
 from Verifier.create_rag import Rag
 from Verifier.llm_machine import LLMMachine, parse_numbered_lines
 from Verifier.rag_verifier import best_doc_score, score_qa_evidence, serialize_docs
@@ -42,16 +41,6 @@ class HybridRagWorkflow(object):
         graph_path = Path(graph_path)
         sample_id = sample_id_from_graph(graph_path)
         category = category_from_sample_id(sample_id)
-
-        try:
-            image_assets = ensure_sample_images(sample_id, graph_path=graph_path)
-            valid, reason = validate_sample_images(image_assets)
-            if not valid:
-                print(f"[IMAGE SKIP] {sample_id}: {reason}")
-                return []
-        except Exception as exc:
-            print(f"[IMAGE SKIP] {sample_id}: {exc}")
-            return []
 
         vector_store, edges = self.rag.mapping_graph_rag(graph_path)
         retrieval = self.rag.graph_retrieval(vector_store, edges)
@@ -95,14 +84,12 @@ class HybridRagWorkflow(object):
                 "metadata": {
                     "graph_path": graph_path.as_posix(),
                     "category": category,
-                    "image_asset_path": (ROOT / "Dataset" / "multimodal_images" / sample_id / "assets.json").as_posix(),
                 },
                 "trace": {
                     "question_evidence": serialize_docs(question_docs),
                     "answer_evidence": serialize_docs(answer["docs"]),
                     "graph_evidence": evidence_text.splitlines(),
                 },
-                "image_assets": image_assets,
             })
 
         return rows
