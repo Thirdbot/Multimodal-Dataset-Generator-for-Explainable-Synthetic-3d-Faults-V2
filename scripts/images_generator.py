@@ -180,7 +180,7 @@ class GraphImageExtractor:
         return selected_objects
 
     def _warn_missing_wrapper_faults(self,sample_name):
-        expected_faults = self._expected_fault_count()
+        expected_faults = self._expected_visible_fault_count()
         if expected_faults <= 0:
             return
 
@@ -193,6 +193,12 @@ class GraphImageExtractor:
             f"Sample: {sample_name} expected {expected_faults}, found {len(wrapper_faults)}. "
             "Rebuild this sample through guarded_build_model; existing global fault_segments cannot be split reliably."
         )
+
+    def _expected_visible_fault_count(self):
+        fault_counts = self._fault_voxel_count_list()
+        if fault_counts:
+            return len([count for count in fault_counts if count > 0])
+        return self._expected_fault_count()
 
     def _expected_fault_count(self):
         for node in self._get_nodes():
@@ -345,13 +351,21 @@ class GraphImageExtractor:
         if not match or Path(source_path).parent.name != "faults":
             return {}
 
-        fault_id = f"fault_{int(match.group(1))}"
+        fault_id = self._fault_id_from_original_index(int(match.group(1)))
         fault_mask = np.nan_to_num(property_array, nan=0.0) != 0
         if not fault_mask.any():
             return {}
         sliced = self._slice_by_mask(base_array, fault_mask)
         sliced["wrapper_source"] = True
         return {fault_id: sliced}
+
+    def _fault_id_from_original_index(self,original_index):
+        for node in self._get_object_nodes():
+            if not node.get("id", "").startswith("fault_"):
+                continue
+            if self._as_float(node.get("original_fault_index")) == float(original_index):
+                return node["id"]
+        return f"fault_{original_index}"
 
     def _closure_individual_slices(self,base_array,property_array,source_path,object_properties):
         # Closure graph nodes already contain fluid type, bounding box, and

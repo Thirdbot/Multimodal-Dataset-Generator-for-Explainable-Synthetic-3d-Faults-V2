@@ -147,6 +147,10 @@ class GraphSystem:
         """Add category, object-system, and realized-object nodes from tables."""
         tables = category_filter.get("tables")
         model_properties = self._pick(data.get("model_parameters",[{}])[0], category_filter.get("model_keys"))
+        visible_fault_indexes = self._visible_fault_indexes(model_properties)
+        fault_index_map = self._fault_index_map(visible_fault_indexes)
+        if visible_fault_indexes is not None and "number_faults" in model_properties:
+            model_properties["number_faults"] = len(visible_fault_indexes)
         if category_node == "category:boring":
             model_properties.pop("number_faults", None)
             model_properties.pop("fault_mode", None)
@@ -158,9 +162,38 @@ class GraphSystem:
             if data.get(table) is not None:
                 self.graph.add_edge(category_node,f"{table_name}",type=f"HAS_{table_name.upper()}")
             for idx in range(len(data.get(table,[]))): # get all rows
-                self.graph.add_node(f"{table_name}_{idx}",**self._pick(data.get(table,[{}])[idx],category_filter.get(f"{table_name}_keys"))) # get keys by table name closure_list and fault_list
-                self.graph.add_edge(f"{table_name}",f"{table_name}_{idx}",type="REALIZED")
+                if table_name == "fault" and visible_fault_indexes is not None and idx not in visible_fault_indexes:
+                    continue
+                node_index = fault_index_map.get(idx, idx) if table_name == "fault" else idx
+                node_attrs = self._pick(data.get(table,[{}])[idx],category_filter.get(f"{table_name}_keys"))
+                if table_name == "fault" and visible_fault_indexes is not None:
+                    node_attrs["original_fault_index"] = idx
+                self.graph.add_node(f"{table_name}_{node_index}",**node_attrs) # get keys by table name closure_list and fault_list
+                self.graph.add_edge(f"{table_name}",f"{table_name}_{node_index}",type="REALIZED")
 
+    @staticmethod
+    def _visible_fault_indexes(model_properties):
+        value = model_properties.get("fault_voxel_count_list")
+        if value is None:
+            return None
+        if isinstance(value, list):
+            counts = value
+        else:
+            counts = re.findall(r"-?\d+(?:\.\d+)?", str(value))
+        return {
+            index
+            for index, count in enumerate(counts)
+            if float(count) > 0
+        }
+
+    @staticmethod
+    def _fault_index_map(visible_fault_indexes):
+        if visible_fault_indexes is None:
+            return {}
+        return {
+            original_index: visible_index
+            for visible_index, original_index in enumerate(sorted(visible_fault_indexes))
+        }
 
     def _parse_model_id(self, model_id):
         match = re.match(r"seismic__\d{4}_\d{4}_(recipe_\d+)_(.+)", model_id)
