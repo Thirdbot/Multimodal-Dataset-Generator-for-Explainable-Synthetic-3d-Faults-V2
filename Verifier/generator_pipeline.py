@@ -252,7 +252,7 @@ def dedupe(items):
 def generate_multimodal_dataset(graph_root=DEFAULT_GRAPH_ROOT, output_path=DEFAULT_OUTPUT, max_graphs=None):
     workflow = RagWorkflow(graph_root=graph_root, output_path=output_path)
     return workflow.generate_dataset(max_graphs=max_graphs,graph_views='inline',
-                                     candidates_per_question=5, questions_per_graph=1000)
+                                     candidates_per_question=5, questions_per_graph=10)
 
 if __name__ == "__main__":
     rows = generate_multimodal_dataset()
