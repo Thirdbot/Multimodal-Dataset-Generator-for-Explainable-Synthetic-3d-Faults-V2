@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from Verifier.create_rag import Rag
-from Verifier.llm_machine import LLMMachine, parse_numbered_lines
+from Verifier.llm_machine import LLMMachine
 from Verifier.rag_verifier import best_doc_score, score_qa_evidence, serialize_docs
 
 
@@ -54,7 +54,7 @@ class RagWorkflow(object):
         for _ in range(questions_per_graph):
             question = self.generate_question(evidence_text, used_questions)
             if not question:
-                print(f"[QUESTION SKIP] {sample_id}: no parseable question")
+                print(f"[QUESTION SKIP] {sample_id}: no question generated")
                 continue
 
             question_docs = retrieve_many(question) # multiple question evidences
@@ -90,6 +90,7 @@ class RagWorkflow(object):
                     "view": view,
                 },
                 "trace": {
+                    "reason": answer.get("reason", ""),
                     "question_evidence": serialize_docs(question_docs),
                     "answer_evidence": serialize_docs(answer["docs"]),
                     "graph_evidence": docs_to_text(dedupe_docs([*question_docs, *answer["docs"]])).splitlines(),
@@ -107,26 +108,23 @@ class RagWorkflow(object):
                 f"{chr(10).join(sorted(used_questions))}\n"
                 "Ask about a different supported fact."
             )
-        response = self.llm.question_generation().invoke({"evidence": prompt_evidence})
-        questions = parse_numbered_lines(response)
-        for question in questions:
-            key = normalize_text(question)
-            if key and key not in used_questions:
-                return question
-        return ""
+        response = self.llm.question_generation().invoke({"evidences": prompt_evidence})
+        return response.QUESTION if response else ""
 
     def best_answer(self, question, evidence_text, question_docs, retrieve_many, candidates=5):
         answers = []
         for _ in range(candidates):
-            response = self.llm.answer_generation().invoke({
-                "evidence": evidence_text,
+            reason = self.llm.reason_generation().invoke({
+                "evidences": evidence_text,
                 "question": question,
             })
-            parsed = parse_numbered_lines(response)
-            if not parsed:
-                continue
-
-            answer = parsed[0]
+            reason_text = reason.REASON if reason else ""
+            response = self.llm.answer_generation().invoke({
+                "evidences": evidence_text,
+                "question": question,
+                "reason": reason_text,
+            })
+            answer = response.ANSWER if response else ""
             answer_docs = retrieve_many(answer)
             if score_qa_evidence(question_docs, answer_docs) < 1.0:
                 continue
@@ -138,6 +136,7 @@ class RagWorkflow(object):
 
             answers.append({
                 "answer": answer,
+                "reason": reason_text,
                 "docs": answer_docs,
                 "verification": verification,
             })
@@ -253,8 +252,7 @@ def dedupe(items):
 def generate_multimodal_dataset(graph_root=DEFAULT_GRAPH_ROOT, output_path=DEFAULT_OUTPUT, max_graphs=None):
     workflow = RagWorkflow(graph_root=graph_root, output_path=output_path)
     return workflow.generate_dataset(max_graphs=max_graphs,graph_views='inline',
-                                     candidates_per_question=5, questions_per_graph=5)
-
+                                     candidates_per_question=5, questions_per_graph=1000)
 
 if __name__ == "__main__":
     rows = generate_multimodal_dataset()
