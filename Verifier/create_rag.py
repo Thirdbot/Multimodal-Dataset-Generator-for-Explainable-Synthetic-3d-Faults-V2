@@ -27,10 +27,10 @@ class Rag:
             model_kwargs={"trust_remote_code": True},
         )
         self.strategy = Eager(
-            k=12,
-            start_k=4,
-            select_k=12,
-            max_depth=2,
+            k=20,
+            start_k=6,
+            select_k=20,
+            max_depth=3,
         )
 
 
@@ -49,9 +49,14 @@ class Rag:
         content = self.evidence_documents(graph_path)
         vector_store = self.vector_store_from_rag(content)
         edges = {
+            ("object_id", "object_id"),
+            ("object_id", "parent_id"),
+            ("parent_id", "object_id"),
+            ("parent_id", "category_id"),
+            ("category_id", "parent_id"),
+            ("source", "parent_id"),
+            ("parent_id", "source"),
             ("edge", "edge"),
-            ("source", "source"),
-            ("target", "target"),
         }
         return vector_store, edges
 
@@ -62,9 +67,35 @@ class Rag:
         return vector_store
 
     def evidence_documents(self,graph_path):
+        graph_path = Path(graph_path)
         tracer = EvidenceTracer(graph_path)
         source_evidence = TextTransform().relations_to_evidence(tracer.structural_evidence())
-        return self.prepare_content(source_evidence)
+        hierarchy = self.graph_hierarchy(graph_path)
+        return self.prepare_content(source_evidence, hierarchy=hierarchy)
+
+    @staticmethod
+    def graph_hierarchy(graph_path):
+        import json
+
+        graph = json.loads(Path(graph_path).read_text())
+        parents = {}
+        category_id = ""
+
+        for node in graph.get("nodes", []):
+            node_id = node.get("id", "")
+            if str(node_id).startswith("category:"):
+                category_id = node_id
+
+        for edge in graph.get("edges", []):
+            source = edge.get("source")
+            target = edge.get("target")
+            if source and target:
+                parents[target] = source
+
+        return {
+            "parents": parents,
+            "category_id": category_id,
+        }
 
     def format_docs(self,docs):
         return "\n".join(doc.page_content for doc in docs)
@@ -79,8 +110,9 @@ class Rag:
         return list(graph_paths.iterdir())
 
     @staticmethod
-    def prepare_content(list_contents):
+    def prepare_content(list_contents, hierarchy=None):
         prepared_content = []
+        hierarchy = hierarchy or {"parents": {}, "category_id": ""}
 
         for content in list_contents:
             text_content = content.get("sentence")
@@ -90,11 +122,15 @@ class Rag:
             edge = content.get("edge")
             target = content.get("target")
             relation = content.get("relation")
+            parent_id = hierarchy["parents"].get(object_id, "")
+            category_id = hierarchy.get("category_id", "")
 
             metadata = {
                 "trace_type": trace_type,
                 "source": source,
                 "object_id": object_id,
+                "parent_id": parent_id,
+                "category_id": category_id,
                 "edge": edge,
                 "target": target,
                 "relation": relation,
