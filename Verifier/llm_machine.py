@@ -101,6 +101,16 @@ question_generation_prompt = """
   Write one question:
 """
 
+multimodal_qa_instruction = (
+    "Interpret the provided seismic image evidence and answer the question. "
+    "Use the visible geological features in the images, including any provided "
+    "mask or overlay images, and give a direct seismic interpretation answer."
+)
+
+
+def multimodal_dataset_instruction():
+    return multimodal_qa_instruction
+
 def clean_generated(text):
     # strip the word Generated
     text = str(text or "").strip()
