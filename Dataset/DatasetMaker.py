@@ -9,10 +9,15 @@ import argparse
 import csv
 import hashlib
 import json
+import sys
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+from Verifier.llm_machine import multimodal_dataset_instruction
+
+
 DATASET_DIR = ROOT / "Dataset"
 DEFAULT_INPUT = DATASET_DIR / "hybrid_verified_qa.jsonl"
 DEFAULT_JSONL_OUTPUT = DATASET_DIR / "multimodal_multi_image_dataset.jsonl"
@@ -88,7 +93,7 @@ def make_row(row, image_root, min_image_score=0.4):
         "sample_id": sample_id,
         "category": row.get("category", ""),
         "view": view,
-        "instruction": row.get("instruction") or row.get("question", ""),
+        "instruction": multimodal_dataset_instruction(),
         "question": row.get("question", ""),
         "answer": row.get("answer", ""),
         "images": images,
