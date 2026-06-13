@@ -51,6 +51,12 @@ CATEGORY_EDGE_TO_IMAGE_TYPES = {
     "sand_layer_percent_a_posteriori": ["lithology"],
 }
 
+OBJECT_EDGE_TO_IMAGE_TYPES = {
+    "intersects_fault": ["fault"],
+    "intersects_salt": ["salt"],
+    "intersects_onlap": ["onlap"],
+}
+
 OBJECT_TYPES = {"fault", "closure", "salt", "onlap", "lithology", "age_depth"}
 
 
@@ -127,6 +133,8 @@ def collect_images(sample_image_dir, view, category, evidence, min_image_score=0
             object_type = object_id.split("_", 1)[0]
             add_image(images, seen, sample_image_dir, view, object_type, object_id, "evidence_object")
             add_image(images, seen, sample_image_dir, view, object_type, object_type, "global")
+            for related_type in OBJECT_EDGE_TO_IMAGE_TYPES.get(edge, []):
+                add_image(images, seen, sample_image_dir, view, related_type, related_type, "related_global")
         elif object_id in OBJECT_TYPES:
             add_image(images, seen, sample_image_dir, view, object_id, object_id, "global")
 
@@ -155,7 +163,8 @@ def image_types_from_evidence(object_id, edge, category):
         return [object_id]
 
     if is_object_instance(object_id):
-        return [object_id.split("_", 1)[0]]
+        object_type = object_id.split("_", 1)[0]
+        return [object_type, *OBJECT_EDGE_TO_IMAGE_TYPES.get(edge, [])]
 
     return []
 
@@ -184,7 +193,7 @@ def add_image(images, seen, sample_image_dir, view, object_type, object_id, role
     if not image_path.exists():
         return False
 
-    key = (object_type, object_id, view, role)
+    key = (object_type, object_id, view)
     if key in seen:
         return True
     seen.add(key)
