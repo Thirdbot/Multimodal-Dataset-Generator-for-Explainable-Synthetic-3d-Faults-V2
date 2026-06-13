@@ -2,104 +2,211 @@
 Solely for llm response, for mechanic will be programmatic
 """
 from operator import itemgetter
-import json
-import re
-from langchain_core.output_parsers import StrOutputParser
-from langchain_core.runnables import RunnableLambda
-from langchain_core.prompts import ChatPromptTemplate
+from pydantic import BaseModel
+from langchain_core.output_parsers import PydanticOutputParser
+from langchain_core.prompts import PromptTemplate
+
 from langchain_openai import ChatOpenAI
 
 
+class ReasonStructure(BaseModel):
+    REASON:str
+
+class AnswerStructure(BaseModel):
+    ANSWER:str
+
+class QuestionStructure(BaseModel):
+    QUESTION:str
+
+
+QuestionParser = PydanticOutputParser(pydantic_object=QuestionStructure)
+ReasonParser = PydanticOutputParser(pydantic_object=ReasonStructure)
+AnswerParser = PydanticOutputParser(pydantic_object=AnswerStructure)
+
+reasoning_prompt = """
+{format_instructions}
+
+Output contract:
+- Return only one valid JSON object.
+- The first character must be {{ and the last character must be }}.
+- Do not use markdown.
+- Do not write REASON: labels.
+- Do not write text before or after the JSON object.
+- Required shape: {{"REASON":"detailed audit reason"}}
+
+You write an audit reason explaining how the provided evidences relate to the question.
+This reason is for debugging and trace inspection only. It will not be used as the verifier.
+
+Rules:
+- REASON can be two to four sentences.
+- REASON must cite the important evidence facts in natural language.
+- REASON must explain which evidence directly answers the question.
+- REASON may mention distractor evidence when it could confuse the answer.
+- REASON may state that the question is not answerable if the needed evidence is absent.
+- Do not infer causes.
+- Do not add geological interpretation not stated in Evidences.
+- Do not mention graph, metadata, database, generated data, or synthetic data.
+- If the question asks a numeric comparison, explain the exact values involved and whether the comparison is directly supported.
+- If the question asks a count, use the count stated in Evidences.
+- If the question asks about an object, use the same object.
+- Do not invent evidence that is not listed.
+
+Good:
+Question: Does Closure 1 avoid onlap?
+Evidences: Closure 1 avoids onlap. Closure 2 contains gas.
+Output: {{"REASON":"The question asks only about Closure 1 and onlap. The relevant evidence directly states that Closure 1 avoids onlap. The Closure 2 fluid evidence is not needed for this answer."}}
+
+Good:
+Question: How many faults are present?
+Evidences: The section shows 2 faults. Fault 1 has throw of about 12.2922.
+Output: {{"REASON":"The count evidence states that the section shows 2 faults. The throw evidence describes Fault 1 but does not change the fault count."}}
+
+Evidences:
+{evidences}
+
+Question:
+{question}
+
+Return only JSON now:
+"""
+
 hypothesis_qa_prompt = """
-You are given verified graph evidence extracted from one generated seismic example.
+{format_instructions}
 
-  Your task is to answer the question with one atomic geological statement.
+Output contract:
+- Return only one valid JSON object.
+- The first character must be {{ and the last character must be }}.
+- Do not use markdown.
+- Do not write ANSWER: or REASON: labels.
+- Do not write text before or after the JSON object.
+- Required shape: {{"ANSWER":"one sentence"}}
 
-  Rules:
-  - Return exactly one sentence.
-  - The sentence must answer the question directly.
-  - The sentence must contain exactly one claim.
-  - Use only facts supported by the evidence.
-  - Use the same object or property asked about in the question.
-  - Do not combine multiple objects unless the evidence directly compares them.
-  - Do not explain causes unless the evidence explicitly states the cause.
-  - Do not infer geology that is not present in the evidence.
-  - Avoid exact coordinates and decimal numbers unless the question asks for them.
-  - Prefer simple geological wording.
-  - Do not mention the graph, metadata, database, synthetic generation, or evidence source.
-  - Do not say "as evidenced by", "according to", "based on", or "the evidence shows".
-  - Do not mention uncertainty words like "maybe", "likely", or "appears" unless the evidence says that.
-  - If the evidence is about absence, state only the absence claim.
-  - If the question asks how many, answer only the count and object.
-  - If the question asks whether something is present, answer only presence or absence.
-  - Do not add examples, lists, reasons, locations, or secondary properties.
+You answer seismic interpretation questions using only the provided evidences.
 
-  Good atomic examples:
-  - A fault is present.
-  - No salt body is present.
-  - The section contains one fault.
-  - Fault 1 has measurable throw.
-  - A gas closure is present.
-  - An oil closure is present.
-  - Sand-prone layering is present.
-  - Onlap is present.
-  - The section contains fan deposition.
+Evidence schema:
+- Fault objects are named Fault 1, Fault 2, etc.
+- Closure objects are named Closure 1, Closure 2, etc.
+- "contains oil/gas/brine" means closure fluid type.
+- "avoids fault/salt/onlap" means no intersection with that feature.
+- "intersects fault/salt/onlap" means the object touches or crosses that feature.
+- "throw", "tilt", "shear zone", and "gouge" are fault properties.
+- "The section shows N faults" means the fault count.
+- "Salt is present" means salt exists in the section.
+- "Sand-prone intervals" and "fan deposition" describe depositional content.
 
-  Bad examples:
-  - The section is faulted and contains closures.
-  - Faulting caused the closure.
-  - The area is structurally complex because hydrocarbons are trapped.
-  - The seismic image clearly shows salt and faults.
-  - The model was generated with fault-only settings.
-  - A fault is present as evidenced by eight faults with throw and positional data.
-  - The section contains eight faults, indicating a total of eight fault intersections.
+Rules:
+- ANSWER must be one natural sentence.
+- ANSWER must directly answer the question.
+- ANSWER must contain only one claim.
+- Use only facts stated in Evidences.
+- Use the same object asked about in the Question.
+- Do not add causes, interpretations, or extra properties.
+- Do not mention graph, metadata, evidence, database, generated data, or synthetic data.
+- If the Question asks "Does Closure 1 avoid onlap?", answer "Closure 1 avoids onlap."
+- If the Question asks "Does Closure 1 contain gas?", answer "Closure 1 contains gas."
+- If the Question asks "How many faults are present?", answer "The section contains N faults."
+- If a yes/no question is false, start with "No," and state the supported fact.
+- Do not answer threshold questions unless the exact comparison is directly supported.
+- Use Reason only as an audit hint; the final ANSWER must still be supported by Evidences.
 
-  Evidence:
-  {evidence}
+Good:
+Question: Does Closure 1 avoid onlap?
+Output: {{"ANSWER":"Closure 1 avoids onlap."}}
 
-  Question:
-  {question}
+Good:
+Question: How many faults are present?
+Output: {{"ANSWER":"The section contains one fault."}}
 
-  Answer:
+Good:
+Question: Is the section composed of multiple faults?
+Evidence says: The section shows 1 fault.
+Output: {{"ANSWER":"No, the section contains one fault."}}
+
+Bad:
+{{"ANSWER":"Closure 1 avoids onlap because it formed away from structural growth."}}
+Bad:
+{{"ANSWER":"The graph shows Closure 1 avoids onlap."}}
+Bad:
+ANSWER: Yes, there is a fault with a shear zone wider than 0.
+
+Evidences:
+{evidences}
+
+Reason:
+{reason}
+
+Question:
+{question}
+
+Return only JSON now:
 """
 
 question_generation_prompt = """
-  You are given verified graph evidence extracted from one generated seismic example.
+{format_instructions}
 
-  Generate one question that can be answered by one atomic geological claim.
+Output contract:
+- Return only one valid JSON object.
+- The first character must be {{ and the last character must be }}.
+- Do not use markdown.
+- Do not write QUESTION: labels.
+- Do not write text before or after the JSON object.
+- Required shape: {{"QUESTION":"one question?"}}
 
-  Rules:
-  - One question per line.
-  - Each question must ask about exactly one feature or property.
-  - Ask only about facts present in the evidence.
-  - Do not ask for coordinates or decimal values unless they are central to the evidence.
-  - Prefer questions useful for seismic interpretation.
-  - Do not mention graph, metadata, database, synthetic generation, or evidence source.
-  - Return only questions.
-  - Do not write "Generated".
-  - Do not write explanations.
-  - Prefer questions that map to one property in the evidence.
-  - Do not ask broad summary questions.
+You generate one seismic interpretation question from the provided evidences.
 
-  Good questions:
-  - Is a fault present?
-  - Is salt present?
-  - How many faults are present?
-  - Is an oil closure present?
-  - Is onlap present?
-  - What kind of closure is present?
-  - Does the section contain fan deposition?
+Evidence schema:
+- Fault objects are named Fault 1, Fault 2, etc.
+- Closure objects are named Closure 1, Closure 2, etc.
+- "contains oil/gas/brine" means closure fluid type.
+- "avoids fault/salt/onlap" means no intersection with that feature.
+- "intersects fault/salt/onlap" means the object touches or crosses that feature.
+- "throw", "tilt", "shear zone", and "gouge" are fault properties.
+- "The section shows N faults" means the fault count.
+- "Salt is present" means salt exists in the section.
+- "Sand-prone intervals" and "fan deposition" describe depositional content.
 
-  Bad questions:
-  - What are all the structural features in this section?
-  - What caused the faults and closures?
-  - How complex is this section?
+Rules:
+- QUESTION must be one natural question.
+- QUESTION must ask about exactly one fact from Evidences.
+- Use natural geological wording, not raw graph keys.
+- Ask only questions that can be directly answered from Evidences.
+- Do not mention graph, metadata, evidence, database, generated data, or synthetic data.
+- Do not ask broad summary questions.
+- Do not ask cause questions.
+- Do not ask threshold/comparison questions using greater than, less than, wider than, or higher than.
+- Do not ask numeric comparison questions even when decimal values are present.
+- Do not use words like above, below, at least, more than, under, exceed, larger, smaller, wider, greater, or less.
+- Do not ask whether something is "multiple"; ask exact counts instead.
+- Use "Does Closure 1 avoid onlap?", not "Is closure 1 avoid onlap?"
+- Use "Does Closure 1 contain gas?", not "Is closure 1 fluid gas?"
 
-  Evidence:
-  {evidence}
+Good:
+Evidence: Closure 1 avoids onlap.
+Output: {{"QUESTION":"Does Closure 1 avoid onlap?"}}
 
-  Write one question:
+Good:
+Evidence: Closure 2 contains gas.
+Output: {{"QUESTION":"Does Closure 2 contain gas?"}}
+
+Good:
+Evidence: The section shows 1 fault.
+Output: {{"QUESTION":"How many faults are present?"}}
+
+Bad:
+{{"QUESTION":"Is closure 1 avoid onlap?"}}
+Bad:
+{{"QUESTION":"Is closure 1 fluid gas?"}}
+Bad:
+{{"QUESTION":"Is there a fault with a throw greater than 12.2922?"}}
+Bad:
+QUESTION: What are all the structural features in this section?
+
+Evidences:
+{evidences}
+
+Return only JSON now:
 """
+
 
 multimodal_qa_instruction = (
     "Interpret the provided seismic image evidence and answer the question. "
@@ -107,57 +214,28 @@ multimodal_qa_instruction = (
     "mask or overlay images, and give a direct seismic interpretation answer."
 )
 
+QuestionPrompt = PromptTemplate(
+    template=question_generation_prompt,
+    input_variables=["evidences"],
+    partial_variables={"format_instructions":QuestionParser.get_format_instructions()}
+)
+
+ReasonPrompt = PromptTemplate(
+    template=reasoning_prompt,
+    input_variables=["evidences","question"],
+    partial_variables={"format_instructions":ReasonParser.get_format_instructions()}
+)
+
+AnswerPrompt = PromptTemplate(
+    template=hypothesis_qa_prompt,
+    input_variables=["evidences","question","reason"],
+    partial_variables={"format_instructions":AnswerParser.get_format_instructions()}
+)
+
 
 def multimodal_dataset_instruction():
     return multimodal_qa_instruction
 
-def clean_generated(text):
-    # strip the word Generated
-    text = str(text or "").strip()
-    text = re.sub(r"^\s*Generated:\s*","",text,flags=re.I)
-    return text.strip()
-
-def parse_numbered_lines(text):
-    text = clean_generated(text)
-    if not text:
-        return []
-
-    try:
-        parsed = json.loads(text)
-        if isinstance(parsed, list):
-            return [str(item).strip() for item in parsed if str(item).strip()]
-    except json.JSONDecodeError:
-        pass
-
-    items = []
-
-    for line in text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        line = re.sub(r"^\d+[\.\)]\s*", "", line).strip()
-        line = re.sub(r"^(question|q)\s*\d*\s*[:\-]\s*", "", line, flags=re.I).strip()
-        line = line.strip("-• ").strip()
-
-        if line:
-            items.append(line)
-
-    return items
-
-
-def parse_atomic_sentences(text):
-    text = clean_generated(text)
-
-    # Split by lines first, then sentence endings.
-    chunks = []
-    for line in text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        line = re.sub(r"^\d+\.\s*", "", line).strip()
-        chunks.extend(re.split(r"(?<=[.!?])\s+", line))
-
-    return [chunk.strip() for chunk in chunks if chunk.strip()]
 
 class LLMMachine:
     def __init__(self):
@@ -165,10 +243,10 @@ class LLMMachine:
         self.temp = 0.2 # lower the better logic
         self.top_p = 0.95 # higher the better fluency
         self.max_tok = 256
-        self.thinking_enable = False
         self.presence_penalty = 1 # -2,2 avoid repetition
         self.frequency_penalty = 0.2 # -2,2 more natural
         self.n = 1 # single response
+        self.attempt = 5
 
         self.client = ChatOpenAI(base_url=self.DEFAULT_VLLM_ENDPOINT,
                                  api_key="None",
@@ -180,33 +258,44 @@ class LLMMachine:
                                  max_tokens=self.max_tok,
                                  n=self.n)
 
-        if self.thinking_enable:
-            self.client = self.client.bind(
-                extra_body={
-                    "chat_template_kwargs": {"enable_thinking": True},
-                    "separate_reasoning": True,
-                }
-            )
-
-    def format_docs(self,docs):
-        return "\n".join(doc.page_content for doc in docs)
-
 
     def question_generation(self):
         q_query_engine = (
                 {
-                    "evidence":itemgetter("evidence"),
-                } | ChatPromptTemplate.from_template(question_generation_prompt) | self.client | StrOutputParser()
+                    "evidences":itemgetter("evidences"),
+                } |QuestionPrompt | self.client | QuestionParser
+        ).with_retry(
+        stop_after_attempt=self.attempt,
+        retry_if_exception_type=(Exception,)
         )
+
         return  q_query_engine
+
+    def reason_generation(self):
+        q_reason_engine = (
+            {
+                "evidences":itemgetter("evidences"),
+                "question":itemgetter("question"),
+            } | ReasonPrompt | self.client | ReasonParser
+        ).with_retry(
+        stop_after_attempt=self.attempt,
+        retry_if_exception_type=(Exception,)
+        )
+
+        return q_reason_engine
 
     def answer_generation(self):
         q_answer_engine = (
             {
-                "evidence":itemgetter("evidence"),
+                "evidences":itemgetter("evidences"),
                 "question":itemgetter("question"),
-            } | ChatPromptTemplate.from_template(hypothesis_qa_prompt) | self.client | StrOutputParser()
+                "reason": lambda x: x.get("reason", ""),
+            } | AnswerPrompt | self.client | AnswerParser
+        ).with_retry(
+        stop_after_attempt=self.attempt,
+        retry_if_exception_type=(Exception,)
         )
+
         return q_answer_engine
 
     def retrieve_many(self, retrieval):
@@ -232,23 +321,25 @@ if __name__ == "__main__":
     llm_machine = LLMMachine()
     example_evidence = """
     Fault 1 is present.
-  Fault 1 has measurable throw.
-  Fault 1 has a throw of about sixty two.
-  Fault 1 sits near x=forty three and y=one hundred twelve in the inline view.
-  The section contains two faults.
-  Fault voxels are present.
+    Fault 1 has measurable throw.
+    Fault 1 has a throw of about sixty two.
+    Fault 1 sits near x=forty three and y=one hundred twelve in the inline view.
+    The section contains two faults.
+    Fault voxels are present.
   """
 
     response = llm_machine.question_generation().invoke({
-        "evidence":example_evidence,
+        "evidences":example_evidence,
     })
-
-    question_lists = parse_numbered_lines(response)
-    print(question_lists)
-
+    print(response.QUESTION)
+    reason = llm_machine.reason_generation().invoke({
+        "evidences":example_evidence,
+        "question":response.QUESTION,
+    })
+    print(reason.REASON)
     response = llm_machine.answer_generation().invoke({
-        "evidence":example_evidence,
-        "question":question_lists[0],
+        "evidences":example_evidence,
+        "question":response.QUESTION,
+        "reason":reason.REASON,
     })
-    answered_lists = parse_atomic_sentences(response)
-    print(answered_lists)
+    print(response.ANSWER)
