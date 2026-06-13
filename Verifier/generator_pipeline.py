@@ -57,12 +57,17 @@ class RagWorkflow(object):
                 print(f"[QUESTION SKIP] {sample_id}: no question generated")
                 continue
 
+            question_key = question_signature(question)
+            if question_key in used_questions:
+                print(f"[QUESTION SKIP] {sample_id}: repeated question")
+                continue
+            used_questions.add(question_key)
+
             question_docs = retrieve_many(question) # multiple question evidences
             if best_doc_score(question_docs) < 0.7:
                 print(f"[QUESTION SKIP] {sample_id}: low retrieval score")
                 continue
 
-            used_questions.add(normalize_text(question))
             answer = self.best_answer(
                 question=question,
                 evidence_text=evidence_text,
@@ -150,6 +155,7 @@ class RagWorkflow(object):
 
     def write_rows(self, rows):
         self.output_path.parent.mkdir(parents=True, exist_ok=True)
+        rows = dedupe_rows(rows)
         with open(self.output_path, "w") as file:
             for row in rows:
                 file.write(json.dumps(row, default=str) + "\n")
@@ -232,6 +238,14 @@ def normalize_text(text):
     return re.sub(r"\s+", " ", str(text or "").lower()).strip()
 
 
+def question_signature(question):
+    question = normalize_text(question)
+    question = re.sub(r"[^a-z0-9\s]", "", question)
+    question = re.sub(r"\b(the|a|an)\b", " ", question)
+    question = re.sub(r"\s+", " ", question).strip()
+    return question
+
+
 def row_id(sample_id, question, answer):
     payload = "|".join([sample_id, normalize_text(question), normalize_text(answer)])
     return hashlib.sha1(payload.encode()).hexdigest()
@@ -247,6 +261,22 @@ def dedupe(items):
         seen.add(key)
         unique.append(item)
     return unique
+
+
+def dedupe_rows(rows):
+    seen = set()
+    output = []
+    for row in rows:
+        key = (
+            row.get("sample_id", ""),
+            row.get("view", ""),
+            question_signature(row.get("question", "")),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        output.append(row)
+    return output
 
 
 def generate_multimodal_dataset(graph_root=DEFAULT_GRAPH_ROOT, output_path=DEFAULT_OUTPUT, max_graphs=None):
