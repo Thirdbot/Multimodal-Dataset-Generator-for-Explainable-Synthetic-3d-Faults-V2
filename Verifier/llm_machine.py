@@ -1,5 +1,5 @@
 """
-Solely for llm response, for mechanic will be programatic
+Solely for llm response, for mechanic will be programmatic
 """
 from operator import itemgetter
 import json

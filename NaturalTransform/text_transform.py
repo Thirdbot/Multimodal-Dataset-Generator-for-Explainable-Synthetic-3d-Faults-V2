@@ -22,6 +22,10 @@ class TextTransform(object):
         "closure_voxel_count_brine",
         "closure_voxel_count_oil",
         "closure_voxel_count_gas",
+        "closure_voxel_pct",
+        "closure_voxel_pct_brine",
+        "closure_voxel_pct_oil",
+        "closure_voxel_pct_gas",
         "n_voxels",
         "n_voxels_faults",
         "n_voxels_fault_intersections",
@@ -160,15 +164,17 @@ class TextTransform(object):
         for relation in relations:
             if id(relation) in skip:
                 continue
-            sentence = self.relation_to_sentence(relation)
+            sentence = self.relation_to_sentence(relation) # might get this out because it too manual templating
             if not sentence:
                 continue
             evidence.append({
                 **relation,
-                "source": relation.get("trace_type", ""),
+                "trace_type": relation.get("trace_type", ""),
+                "source": relation.get("source", ""),
+                "object_id": self.object_id_from_relation(relation),
                 "fact_name": relation.get("edge", ""),
                 "value": relation.get("target", ""),
-                "sentence": sentence,
+                "sentence": sentence, # remove here
             })
         return evidence
 
@@ -188,6 +194,7 @@ class TextTransform(object):
         return {
             "trace_type": "property_group",
             "source": source_id,
+            "object_id": source_id,
             "edge": fact_name,
             "target": {
                 key: relation.get("target")
@@ -208,6 +215,18 @@ class TextTransform(object):
             },
             "sentence": sentence,
         }
+
+    @staticmethod
+    def object_id_from_relation(relation):
+        source = str(relation.get("source", ""))
+        target = str(relation.get("target", ""))
+        if re.match(r"^(fault|closure|salt|onlap|lithology|age_depth)_\d+$", source):
+            return source
+        if re.match(r"^(fault|closure|salt|onlap|lithology|age_depth)_\d+$", target):
+            return target
+        if source in {"fault", "closure", "salt", "onlap", "lithology", "age_depth"}:
+            return source
+        return source
 
     def relation_to_sentence(self, relation):
         edge = relation.get("edge")

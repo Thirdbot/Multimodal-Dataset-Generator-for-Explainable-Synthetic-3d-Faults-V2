@@ -2,11 +2,11 @@
 def score_qa_evidence(q_evidence,a_evidence):
     # check if relations and target are in the evidence
     q_evidence = {
-        (doc.metadata.get("edge"), str(doc.metadata.get("target")))
+        (doc.metadata.get("object_id"), doc.metadata.get("edge"), str(doc.metadata.get("target")))
         for doc in q_evidence
     }
     a_evidence = {
-        (doc.metadata.get("edge"), str(doc.metadata.get("target")))
+        (doc.metadata.get("object_id"), doc.metadata.get("edge"), str(doc.metadata.get("target")))
         for doc in a_evidence
     }
 
@@ -26,7 +26,9 @@ def serialize_docs(docs):
         {
             "text": doc.page_content,
             "score": float(doc.metadata.get("_similarity_score", 0.0)),
+            "trace_type": doc.metadata.get("trace_type"),
             "source": doc.metadata.get("source"),
+            "object_id": doc.metadata.get("object_id"),
             "edge": doc.metadata.get("edge"),
             "target": doc.metadata.get("target"),
             "relation": doc.metadata.get("relation"),

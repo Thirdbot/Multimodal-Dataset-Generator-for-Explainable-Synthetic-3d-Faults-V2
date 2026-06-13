@@ -14,11 +14,11 @@ from Verifier.llm_machine import LLMMachine, parse_numbered_lines
 from Verifier.rag_verifier import best_doc_score, score_qa_evidence, serialize_docs
 
 
-DEFAULT_GRAPH_ROOT = ROOT / "graphs" / "properties_graph"
+DEFAULT_GRAPH_ROOT = ROOT / "graphs" / "properties_2d_graph"
 DEFAULT_OUTPUT = ROOT / "Dataset" / "hybrid_verified_qa.jsonl"
 
 
-class HybridRagWorkflow(object):
+class RagWorkflow(object):
     def __init__(self, graph_root=DEFAULT_GRAPH_ROOT, output_path=DEFAULT_OUTPUT):
         LongTracer.init(verbose=False)
         self.graph_root = Path(graph_root)
@@ -26,9 +26,9 @@ class HybridRagWorkflow(object):
         self.rag = Rag(embedding_model="all-MiniLM-L6-v2")
         self.llm = LLMMachine()
 
-    def generate_dataset(self, max_graphs=None, questions_per_graph=5, candidates_per_question=5):
+    def generate_dataset(self, max_graphs=None,graph_views='inline', questions_per_graph=5, candidates_per_question=5):
         rows = []
-        for graph_path in self.graph_paths(max_graphs=max_graphs):
+        for graph_path in self.graph_paths(max_graphs=max_graphs,views=graph_views):
             rows.extend(self.generate_for_graph(
                 graph_path,
                 questions_per_graph=questions_per_graph,
@@ -41,11 +41,13 @@ class HybridRagWorkflow(object):
         graph_path = Path(graph_path)
         sample_id = sample_id_from_graph(graph_path)
         category = category_from_sample_id(sample_id)
+        view = view_from_graph(graph_path)
 
         vector_store, edges = self.rag.mapping_graph_rag(graph_path)
-        retrieval = self.rag.graph_retrieval(vector_store, edges)
+        retrieval = self.rag.graph_retrieval(vector_store, edges) # graph retrieval is not deep enough
         retrieve_many = self.llm.retrieve_many(retrieval)
-        evidence_text = self.rag.get_all(graph_path)
+        all_docs = self.rag.evidence_documents(graph_path)
+        evidence_text = self.rag.format_docs(all_docs)
         used_questions = set()
         rows = []
 
@@ -55,7 +57,7 @@ class HybridRagWorkflow(object):
                 print(f"[QUESTION SKIP] {sample_id}: no parseable question")
                 continue
 
-            question_docs = retrieve_many(expand_query(question))
+            question_docs = retrieve_many(question) # multiple question evidences
             if best_doc_score(question_docs) < 0.7:
                 print(f"[QUESTION SKIP] {sample_id}: low retrieval score")
                 continue
@@ -76,6 +78,7 @@ class HybridRagWorkflow(object):
                 "row_id": row_id(sample_id, question, answer["answer"]),
                 "sample_id": sample_id,
                 "category": category,
+                "view": view,
                 "instruction": question,
                 "question": question,
                 "answer": answer["answer"],
@@ -84,11 +87,12 @@ class HybridRagWorkflow(object):
                 "metadata": {
                     "graph_path": graph_path.as_posix(),
                     "category": category,
+                    "view": view,
                 },
                 "trace": {
                     "question_evidence": serialize_docs(question_docs),
                     "answer_evidence": serialize_docs(answer["docs"]),
-                    "graph_evidence": evidence_text.splitlines(),
+                    "graph_evidence": docs_to_text(dedupe_docs([*question_docs, *answer["docs"]])).splitlines(),
                 },
             })
 
@@ -123,12 +127,13 @@ class HybridRagWorkflow(object):
                 continue
 
             answer = parsed[0]
-            answer_docs = retrieve_many(expand_query(answer))
+            answer_docs = retrieve_many(answer)
             if score_qa_evidence(question_docs, answer_docs) < 1.0:
                 continue
 
-            verification = verify_answer(answer, evidence_text)
-            if verification["score"] <= 0:
+            verification_text = docs_to_text(dedupe_docs([*question_docs, *answer_docs]))
+            verification = verify_answer(answer, verification_text)
+            if verification["verdict"] != "PASS":
                 continue
 
             answers.append({
@@ -140,8 +145,8 @@ class HybridRagWorkflow(object):
         answers.sort(key=lambda item: item["verification"]["score"], reverse=True)
         return answers[0] if answers else None
 
-    def graph_paths(self, max_graphs=None):
-        paths = sorted(self.graph_root.glob("*_properties_graph.json"))
+    def graph_paths(self, max_graphs=None,views='inline'):
+        paths = sorted(self.graph_root.glob(f"*_properties_graph_{views}*.json"))
         return paths[:max_graphs] if max_graphs else paths
 
     def write_rows(self, rows):
@@ -151,30 +156,26 @@ class HybridRagWorkflow(object):
                 file.write(json.dumps(row, default=str) + "\n")
 
 
-def expand_query(text):
-    text = str(text or "").strip()
-    queries = [text]
-    lowered = text.lower()
+def dedupe_docs(docs):
+    seen = set()
+    output = []
+    for doc in docs:
+        key = (
+            doc.metadata.get("object_id"),
+            doc.metadata.get("edge"),
+            json.dumps(doc.metadata.get("target"), sort_keys=True, default=str),
+            doc.page_content,
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        output.append(doc)
+    return output
 
-    # Keep expansion simple: add schema terms that match the wording.
-    if "fault" in lowered:
-        queries.extend(["number_faults", "fault_mode", "n_voxels_faults"])
-    if "shear zone" in lowered:
-        queries.append("shear_zone_width")
-    if "throw" in lowered:
-        queries.append("throw")
-    if "gouge" in lowered:
-        queries.append("gouge_pctile")
-    if "salt" in lowered:
-        queries.append("salt_inserted")
-    if "closure" in lowered or "oil" in lowered or "gas" in lowered or "brine" in lowered:
-        queries.extend(["fluid", "number_hc_closures", "closure_voxel_count"])
-    if "onlap" in lowered:
-        queries.append("number_onlap_episodes")
-    if "fan" in lowered or "deposition" in lowered:
-        queries.append("number_fan_episodes")
 
-    return "\n".join(dedupe(queries))
+def docs_to_text(docs):
+    return "\n".join(doc.page_content for doc in docs)
+
 
 
 def verify_answer(answer, evidence_text):
@@ -187,12 +188,45 @@ def verify_answer(answer, evidence_text):
 
 def sample_id_from_graph(graph_path):
     stem = Path(graph_path).stem
-    return stem.removesuffix("_properties_graph").replace("_db_extract", "")
+    suffixes = (
+        "_db_extract_properties_graph_inline_properties_2d_graph",
+        "_db_extract_properties_graph_crossline_properties_2d_graph",
+        "_db_extract_properties_graph_timeslice_properties_2d_graph",
+        "_db_extract_properties_graph",
+        "_properties_graph",
+    )
+    for suffix in suffixes:
+        if stem.endswith(suffix):
+            return stem.removesuffix(suffix)
+    return stem.replace("_db_extract", "")
 
 
 def category_from_sample_id(sample_id):
-    match = re.search(r"recipe_\d+_(.+?)(?:_[0-9a-f]{32})?$", sample_id)
-    return match.group(1) if match else "unknown"
+    categories = (
+        "salt_fault_mixed",
+        "fault_complex",
+        "fault_only",
+        "full_mixed",
+        "salt_only",
+        "depositional",
+        "boring",
+        "onlap",
+    )
+    for category in categories:
+        if f"_{category}_" in sample_id or sample_id.endswith(f"_{category}"):
+            return category
+    return "unknown"
+
+
+def view_from_graph(graph_path):
+    name = Path(graph_path).name
+    if "_inline_properties_2d_graph" in name:
+        return "inline"
+    if "_crossline_properties_2d_graph" in name:
+        return "crossline"
+    if "_timeslice_properties_2d_graph" in name:
+        return "timeslice"
+    return "volume"
 
 
 def normalize_text(text):
@@ -216,13 +250,14 @@ def dedupe(items):
     return unique
 
 
-def generate_hybrid_dataset(graph_root=DEFAULT_GRAPH_ROOT, output_path=DEFAULT_OUTPUT, max_graphs=None):
-    workflow = HybridRagWorkflow(graph_root=graph_root, output_path=output_path)
-    return workflow.generate_dataset(max_graphs=max_graphs)
+def generate_multimodal_dataset(graph_root=DEFAULT_GRAPH_ROOT, output_path=DEFAULT_OUTPUT, max_graphs=None):
+    workflow = RagWorkflow(graph_root=graph_root, output_path=output_path)
+    return workflow.generate_dataset(max_graphs=max_graphs,graph_views='inline',
+                                     candidates_per_question=5, questions_per_graph=5)
 
 
 if __name__ == "__main__":
-    rows = generate_hybrid_dataset()
+    rows = generate_multimodal_dataset()
     print(json.dumps({
         "rows": len(rows),
         "output": DEFAULT_OUTPUT.as_posix(),

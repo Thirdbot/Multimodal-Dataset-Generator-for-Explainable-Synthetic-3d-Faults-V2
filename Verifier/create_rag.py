@@ -46,9 +46,7 @@ class Rag:
         return graph_rag
 
     def mapping_graph_rag(self,graph_path):
-        tracer = EvidenceTracer(graph_path)
-        source_evidence = TextTransform().relations_to_evidence(tracer.structural_evidence())  # get graph in text
-        content = self.prepare_content(source_evidence)
+        content = self.evidence_documents(graph_path)
         vector_store = self.vector_store_from_rag(content)
         edges = {
             ("edge", "edge"),
@@ -63,13 +61,16 @@ class Rag:
                                                           embedding=self.embedding)
         return vector_store
 
+    def evidence_documents(self,graph_path):
+        tracer = EvidenceTracer(graph_path)
+        source_evidence = TextTransform().relations_to_evidence(tracer.structural_evidence())
+        return self.prepare_content(source_evidence)
+
     def format_docs(self,docs):
         return "\n".join(doc.page_content for doc in docs)
 
     def get_all(self,graph_path):
-        tracer = EvidenceTracer(graph_path)
-        source_evidence = TextTransform().relations_to_evidence(tracer.structural_evidence())
-        content = self.prepare_content(source_evidence)
+        content = self.evidence_documents(graph_path)
         return self.format_docs(content)
 
     @staticmethod
@@ -83,13 +84,17 @@ class Rag:
 
         for content in list_contents:
             text_content = content.get("sentence")
+            trace_type = content.get("trace_type")
             source = content.get("source")
+            object_id = content.get("object_id")
             edge = content.get("edge")
             target = content.get("target")
             relation = content.get("relation")
 
             metadata = {
+                "trace_type": trace_type,
                 "source": source,
+                "object_id": object_id,
                 "edge": edge,
                 "target": target,
                 "relation": relation,
