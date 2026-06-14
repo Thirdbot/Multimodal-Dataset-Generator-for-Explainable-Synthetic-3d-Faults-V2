@@ -258,12 +258,31 @@ class LLMMachine:
                                  max_tokens=self.max_tok,
                                  n=self.n)
 
+        self.question_client = self.client.bind(
+            temperature=0.6,
+            top_p=0.9,
+            frequency_penalty=0.6,
+            presence_penalty=1.2,
+        )
+        self.reason_client = self.client.bind(
+            temperature=0.2,
+            top_p=0.95,
+            frequency_penalty=0.2,
+            presence_penalty=0.8,
+        )
+        self.answer_client = self.client.bind(
+            temperature=0.1,
+            top_p=0.9,
+            frequency_penalty=0.1,
+            presence_penalty=0.2,
+        )
+
 
     def question_generation(self):
         q_query_engine = (
                 {
                     "evidences":itemgetter("evidences"),
-                } |QuestionPrompt | self.client | QuestionParser
+                } |QuestionPrompt | self.question_client | QuestionParser
         ).with_retry(
         stop_after_attempt=self.attempt,
         retry_if_exception_type=(Exception,)
@@ -276,7 +295,7 @@ class LLMMachine:
             {
                 "evidences":itemgetter("evidences"),
                 "question":itemgetter("question"),
-            } | ReasonPrompt | self.client | ReasonParser
+            } | ReasonPrompt | self.reason_client | ReasonParser
         ).with_retry(
         stop_after_attempt=self.attempt,
         retry_if_exception_type=(Exception,)
@@ -290,7 +309,7 @@ class LLMMachine:
                 "evidences":itemgetter("evidences"),
                 "question":itemgetter("question"),
                 "reason": lambda x: x.get("reason", ""),
-            } | AnswerPrompt | self.client | AnswerParser
+            } | AnswerPrompt | self.answer_client | AnswerParser
         ).with_retry(
         stop_after_attempt=self.attempt,
         retry_if_exception_type=(Exception,)

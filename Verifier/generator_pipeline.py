@@ -1,4 +1,5 @@
 import json
+import random
 import re
 import sys
 import hashlib
@@ -48,20 +49,28 @@ class RagWorkflow(object):
         retrieve_many = self.llm.retrieve_many(retrieval)
         all_docs = self.rag.evidence_documents(graph_path)
         evidence_text = self.rag.format_docs(all_docs)
-        used_questions = set()
+        evidence_seeds = self.evidence_seeds(all_docs)
+        seen_question_signatures = set()
+        seen_question_texts = []
+        repeated_questions = 0
         rows = []
 
-        for _ in range(questions_per_graph):
-            question = self.generate_question(evidence_text, used_questions)
+        for seed_docs in evidence_seeds:
+            if len(rows) >= questions_per_graph:
+                break
+
+            seed_text = self.rag.format_docs(seed_docs)
+            question = self.generate_question(seed_text, seen_question_texts)
             if not question:
                 print(f"[QUESTION SKIP] {sample_id}: no question generated")
                 continue
 
             question_key = question_signature(question)
-            if question_key in used_questions:
-                print(f"[QUESTION SKIP] {sample_id}: repeated question")
+            if question_key in seen_question_signatures:
+                repeated_questions += 1
                 continue
-            used_questions.add(question_key)
+            seen_question_signatures.add(question_key)
+            seen_question_texts.append(question)
 
             question_docs = retrieve_many(question) # multiple question evidences
             if best_doc_score(question_docs) < 0.7:
@@ -102,7 +111,31 @@ class RagWorkflow(object):
                 },
             })
 
+        if repeated_questions:
+            print(f"[QUESTION SKIP] {sample_id}: {repeated_questions} repeated questions")
+
         return rows
+
+    def evidence_seeds(self, docs, packet_size=3):
+        docs = list(docs)
+        random.shuffle(docs)
+        by_object = {}
+        for doc in docs:
+            object_id = doc.metadata.get("object_id") or doc.metadata.get("source") or ""
+            by_object.setdefault(object_id, []).append(doc)
+
+        seeds = []
+        for doc in docs:
+            object_id = doc.metadata.get("object_id") or doc.metadata.get("source") or ""
+            packet = [doc]
+            for related in by_object.get(object_id, []):
+                if related is doc:
+                    continue
+                packet.append(related)
+                if len(packet) >= packet_size:
+                    break
+            seeds.append(packet)
+        return seeds
 
     def generate_question(self, evidence_text, used_questions):
         prompt_evidence = evidence_text
@@ -242,6 +275,14 @@ def question_signature(question):
     question = normalize_text(question)
     question = re.sub(r"[^a-z0-9\s]", "", question)
     question = re.sub(r"\b(the|a|an)\b", " ", question)
+    question = re.sub(r"\bdoes\s+", "", question)
+    question = re.sub(r"\bis\s+", "", question)
+    question = re.sub(r"\bare\s+", "", question)
+    question = re.sub(r"\s+", " ", question).strip()
+    question = re.sub(r"\bexists\b", "present", question)
+    question = re.sub(r"\bexist\b", "present", question)
+    question = re.sub(r"\bpresent in section\b", "present", question)
+    question = re.sub(r"\bin section\b", "", question)
     question = re.sub(r"\s+", " ", question).strip()
     return question
 
