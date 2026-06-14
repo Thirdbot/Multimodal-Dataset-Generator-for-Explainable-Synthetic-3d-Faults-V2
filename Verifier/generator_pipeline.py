@@ -24,10 +24,13 @@ class RagWorkflow(object):
         LongTracer.init(verbose=False)
         self.graph_root = Path(graph_root)
         self.output_path = Path(output_path)
+        self.output_started = False
+        self.written_row_keys = set()
         self.rag = Rag(embedding_model="all-MiniLM-L6-v2")
         self.llm = LLMMachine()
 
     def generate_dataset(self, max_graphs=None,graph_views='inline', questions_per_graph=5, candidates_per_question=5):
+        self.start_output(truncate=True)
         rows = []
         for graph_path in self.graph_paths(max_graphs=max_graphs,views=graph_views):
             rows.extend(self.generate_for_graph(
@@ -35,7 +38,6 @@ class RagWorkflow(object):
                 questions_per_graph=questions_per_graph,
                 candidates_per_question=candidates_per_question,
             ))
-        self.write_rows(rows)
         return rows
 
     def generate_for_graph(self, graph_path, questions_per_graph=5, candidates_per_question=5):
@@ -88,7 +90,7 @@ class RagWorkflow(object):
                 print(f"[ANSWER SKIP] {sample_id}: no supported answer")
                 continue
 
-            rows.append({
+            row = {
                 "row_id": row_id(sample_id, question, answer["answer"]),
                 "sample_id": sample_id,
                 "category": category,
@@ -109,7 +111,9 @@ class RagWorkflow(object):
                     "answer_evidence": serialize_docs(answer["docs"]),
                     "graph_evidence": docs_to_text(dedupe_docs([*question_docs, *answer["docs"]])).splitlines(),
                 },
-            })
+            }
+            if self.append_row(row):
+                rows.append(row)
 
         if repeated_questions:
             print(f"[QUESTION SKIP] {sample_id}: {repeated_questions} repeated questions")
@@ -192,6 +196,33 @@ class RagWorkflow(object):
         with open(self.output_path, "w") as file:
             for row in rows:
                 file.write(json.dumps(row, default=str) + "\n")
+
+    def start_output(self, truncate=False):
+        self.output_path.parent.mkdir(parents=True, exist_ok=True)
+        self.written_row_keys = set()
+        if truncate:
+            self.output_path.write_text("")
+        elif self.output_path.exists():
+            for row in read_jsonl(self.output_path):
+                self.written_row_keys.add(row_key(row))
+        else:
+            self.output_path.touch()
+        self.output_started = True
+
+    def append_row(self, row):
+        if not self.output_started:
+            self.start_output(truncate=False)
+
+        key = row_key(row)
+        if key in self.written_row_keys:
+            return False
+
+        self.written_row_keys.add(key)
+        with open(self.output_path, "a") as file:
+            file.write(json.dumps(row, default=str) + "\n")
+            file.flush()
+        print(f"[ROW SAVED] {row.get('sample_id')}: {row.get('question')}")
+        return True
 
 
 def dedupe_docs(docs):
@@ -320,10 +351,34 @@ def dedupe_rows(rows):
     return output
 
 
+def row_key(row):
+    return (
+        row.get("sample_id", ""),
+        row.get("view", ""),
+        question_signature(row.get("question", "")),
+    )
+
+
+def read_jsonl(path):
+    path = Path(path)
+    if not path.exists():
+        return []
+    rows = []
+    with open(path) as file:
+        for line in file:
+            if not line.strip():
+                continue
+            try:
+                rows.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    return rows
+
+
 def generate_multimodal_dataset(graph_root=DEFAULT_GRAPH_ROOT, output_path=DEFAULT_OUTPUT, max_graphs=None):
     workflow = RagWorkflow(graph_root=graph_root, output_path=output_path)
     return workflow.generate_dataset(max_graphs=max_graphs,graph_views='inline',
-                                     candidates_per_question=50, questions_per_graph=50)
+                                     candidates_per_question=100, questions_per_graph=100)
 
 if __name__ == "__main__":
     rows = generate_multimodal_dataset()

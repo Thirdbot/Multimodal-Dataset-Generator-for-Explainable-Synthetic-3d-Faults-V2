@@ -203,7 +203,7 @@ class CategoricalParameter:
         self.kwargs["max_number_faults"] = 0
         self.kwargs["closure_types"] = ["simple"]
 
-    def fault_only(self,f_min=3,f_max=7):
+    def fault_only(self,f_min=5,f_max=9):
         """
         basically, only fault
         :param f_min:
@@ -216,7 +216,7 @@ class CategoricalParameter:
         self.kwargs["max_number_faults"] = f_max
         self.kwargs["closure_types"] = ["faulted"]
 
-    def fault_complex(self,f_min=5,f_max=9):
+    def fault_complex(self,f_min=11,f_max=13):
         """
         basically, fault but more complex
         :param f_min:
@@ -415,7 +415,7 @@ low_level_controls = structural |structural_properties |fault_controls |geo_body
 # (you can set some type to not exists by set 0.0)
 
 high_level_controls = {
-    'sample_population': 8, # amount of sample that will be populated
+    'sample_population': 25, # amount of sample that will be populated
     # each sample that is randomly created or mixed category will be ratio
     # all-faulted has different fault-line that it will be ratio, salt-fault will be ratio
     'sample_types': [
@@ -424,14 +424,14 @@ high_level_controls = {
                      "fault_complex",
                      "salt_only",
                      "salt_fault_mixed",
-                     "onlap",
-                     "depositional",
-                     "full_mixed"
+                     # "onlap",
+                     # "depositional",
+                     # "full_mixed"
     ], # for dataset generations each generation will be ratio in same amount
     'ratio_per_types':{
         # "boring":0.0,
-        # "fault_only":1.0,
-        # "fault_complex":0.4,
+        # "fault_only":0.2,
+        # "fault_complex":0.2,
         # "salt_only":0.0,
         # "salt_fault_mixed":0.0,
         # "onlap":0.0,

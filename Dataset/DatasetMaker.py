@@ -93,6 +93,8 @@ def make_row(row, image_root, min_image_score=0.4):
     sample_image_dir = image_root / sample_id
 
     images = collect_images(sample_image_dir, view, row.get("category", ""), evidence, min_image_score)
+    regions = collect_regions(sample_image_dir, view, images)
+    region_context = format_region_context(regions)
 
     return {
         "row_id": row.get("row_id") or stable_id(row),
@@ -103,11 +105,14 @@ def make_row(row, image_root, min_image_score=0.4):
         "question": row.get("question", ""),
         "answer": row.get("answer", ""),
         "reason": row.get("trace", {}).get("reason", ""),
+        "region_context": region_context,
         "images": images,
+        "regions": regions,
         "image_paths": [item["image_path"] for item in images],
         "mask_paths": [item["mask_path"] for item in images],
         "overlay_paths": [item["overlay_path"] for item in images],
         "object_ids": [item["object_id"] for item in images],
+        "region_bboxes": [item["bbox"] for item in regions],
         "evidence": compact_evidence(evidence),
         "verification": row.get("verification", {}),
         "verification_verdict": row.get("verification", {}).get("verdict", ""),
@@ -150,6 +155,75 @@ def collect_images(sample_image_dir, view, category, evidence, min_image_score=0
         add_first_available_global(images, seen, sample_image_dir, view)
 
     return images
+
+
+def collect_regions(sample_image_dir, view, images):
+    positions = load_object_positions(sample_image_dir)
+    regions = []
+
+    for index, image in enumerate(images, start=1):
+        key = (image["object_type"], image["object_id"], view)
+        position = positions.get(key)
+        if not position:
+            continue
+
+        bbox = position.get("bbox") or {}
+        center = position.get("center") or {}
+        regions.append({
+            "region_id": f"R{index}",
+            "role": image["role"],
+            "object_type": image["object_type"],
+            "object_id": image["object_id"],
+            "view": view,
+            "image_path": image["image_path"],
+            "mask_path": image["mask_path"],
+            "overlay_path": image["overlay_path"],
+            "bbox": [
+                bbox.get("x_min"),
+                bbox.get("y_min"),
+                bbox.get("x_max"),
+                bbox.get("y_max"),
+            ],
+            "center": [
+                center.get("x"),
+                center.get("y"),
+            ],
+        })
+
+    return regions
+
+
+def load_object_positions(sample_image_dir):
+    positions = {}
+    for path in sample_image_dir.glob("*_object_position.json"):
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+
+        for item in data.get("objects", []):
+            object_type = item.get("object_type")
+            object_id = item.get("object_id")
+            view = item.get("view")
+            if object_type and object_id and view:
+                positions[(object_type, object_id, view)] = item
+    return positions
+
+
+def format_region_context(regions):
+    parts = []
+    for region in regions:
+        bbox = region.get("bbox") or []
+        center = region.get("center") or []
+        parts.append({
+            "region_id": region.get("region_id"),
+            "object_id": region.get("object_id"),
+            "object_type": region.get("object_type"),
+            "view": region.get("view"),
+            "bbox": bbox,
+            "center": center,
+        })
+    return parts
 
 
 def image_types_from_evidence(object_id, edge, category):
@@ -253,10 +327,13 @@ def write_csv(rows, path):
         "question",
         "answer",
         "reason",
+        "region_context",
         "image_paths",
         "mask_paths",
         "overlay_paths",
         "object_ids",
+        "region_bboxes",
+        "regions",
         "evidence",
         "verification_verdict",
         "verification_score",

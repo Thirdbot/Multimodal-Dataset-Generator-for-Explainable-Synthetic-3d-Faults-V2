@@ -43,6 +43,9 @@ Rules:
 - REASON must explain which evidence directly answers the question.
 - REASON may mention distractor evidence when it could confuse the answer.
 - REASON may state that the question is not answerable if the needed evidence is absent.
+- REASON may use position, center, or bounding-box facts only as region-grounding context.
+- Do not turn raw x/y coordinates or bounding boxes into the main answer logic unless the question explicitly asks for location.
+- Prefer "the highlighted feature area" or "the visible feature region" instead of raw coordinate wording.
 - Do not infer causes.
 - Do not add geological interpretation not stated in Evidences.
 - Do not mention graph, metadata, database, generated data, or synthetic data.
@@ -93,6 +96,7 @@ Evidence schema:
 - "The section shows N faults" means the fault count.
 - "Salt is present" means salt exists in the section.
 - "Sand-prone intervals" and "fan deposition" describe depositional content.
+- Position, center, or bounding-box facts are region metadata for grounding, not the main interpretation.
 
 Rules:
 - ANSWER must be one natural sentence.
@@ -102,6 +106,8 @@ Rules:
 - Use the same object asked about in the Question.
 - Do not add causes, interpretations, or extra properties.
 - Do not mention graph, metadata, evidence, database, generated data, or synthetic data.
+- Do not mention region ids, bounding boxes, or x/y coordinates unless the question explicitly asks for location.
+- If location is explicitly asked, describe it qualitatively as the visible or highlighted feature area instead of listing raw coordinates.
 - If the Question asks "Does Closure 1 avoid onlap?", answer "Closure 1 avoids onlap."
 - If the Question asks "Does Closure 1 contain gas?", answer "Closure 1 contains gas."
 - If the Question asks "How many faults are present?", answer "The section contains N faults."
@@ -164,13 +170,17 @@ Evidence schema:
 - "The section shows N faults" means the fault count.
 - "Salt is present" means salt exists in the section.
 - "Sand-prone intervals" and "fan deposition" describe depositional content.
+- Position, center, or bounding-box facts are region metadata for image grounding.
 
 Rules:
 - QUESTION must be one natural question.
 - QUESTION must ask about exactly one fact from Evidences.
 - Use natural geological wording, not raw graph keys.
 - Ask only questions that can be directly answered from Evidences.
+- Prefer questions about visible or highlighted geological features, such as faults, closures, salt, onlap, or depositional content.
 - Do not mention graph, metadata, evidence, database, generated data, or synthetic data.
+- Do not mention region ids, bounding boxes, x/y coordinates, centers, or raw positions.
+- Do not ask "where" questions unless the evidence gives only qualitative position.
 - Do not ask broad summary questions.
 - Do not ask cause questions.
 - Do not ask threshold/comparison questions using greater than, less than, wider than, or higher than.
@@ -209,9 +219,9 @@ Return only JSON now:
 
 
 multimodal_qa_instruction = (
-    "Interpret the provided seismic image evidence and answer the question. "
-    "Use the visible geological features in the images, including any provided "
-    "mask or overlay images, and give a direct seismic interpretation answer."
+    "Interpret the provided seismic images and answer the question. "
+    "Use the visible geological features, masks, overlays, and highlighted regions "
+    "when they are provided, and give a direct seismic interpretation answer."
 )
 
 QuestionPrompt = PromptTemplate(
