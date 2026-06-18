@@ -1,42 +1,49 @@
-"""Build a multi-image dataset manifest from verified graph QA rows.
+"""Create a small HuggingFace-friendly multimodal dataset table.
 
-The input rows already contain graph evidence with object ids. This script maps
-those object ids to image/mask/overlay triples under build_objects/images and
-writes a JSONL file for training plus a CSV file for inspection.
+Input: Dataset/hybrid_verified_qa.jsonl
+Output: Dataset/multimodal_multi_image_dataset.csv and .jsonl
 """
 
-import argparse
 import csv
-import hashlib
 import json
-import sys
 from pathlib import Path
 
+
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
+INPUT = ROOT / "Dataset" / "hybrid_verified_qa.jsonl"
+IMAGE_ROOT = ROOT / "build_objects" / "images"
+CSV_OUTPUT = ROOT / "Dataset" / "multimodal_multi_image_dataset.csv"
+JSONL_OUTPUT = ROOT / "Dataset" / "multimodal_multi_image_dataset.jsonl"
 
-from Verifier.llm_machine import multimodal_dataset_instruction
+INSTRUCTION = (
+    "Inspect the seismic images, use the marked regions as visual evidence, "
+    "and answer the question with concise geological reasoning."
+)
 
+MIN_SCORE = 0.4
+OBJECT_TYPES = {"fault", "closure", "salt", "onlap", "lithology", "age_depth"}
 
-DATASET_DIR = ROOT / "Dataset"
-DEFAULT_INPUT = DATASET_DIR / "hybrid_verified_qa.jsonl"
-DEFAULT_JSONL_OUTPUT = DATASET_DIR / "multimodal_multi_image_dataset.jsonl"
-DEFAULT_CSV_OUTPUT = DATASET_DIR / "multimodal_multi_image_dataset.csv"
-DEFAULT_IMAGE_ROOT = ROOT / "build_objects" / "images"
+CLASS_IDS = {"fault": 1, "closure": 2, "salt": 3, "onlap": 4, "lithology": 5, "age_depth": 6}
 
-
-CATEGORY_TO_GLOBAL_IMAGE_TYPES = {
-    "category:boring": ["closure"],
-    "category:fault_only": ["fault"],
-    "category:fault_complex": ["fault", "closure"],
-    "category:salt_only": ["salt", "closure"],
-    "category:salt_fault_mixed": ["fault", "salt", "closure"],
-    "category:onlap": ["onlap", "closure"],
-    "category:depositional": ["closure", "lithology"],
-    "category:full_mixed": ["fault", "salt", "onlap", "closure"],
+CLASS_COLORS = {
+    1: [255, 0, 0],
+    2: [0, 128, 255],
+    3: [180, 0, 255],
+    4: [255, 220, 0],
+    5: [0, 200, 100],
+    6: [255, 140, 0],
 }
-
-CATEGORY_EDGE_TO_IMAGE_TYPES = {
+CATEGORY_TYPES = {
+    "boring": ["closure"],
+    "fault_only": ["fault"],
+    "fault_complex": ["fault", "closure"],
+    "salt_only": ["salt", "closure"],
+    "salt_fault_mixed": ["fault", "salt", "closure"],
+    "onlap": ["onlap", "closure"],
+    "depositional": ["closure", "lithology"],
+    "full_mixed": ["fault", "salt", "onlap", "closure"],
+}
+EDGE_TYPES = {
     "number_faults": ["fault"],
     "fault_mode": ["fault"],
     "number_fault_intersections": ["fault"],
@@ -48,340 +55,156 @@ CATEGORY_EDGE_TO_IMAGE_TYPES = {
     "number_fan_episodes": ["lithology"],
     "fan_horizon_list": ["lithology"],
     "sand_voxel_pct": ["lithology"],
-    "sand_layer_percent_a_posteriori": ["lithology"],
 }
-
-OBJECT_EDGE_TO_IMAGE_TYPES = {
-    "intersects_fault": ["fault"],
-    "intersects_salt": ["salt"],
-    "intersects_onlap": ["onlap"],
-}
-
-OBJECT_TYPES = {"fault", "closure", "salt", "onlap", "lithology", "age_depth"}
 
 
 def main():
-    args = parse_args()
-    rows = [
-        make_row(row, Path(args.image_root), min_image_score=args.min_image_score)
-        for row in read_jsonl(args.input)
-    ]
-    rows = [row for row in rows if row["images"]]
-    write_jsonl(rows, args.jsonl_output)
-    write_csv(rows, args.csv_output)
-    print(json.dumps({
-        "rows": len(rows),
-        "jsonl_output": str(args.jsonl_output),
-        "csv_output": str(args.csv_output),
-    }, indent=2))
+    rows = [build_row(item) for item in read_jsonl(INPUT)]
+    rows = [row for row in rows if row and row["images"] and row["masks"]]
+    write_jsonl(rows, JSONL_OUTPUT)
+    write_csv(rows, CSV_OUTPUT)
+    print(json.dumps({"rows": len(rows), "csv": str(CSV_OUTPUT), "jsonl": str(JSONL_OUTPUT)}, indent=2))
 
 
-def read_jsonl(path):
-    path = Path(path)
-    if not path.exists():
-        raise FileNotFoundError(path)
-    with open(path) as file:
-        for line in file:
-            if line.strip():
-                yield json.loads(line)
-
-
-def make_row(row, image_root, min_image_score=0.4):
-    sample_id = row["sample_id"]
-    view = row.get("view") or "inline"
-    evidence = row.get("evidence", [])
-    sample_image_dir = image_root / sample_id
-
-    images = collect_images(sample_image_dir, view, row.get("category", ""), evidence, min_image_score)
-    regions = collect_regions(sample_image_dir, view, images)
-    region_context = format_region_context(regions)
-
+def build_row(item):
+    sample_id = item.get("sample_id", "")
+    view = item.get("view") or "inline"
+    sample_dir = IMAGE_ROOT / sample_id
+    image_items = collect_image_items(sample_dir, view, item.get("category", ""), item.get("evidence", []))
+    regions = collect_regions(sample_dir, image_items)
     return {
-        "row_id": row.get("row_id") or stable_id(row),
-        "sample_id": sample_id,
-        "category": row.get("category", ""),
-        "view": view,
-        "instruction": multimodal_dataset_instruction(),
-        "question": row.get("question", ""),
-        "answer": row.get("answer", ""),
-        "reason": row.get("trace", {}).get("reason", ""),
-        "region_context": region_context,
-        "images": images,
+        "images": [image["image"] for image in image_items],
+        "masks": [image["mask"] for image in image_items],
+        "instruction": INSTRUCTION,
+        "question": item.get("question", ""),
+        "reason": item.get("trace", {}).get("reason", ""),
+        "answer": item.get("answer", ""),
         "regions": regions,
-        "image_paths": [item["image_path"] for item in images],
-        "mask_paths": [item["mask_path"] for item in images],
-        "overlay_paths": [item["overlay_path"] for item in images],
-        "object_ids": [item["object_id"] for item in images],
-        "region_bboxes": [item["bbox"] for item in regions],
-        "evidence": compact_evidence(evidence),
-        "verification": row.get("verification", {}),
-        "verification_verdict": row.get("verification", {}).get("verdict", ""),
-        "verification_score": row.get("verification", {}).get("score", ""),
     }
 
 
-def collect_images(sample_image_dir, view, category, evidence, min_image_score=0.4):
-    images = []
-    seen = set()
-    requested_global_types = []
-
-    for item in evidence:
-        if evidence_score(item) < min_image_score:
+def collect_image_items(sample_dir, view, category, evidence):
+    items, seen = [], set()
+    for evidence_item in evidence:
+        if evidence_score(evidence_item) < MIN_SCORE:
             continue
-        object_id = item.get("object_id") or item.get("source") or ""
-        edge = item.get("edge") or item.get("fact_name") or ""
+        object_id = evidence_item.get("object_id") or evidence_item.get("source") or ""
+        edge = evidence_item.get("edge") or evidence_item.get("fact_name") or ""
+        for object_type, object_name, role in requested_objects(object_id, edge, category):
+            add_image_item(items, seen, sample_dir, view, object_type, object_name, role)
 
-        for object_type in image_types_from_evidence(object_id, edge, category):
-            requested_global_types.append(object_type)
-
-        if is_object_instance(object_id):
-            object_type = object_id.split("_", 1)[0]
-            add_image(images, seen, sample_image_dir, view, object_type, object_id, "evidence_object")
-            add_image(images, seen, sample_image_dir, view, object_type, object_type, "global")
-            for related_type in OBJECT_EDGE_TO_IMAGE_TYPES.get(edge, []):
-                add_image(images, seen, sample_image_dir, view, related_type, related_type, "related_global")
-        elif object_id in OBJECT_TYPES:
-            add_image(images, seen, sample_image_dir, view, object_id, object_id, "global")
-
-    for object_type in dedupe(requested_global_types):
-        add_image(images, seen, sample_image_dir, view, object_type, object_type, "global")
-
-    if not any(item["role"] == "global" for item in images):
-        for object_type in fallback_global_types(category):
-            if add_image(images, seen, sample_image_dir, view, object_type, object_type, "global"):
+    if not items:
+        for object_type in CATEGORY_TYPES.get(category, []):
+            if add_image_item(items, seen, sample_dir, view, object_type, object_type, "global"):
                 break
-
-    if not images:
-        add_first_available_global(images, seen, sample_image_dir, view)
-
-    return images
+    return items
 
 
-def collect_regions(sample_image_dir, view, images):
-    positions = load_object_positions(sample_image_dir)
-    regions = []
-
-    for index, image in enumerate(images, start=1):
-        key = (image["object_type"], image["object_id"], view)
-        position = positions.get(key)
-        if not position:
-            continue
-
-        bbox = position.get("bbox") or {}
-        center = position.get("center") or {}
-        regions.append({
-            "region_id": f"R{index}",
-            "role": image["role"],
-            "object_type": image["object_type"],
-            "object_id": image["object_id"],
-            "view": view,
-            "image_path": image["image_path"],
-            "mask_path": image["mask_path"],
-            "overlay_path": image["overlay_path"],
-            "bbox": [
-                bbox.get("x_min"),
-                bbox.get("y_min"),
-                bbox.get("x_max"),
-                bbox.get("y_max"),
-            ],
-            "center": [
-                center.get("x"),
-                center.get("y"),
-            ],
-        })
-
-    return regions
-
-
-def load_object_positions(sample_image_dir):
-    positions = {}
-    for path in sample_image_dir.glob("*_object_position.json"):
-        try:
-            data = json.loads(path.read_text())
-        except (OSError, json.JSONDecodeError):
-            continue
-
-        for item in data.get("objects", []):
-            object_type = item.get("object_type")
-            object_id = item.get("object_id")
-            view = item.get("view")
-            if object_type and object_id and view:
-                positions[(object_type, object_id, view)] = item
-    return positions
-
-
-def format_region_context(regions):
-    parts = []
-    for region in regions:
-        bbox = region.get("bbox") or []
-        center = region.get("center") or []
-        parts.append({
-            "region_id": region.get("region_id"),
-            "object_id": region.get("object_id"),
-            "object_type": region.get("object_type"),
-            "view": region.get("view"),
-            "bbox": bbox,
-            "center": center,
-        })
-    return parts
-
-
-def image_types_from_evidence(object_id, edge, category):
-    if str(object_id).startswith("category:"):
-        edge_types = CATEGORY_EDGE_TO_IMAGE_TYPES.get(edge)
-        if edge_types:
-            return edge_types
-        return CATEGORY_TO_GLOBAL_IMAGE_TYPES.get(object_id, fallback_global_types(category))
-
-    if object_id in OBJECT_TYPES:
-        return [object_id]
-
-    if is_object_instance(object_id):
+def requested_objects(object_id, edge, category):
+    if is_object_id(object_id):
         object_type = object_id.split("_", 1)[0]
-        return [object_type, *OBJECT_EDGE_TO_IMAGE_TYPES.get(edge, [])]
-
+        return [(object_type, object_id, "evidence"), (object_type, object_type, "context")]
+    if object_id in OBJECT_TYPES:
+        return [(object_id, object_id, "context")]
+    if str(object_id).startswith("category:"):
+        return [(object_type, object_type, "context") for object_type in EDGE_TYPES.get(edge, CATEGORY_TYPES.get(category, []))]
     return []
 
 
-def fallback_global_types(category):
-    category_node = category if str(category).startswith("category:") else f"category:{category}"
-    return CATEGORY_TO_GLOBAL_IMAGE_TYPES.get(category_node, ["closure", "fault", "salt", "onlap"])
-
-
-def add_first_available_global(images, seen, sample_image_dir, view):
-    for image_path in sorted(sample_image_dir.glob(f"*/*/{view}.png")):
-        object_type = image_path.parent.parent.name
-        object_id = image_path.parent.name
-        if object_type != object_id:
-            continue
-        if add_image(images, seen, sample_image_dir, view, object_type, object_id, "global"):
-            return True
-    return False
-
-
-def add_image(images, seen, sample_image_dir, view, object_type, object_id, role):
-    image_path = sample_image_dir / object_type / object_id / f"{view}.png"
-    mask_path = sample_image_dir / object_type / object_id / f"{view}_mask.png"
-    overlay_path = sample_image_dir / object_type / object_id / f"{view}_overlay.png"
-
-    if not image_path.exists():
-        return False
-
+def add_image_item(items, seen, sample_dir, view, object_type, object_id, role):
+    image = sample_dir / object_type / object_id / f"{view}.png"
+    mask = sample_dir / object_type / object_id / f"{view}_mask.png"
     key = (object_type, object_id, view)
     if key in seen:
         return True
+    if not image.exists() or not mask.exists():
+        return False
     seen.add(key)
-
-    images.append({
-        "role": role,
+    class_id = CLASS_IDS.get(object_type, 0)
+    items.append({
         "object_type": object_type,
         "object_id": object_id,
         "view": view,
-        "image_path": image_path.as_posix(),
-        "mask_path": mask_path.as_posix() if mask_path.exists() else "",
-        "overlay_path": overlay_path.as_posix() if overlay_path.exists() else "",
+        "role": role,
+        "class_id": class_id,
+        "class_name": object_type,
+        "class_color": CLASS_COLORS.get(class_id, [255, 255, 255]),
+        "image": image.as_posix(),
+        "mask": mask.as_posix(),
     })
     return True
 
 
-def compact_evidence(evidence):
-    compact = []
-    for item in evidence:
-        compact.append({
-            "text": item.get("text", ""),
-            "score": item.get("score", ""),
-            "trace_type": item.get("trace_type", ""),
-            "source": item.get("source", ""),
-            "object_id": item.get("object_id", ""),
-            "edge": item.get("edge", ""),
-            "target": item.get("target", ""),
-            "relation": item.get("relation", ""),
+def collect_regions(sample_dir, image_items):
+    positions = load_positions(sample_dir)
+    regions = []
+    for index, image_item in enumerate(image_items):
+        position = positions.get((image_item["object_type"], image_item["object_id"], image_item["view"]))
+        if not position:
+            continue
+        bbox = position.get("bbox") or {}
+        center = position.get("center") or {}
+        regions.append({
+            "image_index": index,
+            "mask_index": index,
+            "role": image_item["role"],
+            "object_type": image_item["object_type"],
+            "view": image_item["view"],
+            "class_id": position.get("class_id", image_item["class_id"]),
+            "class_name": position.get("class_name", image_item["class_name"]),
+            "class_color": position.get("class_color", image_item["class_color"]),
+            "bbox": [bbox.get("x_min"), bbox.get("y_min"), bbox.get("x_max"), bbox.get("y_max")],
+            "center": [center.get("x"), center.get("y")],
         })
-    return compact
+    return regions
 
 
-def evidence_score(item):
-    try:
-        return float(item.get("score", 0.0) or 0.0)
-    except (TypeError, ValueError):
-        return 0.0
+def load_positions(sample_dir):
+    positions = {}
+    for path in sample_dir.glob("*_object_position.json"):
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        for item in data.get("objects", []):
+            key = (item.get("object_type"), item.get("object_id"), item.get("view"))
+            positions[key] = item
+    return positions
+
+
+def read_jsonl(path):
+    if not path.exists():
+        raise FileNotFoundError(path)
+    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
 
 
 def write_jsonl(rows, path):
-    path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w") as file:
-        for row in rows:
-            file.write(json.dumps(row, default=str) + "\n")
+    path.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows))
 
 
 def write_csv(rows, path):
-    path = Path(path)
+    columns = ["images", "masks", "instruction", "question", "reason", "answer", "regions"]
     path.parent.mkdir(parents=True, exist_ok=True)
-    columns = [
-        "row_id",
-        "sample_id",
-        "category",
-        "view",
-        "instruction",
-        "question",
-        "answer",
-        "reason",
-        "region_context",
-        "image_paths",
-        "mask_paths",
-        "overlay_paths",
-        "object_ids",
-        "region_bboxes",
-        "regions",
-        "evidence",
-        "verification_verdict",
-        "verification_score",
-    ]
     with open(path, "w", newline="") as file:
         writer = csv.DictWriter(file, fieldnames=columns)
         writer.writeheader()
         for row in rows:
             writer.writerow({
-                key: json.dumps(row[key], default=str) if isinstance(row.get(key), (list, dict)) else row.get(key, "")
+                key: json.dumps(row[key], ensure_ascii=False) if isinstance(row[key], list) else row[key]
                 for key in columns
             })
 
 
-def is_object_instance(object_id):
-    object_id = str(object_id)
-    return any(object_id.startswith(f"{object_type}_") for object_type in OBJECT_TYPES)
+def is_object_id(value):
+    return any(str(value).startswith(f"{object_type}_") for object_type in OBJECT_TYPES)
 
 
-def dedupe(items):
-    seen = set()
-    output = []
-    for item in items:
-        if item in seen:
-            continue
-        seen.add(item)
-        output.append(item)
-    return output
-
-
-def stable_id(row):
-    payload = "|".join([
-        row.get("sample_id", ""),
-        row.get("view", ""),
-        row.get("question", ""),
-        row.get("answer", ""),
-    ])
-    return hashlib.sha1(payload.encode()).hexdigest()
-
-
-def parse_args():
-    parser = argparse.ArgumentParser(description="Create a multi-image multimodal dataset manifest.")
-    parser.add_argument("--input", default=DEFAULT_INPUT, type=Path)
-    parser.add_argument("--image-root", default=DEFAULT_IMAGE_ROOT, type=Path)
-    parser.add_argument("--jsonl-output", default=DEFAULT_JSONL_OUTPUT, type=Path)
-    parser.add_argument("--csv-output", default=DEFAULT_CSV_OUTPUT, type=Path)
-    parser.add_argument("--min-image-score", default=0.4, type=float)
-    return parser.parse_args()
+def evidence_score(item):
+    try:
+        return float(item.get("score", 0) or 0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 if __name__ == "__main__":

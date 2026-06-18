@@ -13,6 +13,7 @@ import xarray
 import numpy as np
 from scipy import ndimage
 import matplotlib.pyplot as plt
+from PIL import Image
 
 GRAPH_OBJECT_TYPES = [
     "closure",
@@ -24,6 +25,24 @@ ENTITY_OBJECT_TYPES = {
     "closure",
     "salt",
     "onlap",
+}
+
+CLASS_IDS = {
+    "fault": 1,
+    "closure": 2,
+    "salt": 3,
+    "onlap": 4,
+    "lithology": 5,
+    "age_depth": 6,
+}
+
+CLASS_COLORS = {
+    1: [255, 0, 0],
+    2: [0, 128, 255],
+    3: [180, 0, 255],
+    4: [255, 220, 0],
+    5: [0, 200, 100],
+    6: [255, 140, 0],
 }
 
 FLUID_CLOSURE_PATTERNS = {
@@ -435,16 +454,24 @@ class GraphImageExtractor:
         timeslice_index = int(mask.sum(axis=(0, 1)).argmax())
         return {
             "basic": {
-                "inline": basic_array[inline_index, :, :],
-                "crossline": basic_array[:, crossline_index, :],
-                "timeslice": basic_array[:, :, timeslice_index],
+                "inline": self._display_slice("inline", basic_array[inline_index, :, :]),
+                "crossline": self._display_slice("crossline", basic_array[:, crossline_index, :]),
+                "timeslice": self._display_slice("timeslice", basic_array[:, :, timeslice_index]),
             },
             "mask": {
-                "inline": mask[inline_index, :, :],
-                "crossline": mask[:, crossline_index, :],
-                "timeslice": mask[:, :, timeslice_index],
+                "inline": self._display_slice("inline", mask[inline_index, :, :]),
+                "crossline": self._display_slice("crossline", mask[:, crossline_index, :]),
+                "timeslice": self._display_slice("timeslice", mask[:, :, timeslice_index]),
             },
         }
+
+    @staticmethod
+    def _display_slice(view,slice_2d):
+        # Vertical sections are displayed as depth-by-lateral images, so the
+        # shorter lateral axis stays horizontal and depth reads vertically.
+        if view in {"inline", "crossline"}:
+            return np.asarray(slice_2d).T
+        return np.asarray(slice_2d)
 
     def _select_average_mask_slices(self,slices,object_type,object_properties):
         # Global slices and individual slices are already keyed. Empty masks are
@@ -624,7 +651,7 @@ class GraphImageExtractor:
                 basic_slice = self._normalize_image(sliced["basic"][view])
                 mask_slice = np.asarray(sliced["mask"][view], dtype=bool)
                 self._save_png(object_folder / f"{view}.png", basic_slice, cmap="gray")
-                self._save_png(object_folder / f"{view}_mask.png", mask_slice.astype(float), cmap="Reds")
+                self._save_mask_png(object_folder / f"{view}_mask.png", mask_slice)
                 self._save_overlay(object_folder / f"{view}_overlay.png", basic_slice, mask_slice)
 
     def _position_records(self,sample_name,object_type,selected_slices):
@@ -640,6 +667,9 @@ class GraphImageExtractor:
                     "sample_id": sample_name,
                     "object_type": object_type,
                     "object_id": str(object_id),
+                    "class_id": self._class_id(object_type),
+                    "class_name": object_type,
+                    "class_color": self._class_color(object_type),
                     "view": view,
                     "image_path": (object_folder / f"{view}.png").as_posix(),
                     "mask_path": (object_folder / f"{view}_mask.png").as_posix(),
@@ -651,6 +681,14 @@ class GraphImageExtractor:
                     },
                 })
         return records
+
+    @staticmethod
+    def _class_id(object_type):
+        return CLASS_IDS.get(str(object_type), 0)
+
+    @staticmethod
+    def _class_color(object_type):
+        return CLASS_COLORS.get(CLASS_IDS.get(str(object_type), 0), [255, 255, 255])
 
     def _save_object_positions(self,sample_name,object_type,records):
         if not records:
@@ -692,6 +730,11 @@ class GraphImageExtractor:
     @staticmethod
     def _save_png(path,image,cmap):
         plt.imsave(path, image, cmap=cmap)
+
+    @staticmethod
+    def _save_mask_png(path,mask_slice):
+        mask = np.asarray(mask_slice, dtype=bool).astype(np.uint8) * 255
+        Image.fromarray(mask, mode="L").save(path)
 
     @staticmethod
     def _save_overlay(path,basic_slice,mask_slice):
