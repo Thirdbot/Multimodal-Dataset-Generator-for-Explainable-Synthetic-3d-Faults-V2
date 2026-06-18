@@ -9,7 +9,7 @@ import json
 import re
 import copy
 from pathlib import Path
-
+from ast import literal_eval
 import networkx as nx
 
 from yaml_helper import YAMLHelper
@@ -149,12 +149,24 @@ class GraphSystem:
         model_properties = self._pick(data.get("model_parameters",[{}])[0], category_filter.get("model_keys"))
         visible_fault_indexes = self._visible_fault_indexes(model_properties)
         fault_index_map = self._fault_index_map(visible_fault_indexes)
+        # fault changing from model summary
         if visible_fault_indexes is not None and "number_faults" in model_properties:
-            model_properties["number_faults"] = len(visible_fault_indexes)
-        if category_node == "category:boring":
-            model_properties.pop("number_faults", None)
-            model_properties.pop("fault_mode", None)
+            model_properties["number_faults"] = str(len(visible_fault_indexes))
+
+        #change property types to default types
+        for key,value in model_properties.items():
+            if key == 'fault_mode':
+                continue
+            value = literal_eval(value)
+            model_properties[key] = value
+        for key in list(model_properties.keys()):
+            value = model_properties[key]
+            if value == False or value == 0 or value is  None or value == []:
+                model_properties.pop(key)
+
+        # remove keys that state that it does not exist or visible
         self.graph.add_node(category_node, **model_properties)  # category get its properties
+
         for table in tables:
             if table == "model_parameters":
                 continue
