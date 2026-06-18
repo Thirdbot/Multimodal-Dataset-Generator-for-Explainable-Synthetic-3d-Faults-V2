@@ -75,8 +75,7 @@ def _copy_graph_with_2d_positions(graph, positions, view):
         if position is None:
             continue
 
-        for key in ("x0", "y0", "z0", "x_min", "x_max", "y_min", "y_max", "z_min", "z_max"):
-            node.pop(key, None)
+
         node["view"] = view
         node["x"] = position["x"]
         node["y"] = position["y"]

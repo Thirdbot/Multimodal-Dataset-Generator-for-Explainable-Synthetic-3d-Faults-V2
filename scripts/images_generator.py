@@ -183,7 +183,7 @@ class GraphImageExtractor:
                             match_sample,
                             sample_object_properties,
                         )
-                    self._merge_slices(type_sliced_objects, slices)
+                    self._merge_slices(type_sliced_objects, slices) # store all slices both closure and faults and etc.
             if object_type == "closure" and type_global_mask is not None and type_global_mask.any():
                 self._merge_slices(
                     type_sliced_objects,
@@ -392,9 +392,8 @@ class GraphImageExtractor:
         return f"fault_{original_index}"
 
     def _closure_individual_slices(self,base_array,property_array,source_path,object_properties):
-        # Closure graph nodes already contain fluid type, bounding box, and
-        # voxel count. Those three fields are enough to find the matching
-        # component inside the oil/gas/brine closure masks.
+        # Closure positions are derived from the generated closure mask itself.
+        # The graph only needs closure row identity and fluid type.
         source_fluid = self._closure_fluid_from_path(source_path)
         if source_fluid is None:
             return {}
@@ -404,26 +403,17 @@ class GraphImageExtractor:
             return {}
 
         selected = {}
-        closure_objects = [obj for obj in object_properties if obj.get("id", "").startswith("closure_")]
-        for closure in closure_objects:
-            fluid = str(closure.get("fluid", "")).lower()
-            if fluid != source_fluid:
-                continue
+        closure_objects = [
+            obj for obj in object_properties
+            if obj.get("id", "").startswith("closure_")
+            and str(obj.get("fluid", "")).lower() == source_fluid
+        ]
+        closure_objects = sorted(closure_objects, key=lambda item: self._object_index(item.get("id")) or 0)
+        component_masks = self._connected_component_masks(closure_mask)
 
-            object_mask = self._bbox_mask(closure_mask, closure)
-            if not object_mask.any():
-                continue
-
-            component_masks = self._connected_component_masks(object_mask)
-            _, best_mask = self._best_mask_for_object(
-                component_masks,
-                closure,
-                closure.get("n_voxels"),
-                set(),
-            )
-            if best_mask is None:
-                continue
-            selected[closure["id"]] = self._slice_by_mask(base_array, best_mask)
+        for index, component_mask in enumerate(component_masks):
+            object_id = closure_objects[index]["id"] if index < len(closure_objects) else f"closure_{index}"
+            selected[object_id] = self._slice_by_mask(base_array, component_mask)
         return selected
 
     @staticmethod
@@ -647,12 +637,13 @@ class GraphImageExtractor:
         for object_id, sliced in selected_slices.items():
             object_folder = output_folder / self._safe_filename(object_id)
             object_folder.mkdir(parents=True, exist_ok=True)
+            overlay_color = self._class_color(object_type)
             for view in ("inline", "crossline", "timeslice"):
                 basic_slice = self._normalize_image(sliced["basic"][view])
                 mask_slice = np.asarray(sliced["mask"][view], dtype=bool)
                 self._save_png(object_folder / f"{view}.png", basic_slice, cmap="gray")
                 self._save_mask_png(object_folder / f"{view}_mask.png", mask_slice)
-                self._save_overlay(object_folder / f"{view}_overlay.png", basic_slice, mask_slice)
+                self._save_overlay(object_folder / f"{view}_overlay.png", basic_slice, mask_slice, overlay_color)
 
     def _position_records(self,sample_name,object_type,selected_slices):
         records = []
@@ -737,11 +728,10 @@ class GraphImageExtractor:
         Image.fromarray(mask, mode="L").save(path)
 
     @staticmethod
-    def _save_overlay(path,basic_slice,mask_slice):
+    def _save_overlay(path,basic_slice,mask_slice,color):
         overlay = np.dstack([basic_slice, basic_slice, basic_slice])
-        overlay[mask_slice, 0] = 1.0
-        overlay[mask_slice, 1] *= 0.25
-        overlay[mask_slice, 2] *= 0.25
+        color = np.asarray(color, dtype=float) / 255.0
+        overlay[mask_slice] = (overlay[mask_slice] * 0.35) + (color * 0.65)
         plt.imsave(path, overlay)
 
     @staticmethod
