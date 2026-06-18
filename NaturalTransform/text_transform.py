@@ -4,19 +4,30 @@ import re
 # Manual edit zone. Keep these maps small and inspectable.
 OBJECT_TYPES = ("fault", "closure")
 
+MODEL_KEYS = {
+    "number_faults",
+    "fault_mode",
+    "salt_inserted",
+    "number_onlap_episodes",
+    "number_fan_episodes",
+    "number_hc_closures",
+    "number_fault_intersections",
+}
+CLOSURE_KEYS = {
+    "fluid",
+    "intersects_fault",
+    "intersects_onlap",
+    "intersects_salt",
+}
+FAULT_KEYS = {
+    "throw",
+    "tilt_pct",
+    "shear_zone_width",
+    "gouge_pctile",
+}
+ALLOWED_PROPERTY_EDGES = MODEL_KEYS | CLOSURE_KEYS | FAULT_KEYS
+
 SKIP_EDGES = {
-    "fault_voxel_count_list",
-    "closure_voxel_count",
-    "closure_voxel_count_brine",
-    "closure_voxel_count_oil",
-    "closure_voxel_count_gas",
-    "closure_voxel_pct",
-    "closure_voxel_pct_brine",
-    "closure_voxel_pct_oil",
-    "closure_voxel_pct_gas",
-    "n_voxels",
-    "n_voxels_faults",
-    "n_voxels_fault_intersections",
     "view",
     "original_fault_index",
 }
@@ -41,8 +52,6 @@ EDGE_LABELS = {
     "tilt_pct": "tilt",
     "shear_zone_width": "shear zone width",
     "gouge_pctile": "gouge percentile",
-    "sand_voxel_pct": "sand-prone interval percentage",
-    "sand_layer_percent_a_posteriori": "sand-prone layering percentage",
     "fluid": "fluid",
     "salt_inserted": "salt",
     "number_faults": "faults",
@@ -50,8 +59,6 @@ EDGE_LABELS = {
     "number_onlap_episodes": "onlap episodes",
     "number_fault_intersections": "fault intersections",
     "number_fan_episodes": "fan episodes",
-    "onlaps_horizon_list": "onlap horizons",
-    "fan_horizon_list": "fan horizons",
 }
 
 EDGE_TEMPLATES = {
@@ -60,11 +67,7 @@ EDGE_TEMPLATES = {
     "tilt_pct": "{source} shows tilt of about {value}",
     "shear_zone_width": "{source} has a shear zone about {value} wide",
     "gouge_pctile": "{source} shows gouge near the {value} percentile",
-    "sand_voxel_pct": "Sand-prone intervals make up about {value} percent of the section",
-    "sand_layer_percent_a_posteriori": "Sand-prone layering makes up about {value} of the section",
     "fluid": "{source} contains {value}",
-    "onlaps_horizon_list": "Onlap is associated with horizons {value}",
-    "fan_horizon_list": "Fan deposition is associated with horizons {value}",
 }
 
 COUNT_TEMPLATES = {
@@ -97,6 +100,8 @@ class TextTransform(object):
     def relation_to_sentence(self, relation):
         edge = relation.get("edge")
         target = relation.get("target")
+        if edge not in ALLOWED_PROPERTY_EDGES and edge not in POSITION_EDGES and edge not in EXTENT_EDGES:
+            return None
         if edge in SKIP_EDGES or self._is_low_value(edge, target):
             return None
 
