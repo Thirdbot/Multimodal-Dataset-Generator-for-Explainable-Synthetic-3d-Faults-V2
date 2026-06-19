@@ -104,7 +104,7 @@ def build_row(item):
             f"<color>{class_color_name}</color>\n"
             f"{evidence_text}\n"
             f"<bbox>{json.dumps(bbox)}</bbox>\n"
-            "<SEG>"
+            "<SEG>\n"
             "</region>\n"
         )
 
@@ -112,7 +112,7 @@ def build_row(item):
         "images": [image["image"] for image in image_items],
         "masks": [image["mask"] for image in image_items],
         "instruction": INSTRUCTION,
-        "question": f"{'<image>'*len(image_items)}{item.get('question', '')}",
+        "question": f"{item.get('question', '')}",
         "reason": f'<think>{item.get("trace", {}).get("reason", "")}</think>',
         "answer": f'<answer>{item.get("answer", "")}</answer>',
         "evidence": regions_box,
