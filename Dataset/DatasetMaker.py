@@ -51,10 +51,7 @@ EDGE_TYPES = {
     "number_hc_closures": ["closure"],
     "fluid": ["closure"],
     "number_onlap_episodes": ["onlap"],
-    "onlaps_horizon_list": ["onlap"],
     "number_fan_episodes": ["lithology"],
-    "fan_horizon_list": ["lithology"],
-    "sand_voxel_pct": ["lithology"],
 }
 
 

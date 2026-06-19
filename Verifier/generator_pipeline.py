@@ -17,7 +17,10 @@ from Verifier.rag_verifier import best_doc_score, score_qa_evidence, serialize_d
 
 DEFAULT_GRAPH_ROOT = ROOT / "graphs" / "properties_2d_graph"
 DEFAULT_OUTPUT = ROOT / "Dataset" / "hybrid_verified_qa.jsonl"
-
+INSTRUCTION = (
+    "Inspect the seismic images, use the marked regions as visual evidence, "
+    "and answer the question with concise geological reasoning."
+)
 
 class RagWorkflow(object):
     def __init__(self, graph_root=DEFAULT_GRAPH_ROOT, output_path=DEFAULT_OUTPUT):
@@ -51,76 +54,71 @@ class RagWorkflow(object):
         retrieve_many = self.llm.retrieve_many(retrieval)
         all_docs = self.rag.evidence_documents(graph_path)
         evidence_text = self.rag.format_docs(all_docs)
-        evidence_seeds = self.evidence_seeds(all_docs)
-        seen_question_signatures = set()
-        seen_question_texts = []
-        repeated_questions = 0
         rows = []
 
-        for seed_docs in evidence_seeds:
-            if len(rows) >= questions_per_graph:
-                break
+        # evidences seeds
+        number_of_passes_questions = 0
+        evidence_seeds = self.evidence_seeds(all_docs)
 
-            seed_text = self.rag.format_docs(seed_docs)
-            question = self.generate_question(seed_text, seen_question_texts)
-            if not question:
+        while number_of_passes_questions < questions_per_graph: # retry batches regenerations
+            try:
+                evidences_docs = next(evidence_seeds)
+            except StopIteration:
+                evidence_seeds = self.evidence_seeds(all_docs)
+                evidences_docs = next(evidence_seeds)
+            seed_text = self.rag.format_docs(evidences_docs)
+            questions = self.generate_question(seed_text, min(3,questions_per_graph - number_of_passes_questions)) # try 3 first, then try left
+            if not questions or questions == []:
                 print(f"[QUESTION SKIP] {sample_id}: no question generated")
                 continue
 
-            question_key = question_signature(question)
-            if question_key in seen_question_signatures:
-                repeated_questions += 1
-                continue
-            seen_question_signatures.add(question_key)
-            seen_question_texts.append(question)
 
-            question_docs = retrieve_many(question) # multiple question evidences
-            if best_doc_score(question_docs) < 0.7:
-                print(f"[QUESTION SKIP] {sample_id}: low retrieval score")
-                continue
+            for q in questions:
+                question_docs = retrieve_many(q) # multiple question evidences
+                if best_doc_score(question_docs) < 0.7:
+                    print(f"[QUESTION SKIP] {sample_id}: low retrieval score")
+                    continue
 
-            answer = self.best_answer(
-                question=question,
-                evidence_text=evidence_text,
-                question_docs=question_docs,
-                retrieve_many=retrieve_many,
-                candidates=candidates_per_question,
-            )
-            if not answer:
-                print(f"[ANSWER SKIP] {sample_id}: no supported answer")
-                continue
+                answer = self.best_answer(
+                    question=q,
+                    evidence_text=evidence_text,
+                    question_docs=question_docs,
+                    retrieve_many=retrieve_many,
+                    number_of_answer=candidates_per_question,
+                ) # return 1 best answer
 
-            row = {
-                "row_id": row_id(sample_id, question, answer["answer"]),
-                "sample_id": sample_id,
-                "category": category,
-                "view": view,
-                "instruction": question,
-                "question": question,
-                "answer": answer["answer"],
-                "evidence": serialize_docs(answer["docs"]),
-                "verification": answer["verification"],
-                "metadata": {
-                    "graph_path": graph_path.as_posix(),
+                if not answer:
+                    print(f"[ANSWER SKIP] {sample_id}: no supported answer")
+                    continue
+
+                row = {
+                    "row_id": row_id(sample_id, q, answer["answer"]),
+                    "sample_id": sample_id,
                     "category": category,
                     "view": view,
-                },
-                "trace": {
-                    "reason": answer.get("reason", ""),
-                    "question_evidence": serialize_docs(question_docs),
-                    "answer_evidence": serialize_docs(answer["docs"]),
-                    "graph_evidence": docs_to_text(dedupe_docs([*question_docs, *answer["docs"]])).splitlines(),
-                },
-            }
-            if self.append_row(row):
-                rows.append(row)
-
-        if repeated_questions:
-            print(f"[QUESTION SKIP] {sample_id}: {repeated_questions} repeated questions")
-
+                    "instruction":INSTRUCTION ,
+                    "question": q,
+                    "answer": answer["answer"],
+                    "evidence": serialize_docs(answer["docs"]),
+                    "verification": answer["verification"],
+                    "metadata": {
+                        "graph_path": graph_path.as_posix(),
+                        "category": category,
+                        "view": view,
+                    },
+                    "trace": {
+                        "reason": answer.get("reason", ""),
+                        "question_evidence": serialize_docs(question_docs),
+                        "answer_evidence": serialize_docs(answer["docs"]),
+                        "graph_evidence": docs_to_text(dedupe_docs([*question_docs, *answer["docs"]])).splitlines(),
+                    },
+                }
+                if self.append_row(row):
+                    rows.append(row)
+                number_of_passes_questions += 1
         return rows
 
-    def evidence_seeds(self, docs, packet_size=3):
+    def evidence_seeds(self, docs, packet_size=1):
         docs = list(docs)
         random.shuffle(docs)
         by_object = {}
@@ -128,7 +126,7 @@ class RagWorkflow(object):
             object_id = doc.metadata.get("object_id") or doc.metadata.get("source") or ""
             by_object.setdefault(object_id, []).append(doc)
 
-        seeds = []
+
         for doc in docs:
             object_id = doc.metadata.get("object_id") or doc.metadata.get("source") or ""
             packet = [doc]
@@ -138,47 +136,33 @@ class RagWorkflow(object):
                 packet.append(related)
                 if len(packet) >= packet_size:
                     break
-            seeds.append(packet)
-        return seeds
+            yield packet
 
-    def generate_question(self, evidence_text, used_questions):
-        prompt_evidence = evidence_text
-        if used_questions:
-            prompt_evidence = (
-                f"{evidence_text}\n\n"
-                "Already asked questions:\n"
-                f"{chr(10).join(sorted(used_questions))}\n"
-                "Ask about a different supported fact."
-            )
-        response = self.llm.question_generation().invoke({"evidences": prompt_evidence})
-        return response.QUESTION if response else ""
+    def generate_question(self, evidence_text, number_of_questions):
+        response = self.llm.question_batch_generation().invoke({"evidences":evidence_text,
+        "count": number_of_questions})
+        return response.QUESTIONS if response else ""
 
-    def best_answer(self, question, evidence_text, question_docs, retrieve_many, candidates=5):
+    def best_answer(self, question, evidence_text, question_docs, retrieve_many, number_of_answer=5):
         answers = []
-        for _ in range(candidates):
-            reason = self.llm.reason_generation().invoke({
-                "evidences": evidence_text,
-                "question": question,
-            })
-            reason_text = reason.REASON if reason else ""
-            response = self.llm.answer_generation().invoke({
-                "evidences": evidence_text,
-                "question": question,
-                "reason": reason_text,
-            })
-            answer = response.ANSWER if response else ""
-            answer_docs = retrieve_many(answer)
+        response = self.llm.answer_batch_generation().invoke({
+            "evidences": evidence_text,
+            "question": question,
+            "count":number_of_answer
+        })
+        answer = response.ANSWERS if response else ""
+        for a in answer:
+            answer_docs = retrieve_many(a)
             if score_qa_evidence(question_docs, answer_docs) < 1.0:
                 continue
 
             verification_text = docs_to_text(dedupe_docs([*question_docs, *answer_docs]))
-            verification = verify_answer(answer, verification_text)
+            verification = verify_answer(a, verification_text) # answer verify evidences
             if verification["verdict"] != "PASS":
                 continue
 
             answers.append({
-                "answer": answer,
-                "reason": reason_text,
+                "answer": a,
                 "docs": answer_docs,
                 "verification": verification,
             })
@@ -221,7 +205,10 @@ class RagWorkflow(object):
         with open(self.output_path, "a") as file:
             file.write(json.dumps(row, default=str) + "\n")
             file.flush()
-        print(f"[ROW SAVED] {row.get('sample_id')}: {row.get('question')}")
+        print(f"""[ROW SAVED] {row.get('sample_id')}:
+                Question: {row.get('question')}
+                Answer:{row.get('answer')}
+                Evidences:{row.get('evidence')}\n""")
         return True
 
 
@@ -378,7 +365,7 @@ def read_jsonl(path):
 def generate_multimodal_dataset(graph_root=DEFAULT_GRAPH_ROOT, output_path=DEFAULT_OUTPUT, max_graphs=None):
     workflow = RagWorkflow(graph_root=graph_root, output_path=output_path)
     return workflow.generate_dataset(max_graphs=max_graphs,graph_views='inline',
-                                     candidates_per_question=100, questions_per_graph=100)
+                                     candidates_per_question=5, questions_per_graph=5)
 
 if __name__ == "__main__":
     rows = generate_multimodal_dataset()
