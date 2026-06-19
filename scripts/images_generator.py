@@ -64,7 +64,6 @@ OBJECT_ZARR_CANDIDATES = {
       ],
       "onlap": [
           "onlap_segments_*.zarr",
-          "depth_maps_onlaps.zarr",
       ],
       "salt": [
           # only if Synthoseis writes a salt label in that build.

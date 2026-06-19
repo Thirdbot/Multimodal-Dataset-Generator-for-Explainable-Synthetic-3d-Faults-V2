@@ -6,7 +6,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CSV = ROOT / "Dataset" / "multimodal_multi_image_dataset.csv"
 IMAGE_LIST_COLUMNS = {"images", "masks"}
-PREVIEW_IMAGE_COLUMNS = {"preview_image", "preview_mask"}
 JSON_COLUMNS = {"regions", "evidence"}
 
 
@@ -30,8 +29,6 @@ def clean_row(row):
             cleaned[key] = normalize_json_string(value)
         else:
             cleaned[key] = "" if value is None else str(value)
-    cleaned["preview_image"] = first_image(cleaned.get("images", []))
-    cleaned["preview_mask"] = first_image(cleaned.get("masks", []))
     return cleaned
 
 
@@ -47,14 +44,6 @@ def resolve_image(value):
     return path.as_posix()
 
 
-def resolve_image_list(value):
-    return [
-        resolved
-        for resolved in (resolve_image(item) for item in parse_json_list(value))
-        if resolved
-    ]
-
-
 def parse_json_list(value):
     value = str(value or "").strip()
     if not value:
@@ -68,6 +57,14 @@ def parse_json_list(value):
     return [parsed]
 
 
+def resolve_image_list(value):
+    return [
+        resolved
+        for resolved in (resolve_image(item) for item in parse_json_list(value))
+        if resolved
+    ]
+
+
 def normalize_json_string(value):
     value = str(value or "").strip()
     if not value:
@@ -78,26 +75,26 @@ def normalize_json_string(value):
         return value
 
 
-def first_image(images):
-    return images[0] if images else None
-
-
 def build_dataset(rows):
     from datasets import Dataset, Features, Image, Sequence, Value
 
     if not rows:
         raise ValueError("no rows to upload")
 
-    features = {}
-    for key in [
-        "preview_image", "preview_mask",
+    columns = [
         "images", "masks",
-        "instruction", "question", "reason", "answer", "evidence", "regions",
-    ]:
+        "instruction", "question", "reason", "answer",
+        "evidence", "regions",
+    ]
+    rows = [
+        {key: row.get(key, [] if key in IMAGE_LIST_COLUMNS else "") for key in columns}
+        for row in rows
+    ]
+
+    features = {}
+    for key in columns:
         if key in IMAGE_LIST_COLUMNS:
             features[key] = Sequence(Image())
-        elif key in PREVIEW_IMAGE_COLUMNS:
-            features[key] = Image()
         else:
             features[key] = Value("string")
 
@@ -162,10 +159,8 @@ Repository: https://huggingface.co/datasets/{repo_id}
 
 Columns:
 
-- `images`: sequence of raw seismic images
-- `masks`: sequence of binary segmentation masks
-- `preview_image`: first raw image for HuggingFace Dataset Viewer
-- `preview_mask`: first mask image for HuggingFace Dataset Viewer
+- `images`: sequence of all raw images
+- `masks`: sequence of all mask images
 - `instruction`: task instruction
 - `question`: question text
 - `reason`: optional reasoning/description text
@@ -176,4 +171,4 @@ Columns:
 """
 
 if __name__ == "__main__":
-    upload_dataset(DEFAULT_CSV, "ThirdExec/synthetic-seismic-vlm", private=False)
+    upload_dataset(DEFAULT_CSV, "thirdExec/synthetic-seismic-vlm", private=False)
