@@ -1,6 +1,6 @@
 """Create a small HuggingFace-friendly multimodal dataset table.
 
-Input: Dataset/hybrid_verified_qa.jsonl
+Input: Dataset/verified_qa.jsonl
 Output: Dataset/multimodal_multi_image_dataset.csv and .jsonl
 """
 
@@ -10,10 +10,9 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent.parent
-INPUT = ROOT / "Dataset" / "hybrid_verified_qa.jsonl"
+INPUT = ROOT / "Dataset" / "verified_qa.jsonl"
 IMAGE_ROOT = ROOT / "build_objects" / "images"
 CSV_OUTPUT = ROOT / "Dataset" / "multimodal_multi_image_dataset.csv"
-JSONL_OUTPUT = ROOT / "Dataset" / "multimodal_multi_image_dataset.jsonl"
 
 INSTRUCTION = (
     "Inspect the seismic images, use the marked regions as visual evidence, "
@@ -58,9 +57,7 @@ EDGE_TYPES = {
 def main():
     rows = [build_row(item) for item in read_jsonl(INPUT)]
     rows = [row for row in rows if row and row["images"] and row["masks"]]
-    write_jsonl(rows, JSONL_OUTPUT)
     write_csv(rows, CSV_OUTPUT)
-    print(json.dumps({"rows": len(rows), "csv": str(CSV_OUTPUT), "jsonl": str(JSONL_OUTPUT)}, indent=2))
 
 
 def build_row(item):
@@ -74,8 +71,9 @@ def build_row(item):
         "masks": [image["mask"] for image in image_items],
         "instruction": INSTRUCTION,
         "question": item.get("question", ""),
-        "reason": item.get("trace", {}).get("reason", ""),
-        "answer": item.get("answer", ""),
+        "reason": f'<think>{item.get("trace", {}).get("reason", "")}</think>',
+        "answer": f'<answer>{item.get("answer", "")}</answer>',
+        "evidence": compact_evidence(item.get("evidence", [])),
         "regions": regions,
     }
 
@@ -175,13 +173,21 @@ def read_jsonl(path):
     return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
 
 
-def write_jsonl(rows, path):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows))
+def compact_evidence(evidence):
+    output = []
+    for item in evidence:
+        output.append({
+            "text": item.get("text") or item.get("page_content") or "",
+            "score": item.get("score", ""),
+            "object_id": item.get("object_id") or item.get("source", ""),
+            "edge": item.get("edge", ""),
+            "target": item.get("target", ""),
+        })
+    return output
 
 
 def write_csv(rows, path):
-    columns = ["images", "masks", "instruction", "question", "reason", "answer", "regions"]
+    columns = ["images", "masks", "instruction", "question", "reason", "answer", "evidence", "regions"]
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", newline="") as file:
         writer = csv.DictWriter(file, fieldnames=columns)

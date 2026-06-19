@@ -1,15 +1,13 @@
-import argparse
 import csv
 import json
-import os
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_CSV = ROOT / "Dataset" / "fcot_seismic_dataset.csv"
-IMAGE_LIST_COLUMNS = {"image_paths", "mask_paths", "overlay_paths", "images", "mask_images", "overlay_images"}
-JSON_COLUMNS = {"regions", "region_context", "region_bboxes", "object_ids", "evidence", "verification"}
-PREVIEW_IMAGE_COLUMNS = {"primary_image", "primary_mask", "primary_overlay", "image", "mask_image", "overlay_image"}
+DEFAULT_CSV = ROOT / "Dataset" / "multimodal_multi_image_dataset.csv"
+IMAGE_LIST_COLUMNS = {"images", "masks"}
+PREVIEW_IMAGE_COLUMNS = {"preview_image", "preview_mask"}
+JSON_COLUMNS = {"regions", "evidence"}
 
 
 def load_rows(csv_path, limit=None):
@@ -24,25 +22,16 @@ def load_rows(csv_path, limit=None):
 
 def clean_row(row):
     cleaned = {}
-    image_paths = parse_json_list(row.get("image_paths"))
-    mask_paths = parse_json_list(row.get("mask_paths"))
-    overlay_paths = parse_json_list(row.get("overlay_paths"))
 
     for key, value in row.items():
-        if key in {"image", "mask_image", "overlay_image"}:
-            cleaned[key] = resolve_image(value)
-        elif key in IMAGE_LIST_COLUMNS:
+        if key in IMAGE_LIST_COLUMNS:
             cleaned[key] = resolve_image_list(value)
         elif key in JSON_COLUMNS or key.endswith("_json"):
             cleaned[key] = normalize_json_string(value)
         else:
             cleaned[key] = "" if value is None else str(value)
-
-    # Wide multimodal CSVs use list columns; FCoT rows already have direct image columns.
-    if image_paths and "primary_image" not in cleaned:
-        cleaned["primary_image"] = resolve_image(first_item(image_paths))
-        cleaned["primary_mask"] = resolve_image(first_item(mask_paths))
-        cleaned["primary_overlay"] = resolve_image(first_item(overlay_paths))
+    cleaned["preview_image"] = first_image(cleaned.get("images", []))
+    cleaned["preview_mask"] = first_image(cleaned.get("masks", []))
     return cleaned
 
 
@@ -79,10 +68,6 @@ def parse_json_list(value):
     return [parsed]
 
 
-def first_item(items):
-    return items[0] if items else ""
-
-
 def normalize_json_string(value):
     value = str(value or "").strip()
     if not value:
@@ -93,6 +78,10 @@ def normalize_json_string(value):
         return value
 
 
+def first_image(images):
+    return images[0] if images else None
+
+
 def build_dataset(rows):
     from datasets import Dataset, Features, Image, Sequence, Value
 
@@ -100,11 +89,15 @@ def build_dataset(rows):
         raise ValueError("no rows to upload")
 
     features = {}
-    for key in rows[0]:
-        if key in PREVIEW_IMAGE_COLUMNS:
-            features[key] = Image()
-        elif key in IMAGE_LIST_COLUMNS:
+    for key in [
+        "preview_image", "preview_mask",
+        "images", "masks",
+        "instruction", "question", "reason", "answer", "evidence", "regions",
+    ]:
+        if key in IMAGE_LIST_COLUMNS:
             features[key] = Sequence(Image())
+        elif key in PREVIEW_IMAGE_COLUMNS:
+            features[key] = Image()
         else:
             features[key] = Value("string")
 
@@ -159,49 +152,28 @@ size_categories:
 
 # Synthetic Seismic VLM
 
-This dataset contains synthetic seismic multimodal QA rows with raw image paths,
-segmentation masks, region-grounded reasoning, answer text, and compact metadata.
+This dataset contains synthetic seismic multimodal QA rows with raw seismic
+images, segmentation masks, evidence-grounded questions, answers, and compact
+region metadata.
 
 Rows: {len(rows)}
 
 Repository: https://huggingface.co/datasets/{repo_id}
 
-Common preview columns are:
+Columns:
 
-- `image`
-- `mask_image`
-- `overlay_image`
-
-When uploading the wider audit CSV, the full multi-image columns are:
-
-- `image_paths`
-- `mask_paths`
-- `overlay_paths`
+- `images`: sequence of raw seismic images
+- `masks`: sequence of binary segmentation masks
+- `preview_image`: first raw image for HuggingFace Dataset Viewer
+- `preview_mask`: first mask image for HuggingFace Dataset Viewer
+- `instruction`: task instruction
+- `question`: question text
+- `reason`: optional reasoning/description text
+- `answer`: answer text
+- `evidence`: JSON string of supporting text evidence
+- `regions`: JSON string of bbox/class/color region metadata
 
 """
 
-
-def parse_args():
-    parser = argparse.ArgumentParser(description="Upload multimodal CSV rows to Hugging Face with previewable image columns.")
-    parser.add_argument("--csv", default=str(DEFAULT_CSV))
-    parser.add_argument("--repo-id", required=True, help="Example: username/synthetic-seismic-vlm")
-    parser.add_argument("--private", action="store_true")
-    parser.add_argument("--token", default=os.environ.get("HF_TOKEN"))
-    parser.add_argument("--limit", type=int, default=None)
-    parser.add_argument("--dry-run", action="store_true", help="Validate dataset construction without uploading.")
-    return parser.parse_args()
-
-
 if __name__ == "__main__":
-    args = parse_args()
-    print(json.dumps(
-        upload_dataset(
-            csv_path=args.csv,
-            repo_id=args.repo_id,
-            private=args.private,
-            token=args.token,
-            limit=args.limit,
-            dry_run=args.dry_run,
-        ),
-        indent=2,
-    ))
+    upload_dataset(DEFAULT_CSV, "ThirdExec/synthetic-seismic-vlm", private=False)

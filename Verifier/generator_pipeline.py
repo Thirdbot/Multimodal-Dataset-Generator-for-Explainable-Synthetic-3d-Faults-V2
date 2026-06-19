@@ -16,7 +16,7 @@ from Verifier.rag_verifier import best_doc_score, score_qa_evidence, serialize_d
 
 
 DEFAULT_GRAPH_ROOT = ROOT / "graphs" / "properties_2d_graph"
-DEFAULT_OUTPUT = ROOT / "Dataset" / "hybrid_verified_qa.jsonl"
+DEFAULT_OUTPUT = ROOT / "Dataset" / "verified_qa.jsonl"
 INSTRUCTION = (
     "Inspect the seismic images, use the marked regions as visual evidence, "
     "and answer the question with concise geological reasoning."
