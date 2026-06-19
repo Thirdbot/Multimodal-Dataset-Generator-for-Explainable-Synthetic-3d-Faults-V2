@@ -32,6 +32,17 @@ CLASS_COLORS = {
     5: [0, 200, 100],
     6: [255, 140, 0],
 }
+
+CLASS_ID_COLORS = {
+    1: "red",
+    2: "blue",
+    3: "purple",
+    4: "yellow",
+    5: "green",
+    6: "orange",
+}
+
+
 CATEGORY_TYPES = {
     "boring": ["closure"],
     "fault_only": ["fault"],
@@ -66,15 +77,45 @@ def build_row(item):
     sample_dir = IMAGE_ROOT / sample_id
     image_items = collect_image_items(sample_dir, view, item.get("category", ""), item.get("evidence", []))
     regions = collect_regions(sample_dir, image_items)
+    evidences = compact_evidences(item.get("evidence", []))
+    regions_box = ""
+
+    for region in regions:
+        matching_evidences = [
+            evidence for evidence in evidences
+            if evidence_matches_region(evidence, region)
+        ]
+        if not matching_evidences:
+            continue
+
+        object_name = region.get("object_type") or region.get("class_name") or ""
+        class_id = region.get("class_id", "")
+        class_color_name = region.get("class_color_name", "")
+        bbox = region.get("bbox") or []
+        center = region.get("center") or []
+        evidence_text = "\n".join(
+            f"<evidence>{evidence.get('text', '')}</evidence>"
+            for evidence in matching_evidences
+        )
+        regions_box += (
+            "<region>\n"
+            f"<object>{object_name}</object>\n"
+            f"<class_id>{class_id}</class_id>\n"
+            f"<color>{class_color_name}</color>\n"
+            f"{evidence_text}\n"
+            f"<bbox>{json.dumps(bbox)}</bbox>\n"
+            "<SEG>"
+            "</region>\n"
+        )
+
     return {
         "images": [image["image"] for image in image_items],
         "masks": [image["mask"] for image in image_items],
         "instruction": INSTRUCTION,
-        "question": item.get("question", ""),
+        "question": f"{'<image>'*len(image_items)}{item.get('question', '')}",
         "reason": f'<think>{item.get("trace", {}).get("reason", "")}</think>',
         "answer": f'<answer>{item.get("answer", "")}</answer>',
-        "evidence": compact_evidence(item.get("evidence", [])),
-        "regions": regions,
+        "evidence": regions_box,
     }
 
 
@@ -124,6 +165,7 @@ def add_image_item(items, seen, sample_dir, view, object_type, object_id, role):
         "class_id": class_id,
         "class_name": object_type,
         "class_color": CLASS_COLORS.get(class_id, [255, 255, 255]),
+        "class_color_name": CLASS_ID_COLORS.get(class_id, "white"),
         "image": image.as_posix(),
         "mask": mask.as_posix(),
     })
@@ -140,14 +182,16 @@ def collect_regions(sample_dir, image_items):
         bbox = position.get("bbox") or {}
         center = position.get("center") or {}
         regions.append({
-            "image_index": index,
-            "mask_index": index,
-            "role": image_item["role"],
             "object_type": image_item["object_type"],
             "view": image_item["view"],
+            "object_id":image_item["object_id"],
             "class_id": position.get("class_id", image_item["class_id"]),
             "class_name": position.get("class_name", image_item["class_name"]),
             "class_color": position.get("class_color", image_item["class_color"]),
+            "class_color_name": CLASS_ID_COLORS.get(
+                int(position.get("class_id", image_item["class_id"]) or 0),
+                image_item.get("class_color_name", "white"),
+            ),
             "bbox": [bbox.get("x_min"), bbox.get("y_min"), bbox.get("x_max"), bbox.get("y_max")],
             "center": [center.get("x"), center.get("y")],
         })
@@ -173,21 +217,36 @@ def read_jsonl(path):
     return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
 
 
-def compact_evidence(evidence):
+def compact_evidences(evidence):
     output = []
     for item in evidence:
         output.append({
-            "text": item.get("text") or item.get("page_content") or "",
-            "score": item.get("score", ""),
             "object_id": item.get("object_id") or item.get("source", ""),
+            "text": item.get("text") or item.get("page_content") or "",
             "edge": item.get("edge", ""),
             "target": item.get("target", ""),
         })
     return output
 
 
+def evidence_matches_region(evidence, region):
+    evidence_object_id = str(evidence.get("object_id") or "")
+    region_object_id = str(region.get("object_id") or "")
+    region_object_type = str(region.get("object_type") or "")
+
+    if evidence_object_id == region_object_id:
+        return True
+    if evidence_object_id == region_object_type:
+        return True
+    if is_object_id(evidence_object_id):
+        return False
+    if evidence_object_id.startswith("category:"):
+        return region_object_type in EDGE_TYPES.get(evidence.get("edge"), [])
+    return False
+
+
 def write_csv(rows, path):
-    columns = ["images", "masks", "instruction", "question", "reason", "answer", "evidence", "regions"]
+    columns = ["images", "masks", "instruction", "question", "reason", "answer", "evidence"]
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", newline="") as file:
         writer = csv.DictWriter(file, fieldnames=columns)
