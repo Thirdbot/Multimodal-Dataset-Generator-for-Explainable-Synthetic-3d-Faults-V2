@@ -17,6 +17,8 @@ from Verifier.rag_verifier import best_doc_score, score_qa_evidence, serialize_d
 
 DEFAULT_GRAPH_ROOT = ROOT / "graphs" / "properties_2d_graph"
 DEFAULT_OUTPUT = ROOT / "Dataset" / "verified_qa.jsonl"
+MIN_RETRIEVAL_SCORE = 0.7
+MIN_NLI_SCORE = 0.7
 INSTRUCTION = (
     "Inspect the seismic images, use the marked regions as visual evidence, "
     "and answer the question with concise geological reasoning."
@@ -75,7 +77,7 @@ class RagWorkflow(object):
 
             for q in questions:
                 question_docs = retrieve_many(q) # multiple question evidences
-                if best_doc_score(question_docs) < 0.7:
+                if best_doc_score(question_docs) < MIN_RETRIEVAL_SCORE:
                     print(f"[QUESTION SKIP] {sample_id}: low retrieval score")
                     continue
 
@@ -159,6 +161,8 @@ class RagWorkflow(object):
             verification_text = docs_to_text(dedupe_docs([*question_docs, *answer_docs]))
             verification = verify_answer(a, verification_text) # answer verify evidences
             if verification["verdict"] != "PASS":
+                continue
+            if verification["score"] < MIN_NLI_SCORE:
                 continue
 
             answers.append({

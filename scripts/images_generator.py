@@ -14,6 +14,10 @@ import numpy as np
 from scipy import ndimage
 import matplotlib.pyplot as plt
 from PIL import Image
+try:
+    from skimage.morphology import skeletonize
+except Exception:
+    skeletonize = None
 
 GRAPH_OBJECT_TYPES = [
     "closure",
@@ -639,7 +643,7 @@ class GraphImageExtractor:
             overlay_color = self._class_color(object_type)
             for view in ("inline", "crossline", "timeslice"):
                 basic_slice = self._normalize_image(sliced["basic"][view])
-                mask_slice = np.asarray(sliced["mask"][view], dtype=bool)
+                mask_slice = self._display_mask(object_type, sliced["mask"][view])
                 self._save_png(object_folder / f"{view}.png", basic_slice, cmap="gray")
                 self._save_mask_png(object_folder / f"{view}_mask.png", mask_slice)
                 self._save_overlay(object_folder / f"{view}_overlay.png", basic_slice, mask_slice, overlay_color)
@@ -649,7 +653,7 @@ class GraphImageExtractor:
         for object_id, sliced in selected_slices.items():
             object_folder = Path(object_type) / self._safe_filename(object_id)
             for view in ("inline", "crossline", "timeslice"):
-                mask_slice = np.asarray(sliced["mask"][view], dtype=bool)
+                mask_slice = self._display_mask(object_type, sliced["mask"][view])
                 bbox = self._mask_bbox(mask_slice)
                 if bbox is None:
                     continue
@@ -690,6 +694,23 @@ class GraphImageExtractor:
             "objects": records,
         }
         output_path.write_text(json.dumps(payload, indent=2))
+
+    @staticmethod
+    def _display_mask(object_type,mask_slice):
+        mask = np.asarray(mask_slice, dtype=bool)
+        if object_type != "fault" or not mask.any():
+            return mask
+
+        # Synthoseis fault masks are fault-affected zones. For visual training
+        # targets, reduce the zone to a trace-like mask.
+        if skeletonize is not None:
+            traced = skeletonize(mask)
+            if traced.any():
+                return traced
+
+        eroded = ndimage.binary_erosion(mask)
+        traced = mask ^ eroded
+        return traced if traced.any() else mask
 
     @staticmethod
     def _mask_bbox(mask_slice):

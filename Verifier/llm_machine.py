@@ -79,15 +79,29 @@ Rules:
 - Cover the different evidence facts instead of repeating the same question.
 - Use natural geological wording.
 - It is okay to ask about counts, object attributes, intersections, locations, colors, regions, and visible masks when those facts are in Evidences.
+- Do not include the answer inside the question.
+- Do not copy exact evidence values into the question.
+- Do not put coordinates, bounding boxes, throw values, percentages, fluid names, colors, or counts in the question.
+- Never write x=, y=, x_min, y_min, x_max, y_max, or "from x ... to ..." in a question.
+- Never ask a question that already contains the location, area, amount, or property value.
+- Ask for the missing value, not with the value.
+- Bad: "Where does Fault 1 intersect with x=43 and y=112?"
+- Good: "Where is Fault 1 located?"
+- Bad: "Does Fault 1 have a throw of 62?"
+- Good: "What is the throw of Fault 1?"
+- Bad: "How many faults are present in the area from x=17 to 98 and y=261 to 317?"
+- Good: "How many faults are present?"
+- For location evidence, ask "Where is Fault 1 located?" or "Where is the closure located?", not "Where is Fault 1 at x=43 and y=112?"
+- For attribute evidence, ask "What is the throw of Fault 1?", not "Does Fault 1 have a throw of 62?"
 - Do not invent objects or facts outside Evidences.
 - Do not ask cause questions unless the cause is explicitly stated in Evidences.
 - Do not mention graph, metadata, database, generated data, or synthetic data.
 
 Good:
-{{"QUESTIONS":["Is salt present?","How many faults are present?","Does Closure 1 contain gas?"]}}
+{{"QUESTIONS":["Is salt present?","How many faults are present?","What fluid does Closure 1 contain?","Where is Fault 1 located?","What is the throw of Fault 1?"]}}
 
 Bad:
-{{"QUESTIONS":["Is salt present?","Does the section contain salt?","Is there salt in the section?"]}}
+{{"QUESTIONS":["Is salt present?","Does the section contain salt?","Where does Fault 1 intersect with x=43 and y=112?","Does Fault 1 have a throw of 62?"]}}
 
 Evidences:
 {evidences}
@@ -224,4 +238,3 @@ if __name__ == "__main__":
         for a in answers.ANSWERS:
             checking = check(a,[example_evidence])
             print(f"\t{a}: verdict = {checking.verdict} trust = {checking.trust_score}\n")
-
