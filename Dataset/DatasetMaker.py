@@ -92,7 +92,6 @@ def build_row(item):
         class_id = region.get("class_id", "")
         class_color_name = region.get("class_color_name", "")
         bbox = region.get("bbox") or []
-        center = region.get("center") or []
         evidence_text = "\n".join(
             f"<evidence>{evidence.get('text', '')}</evidence>"
             for evidence in matching_evidences
@@ -113,7 +112,7 @@ def build_row(item):
         "masks": [image["mask"] for image in image_items],
         "instruction": INSTRUCTION,
         "question": f"{item.get('question', '')}",
-        "reason": f'<think>{item.get("trace", {}).get("reason", "")}</think>',
+        # "reason": f'<think>{item.get("trace", {}).get("reason", "")}</think>',
         "answer": f'<answer>{item.get("answer", "")}</answer>',
         "evidence": regions_box,
     }
@@ -139,7 +138,7 @@ def collect_image_items(sample_dir, view, category, evidence):
 def requested_objects(object_id, edge, category):
     if is_object_id(object_id):
         object_type = object_id.split("_", 1)[0]
-        return [(object_type, object_id, "evidence"), (object_type, object_type, "context")]
+        return [(object_type, object_id, "evidence")]
     if object_id in OBJECT_TYPES:
         return [(object_id, object_id, "context")]
     if str(object_id).startswith("category:"):
@@ -246,7 +245,7 @@ def evidence_matches_region(evidence, region):
 
 
 def write_csv(rows, path):
-    columns = ["images", "masks", "instruction", "question", "reason", "answer", "evidence"]
+    columns = ["images", "masks", "instruction", "question", "answer", "evidence"] # "reason" when there is actually reason
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", newline="") as file:
         writer = csv.DictWriter(file, fieldnames=columns)

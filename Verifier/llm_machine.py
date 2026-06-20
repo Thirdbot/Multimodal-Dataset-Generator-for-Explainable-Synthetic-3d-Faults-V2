@@ -132,6 +132,10 @@ AnswerBatchPrompt = PromptTemplate(
 def multimodal_dataset_instruction():
     return multimodal_qa_instruction
 
+class VLMMachine:
+    def __init__(self):
+        self.DEFAULT_ENDPOINT = "http://localhost:8000/v1"
+        
 
 class LLMMachine:
     def __init__(self):

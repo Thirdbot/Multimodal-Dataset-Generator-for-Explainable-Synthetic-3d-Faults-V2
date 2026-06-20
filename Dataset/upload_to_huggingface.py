@@ -83,8 +83,8 @@ def build_dataset(rows):
 
     columns = [
         "images", "masks",
-        "instruction", "question", "reason", "answer",
-        "evidence", "regions",
+        "instruction", "question", "answer", # "reason"
+        "evidence"
     ]
     rows = [
         {key: row.get(key, [] if key in IMAGE_LIST_COLUMNS else "") for key in columns}
