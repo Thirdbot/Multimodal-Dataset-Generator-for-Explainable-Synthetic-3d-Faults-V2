@@ -121,6 +121,7 @@ def build_row(item):
         # "reason": f'<think>{item.get("trace", {}).get("reason", "")}</think>',
         "answer": f'<answer>{item.get("answer", "")}</answer>',
         "evidence": regions_box,
+        "regions": regions,
     }
 
 
@@ -134,10 +135,6 @@ def collect_image_items(sample_dir, view, category, evidence):
         for object_type, object_name, role in requested_objects(object_id, edge, category):
             add_image_item(items, seen, sample_dir, view, object_type, object_name, role)
 
-    if not items:
-        for object_type in CATEGORY_TYPES.get(category, []):
-            if add_image_item(items, seen, sample_dir, view, object_type, object_type, "global"):
-                break
     return items
 
 
@@ -187,6 +184,9 @@ def collect_regions(sample_dir, image_items):
         bbox = position.get("bbox") or {}
         center = position.get("center") or {}
         regions.append({
+            "image_idx":index,
+            "mask_idx":index,
+            "region_idx":index,
             "object_type": image_item["object_type"],
             "view": image_item["view"],
             "object_id":image_item["object_id"],
