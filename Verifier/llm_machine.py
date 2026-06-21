@@ -70,6 +70,8 @@ Rules:
 - Ask about everything that is directly supported by Evidences.
 - Each question must ask about one clear answerable target.
 - Every question must be directly answerable from Evidences.
+- Questions are prompts for a user who has not seen the evidence values.
+- The question must ask what the value/location/class/count is, not reveal it.
 - Questions must be unique.
 - Do not generate two questions with the same meaning.
 - Do not generate paraphrases of another question in the same list.
@@ -82,15 +84,24 @@ Rules:
 - Do not include the answer inside the question.
 - Do not copy exact evidence values into the question.
 - Do not put coordinates, bounding boxes, throw values, percentages, fluid names, colors, or counts in the question.
-- Never write x=, y=, x_min, y_min, x_max, y_max, or "from x ... to ..." in a question.
+- Never write x=, y=, x_min, y_min, x_max, y_max, bbox, coordinate values, or "from x ... to ..." in a question.
 - Never ask a question that already contains the location, area, amount, or property value.
 - Ask for the missing value, not with the value.
+- If evidence gives a bbox, ask "Where is the object located?" or "Which region is highlighted?"
+- If evidence gives a center point, ask "Where is the object located?"
+- If evidence gives a count, ask "How many objects are present?"
+- If evidence gives a class/color, ask "What object is highlighted?" or "What color marks the object?"
+- If evidence gives an attribute value, ask "What is the object's attribute?"
 - Bad: "Where does Fault 1 intersect with x=43 and y=112?"
 - Good: "Where is Fault 1 located?"
 - Bad: "Does Fault 1 have a throw of 62?"
 - Good: "What is the throw of Fault 1?"
 - Bad: "How many faults are present in the area from x=17 to 98 and y=261 to 317?"
 - Good: "How many faults are present?"
+- Bad: "Is the highlighted object red?"
+- Good: "What color marks the highlighted object?"
+- Bad: "Does Closure 1 contain gas?"
+- Good: "What fluid does Closure 1 contain?"
 - For location evidence, ask "Where is Fault 1 located?" or "Where is the closure located?", not "Where is Fault 1 at x=43 and y=112?"
 - For attribute evidence, ask "What is the throw of Fault 1?", not "Does Fault 1 have a throw of 62?"
 - Do not invent objects or facts outside Evidences.
@@ -98,10 +109,10 @@ Rules:
 - Do not mention graph, metadata, database, generated data, or synthetic data.
 
 Good:
-{{"QUESTIONS":["Is salt present?","How many faults are present?","What fluid does Closure 1 contain?","Where is Fault 1 located?","What is the throw of Fault 1?"]}}
+{{"QUESTIONS":["Is salt present?","How many faults are present?","What fluid does Closure 1 contain?","Where is Fault 1 located?","What is the throw of Fault 1?","What color marks the highlighted object?"]}}
 
 Bad:
-{{"QUESTIONS":["Is salt present?","Does the section contain salt?","Where does Fault 1 intersect with x=43 and y=112?","Does Fault 1 have a throw of 62?"]}}
+{{"QUESTIONS":["Is salt present?","Does the section contain salt?","Where does Fault 1 intersect with x=43 and y=112?","Does Fault 1 have a throw of 62?","Is Closure 1 gas?"]}}
 
 Evidences:
 {evidences}
