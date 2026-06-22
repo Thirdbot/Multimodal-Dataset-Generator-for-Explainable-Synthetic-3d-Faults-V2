@@ -40,7 +40,7 @@ CLASS_IDS = {
     "age_depth": 6,
 }
 
-CLASS_COLORS = {
+CLASS_RGB_COLORS = {
     1: [255, 0, 0],
     2: [0, 128, 255],
     3: [180, 0, 255],
@@ -49,6 +49,14 @@ CLASS_COLORS = {
     6: [255, 140, 0],
 }
 
+CLASS_COLOR_NAMES = {
+    1: "red",
+    2: "blue",
+    3: "purple",
+    4: "yellow",
+    5: "green",
+    6: "orange",
+}
 FLUID_CLOSURE_PATTERNS = {
     "oil": "closures/oil.zarr",
     "gas": "closures/gas.zarr",
@@ -640,7 +648,7 @@ class GraphImageExtractor:
         for object_id, sliced in selected_slices.items():
             object_folder = output_folder / self._safe_filename(object_id)
             object_folder.mkdir(parents=True, exist_ok=True)
-            overlay_color = self._class_color(object_type)
+            overlay_color = self._class_rgb_color(object_type)
             for view in ("inline", "crossline", "timeslice"):
                 basic_slice = self._normalize_image(sliced["basic"][view])
                 mask_slice = self._display_mask(object_type, sliced["mask"][view])
@@ -661,8 +669,6 @@ class GraphImageExtractor:
                     "sample_id": sample_name,
                     "object_type": object_type,
                     "object_id": str(object_id),
-                    "class_id": self._class_id(object_type),
-                    "class_name": object_type,
                     "class_color": self._class_color(object_type),
                     "view": view,
                     "image_path": (object_folder / f"{view}.png").as_posix(),
@@ -682,7 +688,10 @@ class GraphImageExtractor:
 
     @staticmethod
     def _class_color(object_type):
-        return CLASS_COLORS.get(CLASS_IDS.get(str(object_type), 0), [255, 255, 255])
+        return CLASS_COLOR_NAMES.get(CLASS_IDS.get(str(object_type), 0), "white")
+    @staticmethod
+    def _class_rgb_color(object_type):
+        return CLASS_RGB_COLORS.get(CLASS_IDS.get(str(object_type), 0), [255,255,255])
 
     def _save_object_positions(self,sample_name,object_type,records):
         if not records:

@@ -15,11 +15,25 @@ class AnswerBatchStructure(BaseModel):
 class QuestionBatchStructure(BaseModel):
     QUESTIONS:list[str]
 
+class ReasonStructure(BaseModel):
+    REASON:str
+
 
 QuestionBatchParser = PydanticOutputParser(pydantic_object=QuestionBatchStructure)
 AnswerBatchParser = PydanticOutputParser(pydantic_object=AnswerBatchStructure)
+ReasonParser = PydanticOutputParser(pydantic_object=ReasonStructure)
+
+MASTER_PROMPT = """
+You are a geophysicist reading evidence statements from a seismic interpretation workflow.
+Use only the Evidences input as factual ground.
+Write naturally, as a scientist explaining what the evidence says.
+You may vary wording and style, but do not invent objects, values, causes, or geological events.
+Do not mention graph, metadata, database, generated data, synthetic data, prompt, or verification.
+"""
 
 answer_batch_generation_prompt = """
+{master_prompt}
+
 {format_instructions}
 
 Output contract:
@@ -33,16 +47,13 @@ Generate candidate answers to one seismic interpretation question using only the
 
 Rules:
 - Generate up to {count} answers.
-- Each answer must be one natural sentence.
+- Each answer should be one natural sentence.
 - Each answer must directly answer the same Question.
-- Each answer must contain only one claim.
 - Every answer must be supported by Evidences.
-- Answers may be paraphrases, but each one must stay faithful to the same evidence.
-- Ask the evidence for all it can support; do not ignore useful evidence when the question asks for it.
+- Answers may vary in wording, but each one must stay faithful to the same evidence.
 - Use the same objects, quantities, properties, regions, or colors stated in Evidences.
 - Do not invent facts outside Evidences.
 - Do not add causes or interpretations that are not stated in Evidences.
-- Do not mention graph, metadata, database, generated data, or synthetic data.
 
 Evidences:
 {evidences}
@@ -54,6 +65,8 @@ Return only JSON now:
 """
 
 question_batch_generation_prompt = """
+{master_prompt}
+
 {format_instructions}
 
 Output contract:
@@ -67,55 +80,76 @@ Generate seismic interpretation questions from the provided evidences.
 
 Rules:
 - Generate up to {count} questions.
-- Ask about everything that is directly supported by Evidences.
-- Each question must ask about one clear answerable target.
+- Ask only about what appears in Evidences.
+- Write questions as if the user will ask them while looking at seismic images, not while reading the evidence text.
+- Simulate geological curiosity: ask what the image appears to show, where a feature is, what kind of feature it is, or what interpretation is supported.
+- The question should sound like a natural visual interpretation question for a VLM.
+- The question must not sound like it already knows the answer.
+- If Evidences only mention onlap, ask only about onlap.
+- If Evidences only mention salt, ask only about salt.
+- If Evidences only mention a highlighted color or region, ask about that visual evidence.
+- Do not ask about faults, closures, salt, onlap, fans, fluids, colors, or locations unless those words or facts appear in Evidences.
+- Each question should ask about one clear answerable target.
 - Every question must be directly answerable from Evidences.
 - Questions are prompts for a user who has not seen the evidence values.
 - The question must ask what the value/location/class/count is, not reveal it.
+- Prefer open visual question forms such as "What is visible...", "Where is...", "Which feature...", "How many...", "What kind of...", "Does the image show...".
 - Questions must be unique.
-- Do not generate two questions with the same meaning.
-- Do not generate paraphrases of another question in the same list.
-- Each question must target a different evidence fact.
 - If there are fewer unique evidence facts than {count}, return fewer questions.
-- Before returning, compare all questions and remove duplicates or near-duplicates.
-- Cover the different evidence facts instead of repeating the same question.
 - Use natural geological wording.
-- It is okay to ask about counts, object attributes, intersections, locations, colors, regions, and visible masks when those facts are in Evidences.
+- Ask what the interpreter sees in the evidence statements.
+- Convert evidence facts into image-facing questions.
+- It is okay to ask about counts, object attributes, intersections, locations, colors, regions, and visible masks only when those facts are in Evidences.
 - Do not include the answer inside the question.
 - Do not copy exact evidence values into the question.
 - Do not put coordinates, bounding boxes, throw values, percentages, fluid names, colors, or counts in the question.
 - Never write x=, y=, x_min, y_min, x_max, y_max, bbox, coordinate values, or "from x ... to ..." in a question.
 - Never ask a question that already contains the location, area, amount, or property value.
 - Ask for the missing value, not with the value.
-- If evidence gives a bbox, ask "Where is the object located?" or "Which region is highlighted?"
-- If evidence gives a center point, ask "Where is the object located?"
-- If evidence gives a count, ask "How many objects are present?"
-- If evidence gives a class/color, ask "What object is highlighted?" or "What color marks the object?"
-- If evidence gives an attribute value, ask "What is the object's attribute?"
-- Bad: "Where does Fault 1 intersect with x=43 and y=112?"
-- Good: "Where is Fault 1 located?"
-- Bad: "Does Fault 1 have a throw of 62?"
-- Good: "What is the throw of Fault 1?"
-- Bad: "How many faults are present in the area from x=17 to 98 and y=261 to 317?"
-- Good: "How many faults are present?"
-- Bad: "Is the highlighted object red?"
-- Good: "What color marks the highlighted object?"
-- Bad: "Does Closure 1 contain gas?"
-- Good: "What fluid does Closure 1 contain?"
-- For location evidence, ask "Where is Fault 1 located?" or "Where is the closure located?", not "Where is Fault 1 at x=43 and y=112?"
-- For attribute evidence, ask "What is the throw of Fault 1?", not "Does Fault 1 have a throw of 62?"
-- Do not invent objects or facts outside Evidences.
+- Do not copy object types from examples; use only object types present in Evidences.
 - Do not ask cause questions unless the cause is explicitly stated in Evidences.
-- Do not mention graph, metadata, database, generated data, or synthetic data.
 
 Good:
-{{"QUESTIONS":["Is salt present?","How many faults are present?","What fluid does Closure 1 contain?","Where is Fault 1 located?","What is the throw of Fault 1?","What color marks the highlighted object?"]}}
+{{"QUESTIONS":["What geological feature is visible in the highlighted region?","How many visible episodes can be interpreted from the section?","Where is the highlighted feature located?","What color marks the interpreted feature?","What property can be interpreted for the highlighted object?","Does the image show the interpreted feature?"]}}
 
 Bad:
-{{"QUESTIONS":["Is salt present?","Does the section contain salt?","Where does Fault 1 intersect with x=43 and y=112?","Does Fault 1 have a throw of 62?","Is Closure 1 gas?"]}}
+{{"QUESTIONS":["How many faults are present?","What fluid does Closure 1 contain?","Where is Fault 1 located?","Does the object sit at x=43 and y=112?","Is the highlighted object red?","The onlap is yellow, right?"]}}
 
 Evidences:
 {evidences}
+
+Return only JSON now:
+"""
+
+reason_generation_prompt = """
+{master_prompt}
+
+{format_instructions}
+
+Output contract:
+- Return only one valid JSON object.
+- The first character must be {{ and the last character must be }}.
+- Do not use markdown.
+- Do not write text before or after the JSON object.
+- Required shape: {{"REASON":"short evidence-guided reasoning."}}
+
+Create a concise reasoning note that connects the Evidences to the Answer.
+
+Rules:
+- This is for audit and dataset explanation.
+- Use two to four natural sentences.
+- Mention the evidence facts that support the answer.
+- Do not add unstated causes, processes, or interpretations.
+- Keep the conclusion aligned with the Answer.
+
+Evidences:
+{evidences}
+
+Question:
+{question}
+
+Answer:
+{answer}
 
 Return only JSON now:
 """
@@ -130,38 +164,48 @@ multimodal_qa_instruction = (
 QuestionBatchPrompt = PromptTemplate(
     template=question_batch_generation_prompt,
     input_variables=["evidences","count"],
-    partial_variables={"format_instructions":QuestionBatchParser.get_format_instructions()}
+    partial_variables={
+        "format_instructions":QuestionBatchParser.get_format_instructions(),
+        "master_prompt": MASTER_PROMPT,
+    }
 )
 
 AnswerBatchPrompt = PromptTemplate(
     template=answer_batch_generation_prompt,
     input_variables=["evidences","question","count"],
-    partial_variables={"format_instructions":AnswerBatchParser.get_format_instructions()}
+    partial_variables={
+        "format_instructions":AnswerBatchParser.get_format_instructions(),
+        "master_prompt": MASTER_PROMPT,
+    }
+)
+
+ReasonPrompt = PromptTemplate(
+    template=reason_generation_prompt,
+    input_variables=["evidences", "question", "answer"],
+    partial_variables={
+        "format_instructions":ReasonParser.get_format_instructions(),
+        "master_prompt": MASTER_PROMPT,
+    }
 )
 
 
 def multimodal_dataset_instruction():
     return multimodal_qa_instruction
 
-class VLMMachine:
-    def __init__(self):
-        self.DEFAULT_ENDPOINT = "http://localhost:8000/v1"
-        
-
 class LLMMachine:
     def __init__(self):
-        self.DEFAULT_VLLM_ENDPOINT = "http://localhost:8000/v1"
+        self.DEFAULT_VLLM_ENDPOINT = "https://pd-third-qwen2-7b-i-c04894ffc6824922a1cc83d17c3b8bcc.nebius-eu-north.saturnenterprise.io/v1"
         self.temp = 0.2 # lower the better logic
         self.top_p = 0.95 # higher the better fluency
-        self.max_tok = 256
+        self.max_tok = 1024
         self.presence_penalty = 1 # -2,2 avoid repetition
         self.frequency_penalty = 0.2 # -2,2 more natural
         self.n = 1 # single response
         self.attempt = 5
 
         self.client = ChatOpenAI(base_url=self.DEFAULT_VLLM_ENDPOINT,
-                                 api_key="None",
-                                 model="Qwen/Qwen2.5-1.5B-Instruct",
+                                 api_key=None,
+                                 model="RedHatAI/Qwen2-7B-Instruct-quantized.w4a16",
                                  temperature=self.temp,
                                  frequency_penalty=self.frequency_penalty,
                                  presence_penalty=self.presence_penalty,
@@ -180,6 +224,12 @@ class LLMMachine:
             top_p=0.9,
             frequency_penalty=0.1,
             presence_penalty=0.2,
+        )
+        self.reason_client = self.client.bind(
+            temperature=0.2,
+            top_p=0.9,
+            frequency_penalty=0.2,
+            presence_penalty=0.4,
         )
 
     def question_batch_generation(self):
@@ -208,6 +258,20 @@ class LLMMachine:
         )
 
         return q_answer_engine
+
+    def reason_generation(self):
+        reason_engine = (
+            {
+                "evidences":itemgetter("evidences"),
+                "question":itemgetter("question"),
+                "answer":itemgetter("answer"),
+            } | ReasonPrompt | self.reason_client | ReasonParser
+        ).with_retry(
+        stop_after_attempt=self.attempt,
+        retry_if_exception_type=(Exception,)
+        )
+
+        return reason_engine
 
     def retrieve_many(self, retrieval):
         def _retrieve(query_text):

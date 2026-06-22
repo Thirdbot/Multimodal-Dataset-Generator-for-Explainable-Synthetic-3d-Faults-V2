@@ -18,6 +18,10 @@ from Verifier.rag_verifier import best_doc_score, score_qa_evidence, serialize_d
 DEFAULT_GRAPH_ROOT = ROOT / "graphs" / "properties_2d_graph"
 DEFAULT_OUTPUT = ROOT / "Dataset" / "verified_qa.jsonl"
 MIN_RETRIEVAL_SCORE = 0.7
+QUESTION_PER_GRAPH  = 5
+CANDIDATE_PER_GRAPH = 5
+MAX_ROWS_PER_EVIDENCE = 2
+MAX_ATTEMPT = 2 * QUESTION_PER_GRAPH # max attempt for outer loop
 INSTRUCTION = (
     "Inspect the seismic images, use the marked regions as visual evidence, "
     "and answer the question with concise geological reasoning."
@@ -44,7 +48,7 @@ class RagWorkflow(object):
             ))
         return rows
 
-    def generate_for_graph(self, graph_path, questions_per_graph=5, candidates_per_question=5):
+    def generate_for_graph(self, graph_path, questions_per_graph=5, candidates_per_question=10):
         graph_path = Path(graph_path)
         sample_id = sample_id_from_graph(graph_path)
         category = category_from_sample_id(sample_id)
@@ -61,7 +65,11 @@ class RagWorkflow(object):
         number_of_passes_questions = 0
         evidence_seeds = self.evidence_seeds(all_docs)
 
-        while number_of_passes_questions < questions_per_graph: # retry batches regenerations
+        seen_evidences = {} # same evidences lead to the same images and cause overfitting
+
+        attempts = 0
+        while number_of_passes_questions < questions_per_graph and attempts < MAX_ATTEMPT: # retry batches regenerations
+            attempts += 1
             try:
                 evidences_docs = next(evidence_seeds)
             except StopIteration:
@@ -77,8 +85,9 @@ class RagWorkflow(object):
             for q in questions:
                 question_docs = retrieve_many(q) # multiple question evidences
                 if best_doc_score(question_docs) < MIN_RETRIEVAL_SCORE:
-                    print(f"[QUESTION SKIP] {sample_id}: low retrieval score")
+                    print("[REJECT] question:",q)
                     continue
+                print("[ACCEPT] question:",q)
 
                 answer = self.best_answer(
                     question=q,
@@ -91,6 +100,19 @@ class RagWorkflow(object):
                 if not answer:
                     print(f"[ANSWER SKIP] {sample_id}: no supported answer")
                     continue
+                print("[ACCEPT] answer:", answer["answer"])
+
+                answer_evidence_keys = tuple(sorted(evidence_key(doc) for doc in answer["docs"]))
+                if answer_evidence_keys and seen_evidences.get(answer_evidence_keys, 0) >= MAX_ROWS_PER_EVIDENCE:
+                    print(f"[ROW SKIP] {sample_id}: evidence already used")
+                    continue
+
+                seen_evidences[answer_evidence_keys] = seen_evidences.get(answer_evidence_keys, 0) + 1
+                reason = self.generate_reason(
+                    question=q,
+                    answer=answer["answer"],
+                    docs=dedupe_docs([*question_docs, *answer["docs"]]),
+                )
 
                 row = {
                     "row_id": row_id(sample_id, q, answer["answer"]),
@@ -108,7 +130,7 @@ class RagWorkflow(object):
                         "view": view,
                     },
                     "trace": {
-                        "reason": answer.get("reason", ""),
+                        "reason": reason,
                         "question_evidence": serialize_docs(question_docs),
                         "answer_evidence": serialize_docs(answer["docs"]),
                         "graph_evidence": docs_to_text(dedupe_docs([*question_docs, *answer["docs"]])).splitlines(),
@@ -127,7 +149,6 @@ class RagWorkflow(object):
             object_id = doc.metadata.get("object_id") or doc.metadata.get("source") or ""
             by_object.setdefault(object_id, []).append(doc)
 
-
         for doc in docs:
             object_id = doc.metadata.get("object_id") or doc.metadata.get("source") or ""
             packet = [doc]
@@ -140,26 +161,42 @@ class RagWorkflow(object):
             yield packet
 
     def generate_question(self, evidence_text, number_of_questions):
-        response = self.llm.question_batch_generation().invoke({"evidences":evidence_text,
-        "count": number_of_questions})
-        return response.QUESTIONS if response else ""
+        try:
+            response = self.llm.question_batch_generation().invoke({
+                "evidences": evidence_text,
+                "count": number_of_questions,
+            })
+            return response.QUESTIONS if response else ""
+        except Exception as error:
+            print(f"[QUESTION ERROR] {error}")
+            return []
 
-    def best_answer(self, question, evidence_text, question_docs, retrieve_many, number_of_answer=5):
+    def best_answer(self, question,evidence_text, question_docs, retrieve_many, number_of_answer=5):
         answers = []
-        response = self.llm.answer_batch_generation().invoke({
-            "evidences": evidence_text,
-            "question": question,
-            "count":number_of_answer
-        })
+        try:
+            response = self.llm.answer_batch_generation().invoke({
+                "evidences": evidence_text,
+                "question": question,
+                "count": number_of_answer,
+            })
+        except Exception as error:
+            print(f"[ANSWER ERROR] {question}: {error}")
+            return None
         answer = response.ANSWERS if response else ""
         for a in answer:
-            answer_docs = retrieve_many(a)
-            if score_qa_evidence(question_docs, answer_docs) < 1.0:
+            try:
+                answer_docs = retrieve_many(a)
+                if score_qa_evidence(question_docs, answer_docs) < 0.7:
+                    continue
+
+                verification_text = docs_to_text(dedupe_docs([*question_docs, *answer_docs]))
+                verification = verify_answer(a, verification_text) # answer verify evidences
+            except Exception as error:
+                print(f"\t[ANSWER CHECK ERROR] {a}: {error}")
                 continue
 
-            verification_text = docs_to_text(dedupe_docs([*question_docs, *answer_docs]))
-            verification = verify_answer(a, verification_text) # answer verify evidences
             if verification["verdict"] != "PASS":
+                print("\t[REJECT] answer:", a)
                 continue
 
             answers.append({
@@ -171,13 +208,25 @@ class RagWorkflow(object):
         answers.sort(key=lambda item: item["verification"]["score"], reverse=True)
         return answers[0] if answers else None
 
+    def generate_reason(self, question, answer, docs):
+        evidence_text = docs_to_text(docs)
+        try:
+            response = self.llm.reason_generation().invoke({
+                "evidences": evidence_text,
+                "question": question,
+                "answer": answer,
+            })
+            return response.REASON if response else ""
+        except Exception as error:
+            print(f"[REASON SKIP] {question}: {error}")
+            return ""
+
     def graph_paths(self, max_graphs=None,views='inline'):
         paths = sorted(self.graph_root.glob(f"*_properties_graph_{views}*.json"))
         return paths[:max_graphs] if max_graphs else paths
 
     def write_rows(self, rows):
         self.output_path.parent.mkdir(parents=True, exist_ok=True)
-        rows = dedupe_rows(rows)
         with open(self.output_path, "w") as file:
             for row in rows:
                 file.write(json.dumps(row, default=str) + "\n")
@@ -198,11 +247,6 @@ class RagWorkflow(object):
         if not self.output_started:
             self.start_output(truncate=False)
 
-        key = row_key(row)
-        if key in self.written_row_keys:
-            return False
-
-        self.written_row_keys.add(key)
         with open(self.output_path, "a") as file:
             file.write(json.dumps(row, default=str) + "\n")
             file.flush()
@@ -228,6 +272,15 @@ def dedupe_docs(docs):
         seen.add(key)
         output.append(doc)
     return output
+
+
+def evidence_key(doc):
+    return (
+        doc.metadata.get("object_id"),
+        doc.metadata.get("edge"),
+        json.dumps(doc.metadata.get("target"), sort_keys=True, default=str),
+        doc.page_content,
+    )
 
 
 def docs_to_text(docs):
@@ -366,7 +419,7 @@ def read_jsonl(path):
 def generate_multimodal_dataset(graph_root=DEFAULT_GRAPH_ROOT, output_path=DEFAULT_OUTPUT, max_graphs=None):
     workflow = RagWorkflow(graph_root=graph_root, output_path=output_path)
     return workflow.generate_dataset(max_graphs=max_graphs,graph_views='inline',
-                                     candidates_per_question=5, questions_per_graph=5)
+                                     candidates_per_question=CANDIDATE_PER_GRAPH, questions_per_graph=QUESTION_PER_GRAPH)
 
 if __name__ == "__main__":
     rows = generate_multimodal_dataset()

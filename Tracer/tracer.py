@@ -62,15 +62,7 @@ class EvidenceTracer(object):
             ]),
         }
 
-    def retrieve(self, claim, top_k=8):
-        claim_tokens = self.tokenize(claim)
-        scored = [
-            (self.score(claim_tokens, relation), relation)
-            for relation in self.relations
-        ]
-        scored.sort(key=lambda item: item[0], reverse=True)
-        selected = [relation for score, relation in scored if score > 0]
-        return selected[:top_k] if selected else [relation for _, relation in scored[:top_k]]
+
 
     def structural_evidence(self):
         return self.relations
@@ -83,10 +75,7 @@ class EvidenceTracer(object):
             if key not in {"id", "model_id"}
         }
 
-    @staticmethod
-    def score(claim_tokens, relation):
-        relation_tokens = EvidenceTracer.tokenize(relation.get("text", ""))
-        return len(claim_tokens & relation_tokens) / max(len(claim_tokens), 1)
+
 
     @staticmethod
     def clean_node_id(node_id):

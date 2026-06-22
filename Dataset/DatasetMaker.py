@@ -31,15 +31,6 @@ OBJECT_TYPES = {"fault", "closure", "salt", "onlap", "lithology", "age_depth"}
 CLASS_IDS = {"fault": 1, "closure": 2, "salt": 3, "onlap": 4, "lithology": 5, "age_depth": 6}
 
 CLASS_COLORS = {
-    1: [255, 0, 0],
-    2: [0, 128, 255],
-    3: [180, 0, 255],
-    4: [255, 220, 0],
-    5: [0, 200, 100],
-    6: [255, 140, 0],
-}
-
-CLASS_ID_COLORS = {
     1: "red",
     2: "blue",
     3: "purple",
@@ -85,6 +76,7 @@ def build_row(item):
     regions = collect_regions(sample_dir, image_items)
     evidences = compact_evidences(item.get("evidence", []))
     regions_box = ""
+    used_indices = []
 
     for region in regions:
         matching_evidences = [
@@ -94,9 +86,14 @@ def build_row(item):
         if not matching_evidences:
             continue
 
+        image_idx = region.get("image_idx")
+        if image_idx is None:
+            continue
+        used_indices.append(image_idx)
+
         object_name = region.get("object_type") or region.get("class_name") or ""
         class_id = region.get("class_id", "")
-        class_color_name = region.get("class_color_name", "")
+        class_color = region.get("class_color", "")
         bbox = region.get("bbox") or []
         evidence_text = "\n".join(
             f"<evidence>{evidence.get('text', '')}</evidence>"
@@ -106,22 +103,31 @@ def build_row(item):
             "<region>\n"
             f"<object>{object_name}</object>\n"
             f"<class_id>{class_id}</class_id>\n"
-            f"<color>{class_color_name}</color>\n"
+            f"<color>{class_color}</color>\n"
             f"{evidence_text}\n"
             f"<bbox>{json.dumps(bbox)}</bbox>\n"
             "<SEG>\n"
             "</region>\n"
         )
 
+    used_indices = sorted(set(used_indices))
+    used_image_items = [image_items[index] for index in used_indices]
+    used_regions = [
+        {**region, "image_idx": new_index, "mask_idx": new_index, "region_idx": new_index}
+        for new_index, region in enumerate(regions)
+        if region.get("image_idx") in used_indices
+    ]
+
     return {
-        "images": [image["image"] for image in image_items],
-        "masks": [image["mask"] for image in image_items],
+        "sample_id":sample_id,
+        "images": [image["image"] for image in used_image_items],
+        "masks": [image["mask"] for image in used_image_items],
         "instruction": INSTRUCTION,
         "question": f"{item.get('question', '')}",
-        # "reason": f'<think>{item.get("trace", {}).get("reason", "")}</think>',
+        "reason": f'<think>{item.get("trace", {}).get("reason", "")}</think>',
         "answer": f'<answer>{item.get("answer", "")}</answer>',
         "evidence": regions_box,
-        "regions": regions,
+        "regions": used_regions,
     }
 
 
@@ -166,8 +172,7 @@ def add_image_item(items, seen, sample_dir, view, object_type, object_id, role):
         "role": role,
         "class_id": class_id,
         "class_name": object_type,
-        "class_color": CLASS_COLORS.get(class_id, [255, 255, 255]),
-        "class_color_name": CLASS_ID_COLORS.get(class_id, "white"),
+        "class_color": CLASS_COLORS.get(class_id, "white"),
         "image": image.as_posix(),
         "mask": mask.as_posix(),
     })
@@ -192,10 +197,9 @@ def collect_regions(sample_dir, image_items):
             "object_id":image_item["object_id"],
             "class_id": position.get("class_id", image_item["class_id"]),
             "class_name": position.get("class_name", image_item["class_name"]),
-            "class_color": position.get("class_color", image_item["class_color"]),
-            "class_color_name": CLASS_ID_COLORS.get(
+            "class_color": CLASS_COLORS.get(
                 int(position.get("class_id", image_item["class_id"]) or 0),
-                image_item.get("class_color_name", "white"),
+                image_item.get("class_color", "white"),
             ),
             "bbox": [bbox.get("x_min"), bbox.get("y_min"), bbox.get("x_max"), bbox.get("y_max")],
             "center": [center.get("x"), center.get("y")],
@@ -251,7 +255,7 @@ def evidence_matches_region(evidence, region):
 
 
 def write_csv(rows, path):
-    columns = ["images", "masks", "instruction", "question", "answer", "evidence"] # "reason" when there is actually reason
+    columns = ["sample_id","images", "masks", "instruction", "question", "answer", "evidence","reason","regions"] # "reason" when there is actually reason
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", newline="") as file:
         writer = csv.DictWriter(file, fieldnames=columns)

@@ -25,7 +25,10 @@ FAULT_KEYS = {
     "shear_zone_width",
     "gouge_pctile",
 }
-ALLOWED_PROPERTY_EDGES = MODEL_KEYS | CLOSURE_KEYS | FAULT_KEYS
+VISUAL_KEYS = {
+    "color",
+}
+ALLOWED_PROPERTY_EDGES = MODEL_KEYS | CLOSURE_KEYS | FAULT_KEYS | VISUAL_KEYS
 
 SKIP_EDGES = {
     "view",
@@ -52,6 +55,7 @@ EDGE_LABELS = {
     "tilt_pct": "tilt",
     "shear_zone_width": "shear zone width",
     "gouge_pctile": "gouge percentile",
+    "color": "highlight color",
     "fluid": "fluid",
     "salt_inserted": "salt",
     "number_faults": "faults",
@@ -67,6 +71,7 @@ EDGE_TEMPLATES = {
     "tilt_pct": "{source} shows tilt of about {value}",
     "shear_zone_width": "{source} has a shear zone about {value} wide",
     "gouge_pctile": "{source} shows gouge near the {value} percentile",
+    "color": "{source} is highlighted in {value}",
     "fluid": "{source} contains {value}",
 }
 
@@ -100,12 +105,12 @@ class TextTransform(object):
     def relation_to_sentence(self, relation):
         edge = relation.get("edge")
         target = relation.get("target")
+        if relation.get("trace_type") == "edge":
+            return self._edge_sentence(relation)
+
         if edge not in ALLOWED_PROPERTY_EDGES and edge not in POSITION_EDGES and edge not in EXTENT_EDGES:
             return None
         if edge in SKIP_EDGES or self._is_low_value(edge, target):
-            return None
-
-        if relation.get("trace_type") == "edge":
             return None
 
         source = self.node_name(relation.get("source"))
@@ -155,6 +160,15 @@ class TextTransform(object):
             return self._sentence(f"{source} {verb} {target_name}")
 
         return None
+
+    def _edge_sentence(self, relation):
+        edge = relation.get("edge")
+        if edge != "HAS_VISUAL_OBJECT":
+            return None
+
+        source = self.node_name(relation.get("source"))
+        target = self.node_name(relation.get("target"))
+        return self._sentence(f"{source} includes a visible {target} feature")
 
     def _grouped_evidence(self, relations):
         evidence = []
