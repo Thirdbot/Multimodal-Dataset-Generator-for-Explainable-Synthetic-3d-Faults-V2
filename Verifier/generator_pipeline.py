@@ -6,6 +6,7 @@ import hashlib
 from pathlib import Path
 
 from longtracer import LongTracer, check
+from sqlalchemy.ext.asyncio import result
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -17,13 +18,13 @@ from Verifier.rag_verifier import best_doc_score, score_qa_evidence, serialize_d
 
 DEFAULT_GRAPH_ROOT = ROOT / "graphs" / "properties_2d_graph"
 DEFAULT_OUTPUT = ROOT / "Dataset" / "verified_qa.jsonl"
-MIN_RETRIEVAL_SCORE = 0.7
+MIN_RETRIEVAL_SCORE = 0.6
 QUESTION_PER_GRAPH  = 5
 CANDIDATE_PER_GRAPH = 5
 MAX_ROWS_PER_EVIDENCE = 2
 MAX_ATTEMPT = 2 * QUESTION_PER_GRAPH # max attempt for outer loop
 INSTRUCTION = (
-    "Inspect the seismic images, use the marked regions as visual evidence, "
+    "Inspect the seismic images, use the visible regions as visual evidence, "
     "and answer the question with concise geological reasoning."
 )
 
@@ -75,14 +76,16 @@ class RagWorkflow(object):
                 evidence_seeds = self.evidence_seeds(all_docs)
                 evidences_docs = next(evidence_seeds)
             seed_text = self.rag.format_docs(evidences_docs)
-            questions = self.generate_question(seed_text, min(3,questions_per_graph - number_of_passes_questions)) # try 3 first, then try left
-            if not questions or questions == []:
+            question_items = self.generate_question(seed_text, min(3,questions_per_graph - number_of_passes_questions)) # try 3 first, then try left
+            if not question_items or question_items == []:
                 print(f"[QUESTION SKIP] {sample_id}: no question generated")
                 continue
 
 
-            for q in questions:
-                question_docs = retrieve_many(q) # multiple question evidences
+            for question_item in question_items:
+                q = question_item.get("question", "")
+                retrieval_query = question_item.get("retrieval_query") or q
+                question_docs = retrieve_many(retrieval_query) # multiple question evidences
                 if best_doc_score(question_docs) < MIN_RETRIEVAL_SCORE:
                     print("[REJECT] question:",q)
                     continue
@@ -127,9 +130,11 @@ class RagWorkflow(object):
                         "graph_path": graph_path.as_posix(),
                         "category": category,
                         "view": view,
+                        "retrieval_query": retrieval_query,
                     },
                     "trace": {
                         "reason": reason,
+                        "retrieval_query": retrieval_query,
                         "question_evidence": serialize_docs(question_docs),
                         "answer_evidence": serialize_docs(answer["docs"]),
                         "graph_evidence": docs_to_text(dedupe_docs([*question_docs, *answer["docs"]])).splitlines(),
@@ -165,10 +170,28 @@ class RagWorkflow(object):
                 "evidences": evidence_text,
                 "count": number_of_questions,
             })
-            return response.QUESTIONS if response else ""
+            if not response:
+                return []
+            return [
+                {
+                    "question": item.QUESTION.strip(),
+                    "retrieval_query": item.RETRIEVAL_QUERY.strip(),
+                }
+                for item in response.QUESTIONS
+                if item.QUESTION.strip()
+            ]
         except Exception as error:
             print(f"[QUESTION ERROR] {error}")
             return []
+
+    @staticmethod
+    def filter_docs_by_trust(answer, docs, min_trust=0.7):
+        kept = []
+        for doc in docs:
+            result = check(answer, [doc.page_content])
+            if getattr(result, "verdict", "") == "PASS" and float(getattr(result, "trust_score", 0.0)) >= min_trust:
+                kept.append(doc)
+        return kept
 
     def best_answer(self, question,evidence_text, question_docs, retrieve_many, number_of_answer=5):
         answers = []
@@ -182,25 +205,29 @@ class RagWorkflow(object):
             print(f"[ANSWER ERROR] {question}: {error}")
             return None
         answer = response.ANSWERS if response else ""
+
         for a in answer:
             try:
                 answer_docs = retrieve_many(a)
+
+                if not answer_docs:
+                    continue
+
                 if score_qa_evidence(question_docs, answer_docs) < 0.7:
                     continue
 
-                verification_text = docs_to_text(dedupe_docs([*question_docs, *answer_docs]))
-                verification = verify_answer(a, verification_text) # answer verify evidences
+                all_docs = dedupe_docs([*question_docs, *answer_docs])
+                docs,verification = verify_answer(a, all_docs) # answer verify evidences
             except Exception as error:
                 print(f"\t[ANSWER CHECK ERROR] {a}: {error}")
                 continue
-
             if verification["verdict"] != "PASS":
                 print("\t[REJECT] answer:", a)
                 continue
 
             answers.append({
                 "answer": a,
-                "docs": answer_docs,
+                "docs": docs,
                 "verification": verification,
             })
 
@@ -282,13 +309,27 @@ def docs_to_text(docs):
     return "\n".join(doc.page_content for doc in docs)
 
 
+# def filter_docs_by_score(docs, min_score):
+#     return [
+#         doc for doc in docs
+#         if float(doc.metadata.get("_similarity_score", 0.0)) >= min_score
+#     ]
 
-def verify_answer(answer, evidence_text):
-    result = check(answer, [evidence_text])
-    return {
-        "verdict": getattr(result, "verdict", ""),
-        "score": float(getattr(result, "trust_score", 0.0) or 0.0),
-    }
+
+def verify_answer(answer, all_docs,trust=0.6):
+    kept = []
+    verdict = ""
+    score = 0.0
+    for doc in all_docs:
+        result = check(answer, [doc.page_content])
+        if getattr(result, "verdict", "") == "PASS" and float(getattr(result, "trust_score", 0.0)) >=  trust:
+            kept.append(doc)
+            verdict = getattr(result, "verdict", "")
+            score = float(getattr(result, "trust_score", 0.0) or 0.0)
+    return kept,{
+        "verdict": verdict,
+        "score": score
+        }
 
 
 def sample_id_from_graph(graph_path):
