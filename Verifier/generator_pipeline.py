@@ -36,10 +36,10 @@ class RagWorkflow(object):
         self.rag = Rag(embedding_model="all-MiniLM-L6-v2")
         self.llm = LLMMachine()
 
-    def generate_dataset(self, max_graphs=None,graph_views='inline', questions_per_graph=5, candidates_per_question=5):
+    def generate_dataset(self, max_graphs=None, graph_views=("inline", "crossline"), questions_per_graph=5, candidates_per_question=5):
         self.start_output(truncate=True)
         rows = []
-        for graph_path in self.graph_paths(max_graphs=max_graphs,views=graph_views):
+        for graph_path in self.graph_paths(max_graphs=max_graphs, views=graph_views):
             rows.extend(self.generate_for_graph(
                 graph_path,
                 questions_per_graph=questions_per_graph,
@@ -95,7 +95,7 @@ class RagWorkflow(object):
 
                 answer = self.best_answer(
                     question=q,
-                    evidence_text=docs_to_text(question_docs),
+                    evidence_text=evidence_text,
                     question_docs=question_docs,
                     retrieve_many=retrieve_many,
                     number_of_answer=candidates_per_question,
@@ -215,7 +215,7 @@ class RagWorkflow(object):
 
                 if not answer_docs:
                     continue
-
+                # this is not be use because the evidences is from question, and it is now chunking
                 if score_qa_evidence(question_docs, answer_docs) < 0.7:
                     continue
                 used_docs = dedupe_docs([*question_docs, *answer_docs])
@@ -256,8 +256,14 @@ class RagWorkflow(object):
             print(f"[REASON SKIP] {question}: {error}")
             return ""
 
-    def graph_paths(self, max_graphs=None,views='inline'):
-        paths = sorted(self.graph_root.glob(f"*_properties_graph_{views}*.json"))
+    def graph_paths(self, max_graphs=None, views=("inline", "crossline")):
+        if isinstance(views, str):
+            views = (views,)
+
+        paths = []
+        for view in views:
+            paths.extend(self.graph_root.glob(f"*_properties_graph_{view}*.json"))
+        paths = sorted(set(paths))
         return paths[:max_graphs] if max_graphs else paths
 
     def write_rows(self, rows):
@@ -431,7 +437,7 @@ def row_id(sample_id, question, answer):
 
 def generate_multimodal_dataset(graph_root=DEFAULT_GRAPH_ROOT, output_path=DEFAULT_OUTPUT, max_graphs=None):
     workflow = RagWorkflow(graph_root=graph_root, output_path=output_path)
-    return workflow.generate_dataset(max_graphs=max_graphs,graph_views='inline',
+    return workflow.generate_dataset(max_graphs=max_graphs, graph_views=("inline", "crossline"),
                                      candidates_per_question=CANDIDATE_PER_GRAPH, questions_per_graph=QUESTION_PER_GRAPH)
 
 if __name__ == "__main__":

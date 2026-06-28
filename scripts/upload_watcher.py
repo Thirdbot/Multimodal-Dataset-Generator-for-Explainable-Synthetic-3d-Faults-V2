@@ -10,6 +10,7 @@ from watchdog.observers import Observer
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "scripts"))
 
 from Dataset.upload_to_huggingface import DEFAULT_CSV, upload_dataset
 from logger_color import logger
@@ -19,8 +20,9 @@ class HuggingFaceUploadRunner(FileSystemEventHandler):
     """Upload CSV dataset updates to HuggingFace."""
 
     def __init__(self):
-        self.csv_path = DEFAULT_CSV
+        self.csv_path = DEFAULT_CSV.resolve()
         self.last_run = 0
+        self.last_seen_state = None
 
     def _should_skip(self, seconds=5):
         now = time.time()
@@ -38,15 +40,41 @@ class HuggingFaceUploadRunner(FileSystemEventHandler):
     def on_moved(self, event):
         self._handle(event)
 
+    def on_closed(self, event):
+        self._handle(event)
+
+    def process_existing(self):
+        if self.csv_path.exists():
+            self.last_seen_state = self._file_state()
+            self._upload()
+
+    def process_if_changed(self):
+        state = self._file_state()
+        if state is None or state == self.last_seen_state:
+            return
+        self.last_seen_state = state
+        if self._should_skip():
+            return
+        self._upload()
+
     def _handle(self, event):
         if event.is_directory:
             return
-        path = Path(getattr(event, "dest_path", event.src_path))
+        path = Path(getattr(event, "dest_path", event.src_path)).resolve()
         if path != self.csv_path:
             return
+        self.last_seen_state = self._file_state()
         if self._should_skip():
             return
+        self._upload()
 
+    def _file_state(self):
+        if not self.csv_path.exists():
+            return None
+        stat = self.csv_path.stat()
+        return stat.st_mtime_ns, stat.st_size
+
+    def _upload(self):
         repo_id = os.getenv("HF_REPO_ID", "thirdExec/synthetic-seismic-vlm")
         token = os.getenv("HF_TOKEN")
         private = os.getenv("HF_PRIVATE", "0").lower() in {"1", "true", "yes"}
@@ -76,9 +104,11 @@ def watch_dataset_csv():
     observer.schedule(runner, path, recursive=False)
 
     observer.start()
+    runner.process_existing()
     try:
         while True:
             time.sleep(1)
+            runner.process_if_changed()
     except KeyboardInterrupt:
         logger.error("[STOPPING]")
     finally:

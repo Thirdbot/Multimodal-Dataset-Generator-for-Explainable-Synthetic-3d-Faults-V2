@@ -38,6 +38,11 @@ class Properties2DGraphRunner(FileSystemEventHandler):
     def on_moved(self, event):
         self._handle(event)
 
+    def process_existing(self):
+        if not any(self.image_root.glob("**/*_object_position.json")):
+            return
+        self._generate()
+
     def _handle(self, event):
         if event.is_directory:
             return
@@ -46,7 +51,9 @@ class Properties2DGraphRunner(FileSystemEventHandler):
             return
         if self._should_skip():
             return
+        self._generate()
 
+    def _generate(self):
         try:
             logger.info("[2D GRAPH START]")
             generate_2d_graphs()
@@ -65,6 +72,7 @@ def watch_object_positions():
     observer.schedule(runner, path, recursive=True)
 
     observer.start()
+    runner.process_existing()
     try:
         while True:
             time.sleep(1)

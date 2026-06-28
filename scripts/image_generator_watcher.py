@@ -2,12 +2,14 @@
 
 import sys
 import time
+import os
 from pathlib import Path
 
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
 ROOT = Path(__file__).resolve().parent.parent
+os.environ.setdefault("MPLCONFIGDIR", "/tmp/mpl")
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 
@@ -48,6 +50,10 @@ class ImageGenerationRunner(FileSystemEventHandler):
     def on_moved(self, event):
         self._handle(event)
 
+    def process_existing(self):
+        for path in sorted(self.properties_graph_path.glob("*_properties_graph.json")):
+            self._generate(path)
+
     def _handle(self, event):
         if event.is_directory:
             return
@@ -56,7 +62,9 @@ class ImageGenerationRunner(FileSystemEventHandler):
             return
         if self._should_skip(path):
             return
+        self._generate(path)
 
+    def _generate(self, path):
         try:
             logger.info(f"[IMAGE START] -> Graph: {path.name}")
             generate_images_for_graph(path, self.samples_path)
@@ -75,6 +83,7 @@ def watch_properties_graph():
     observer.schedule(runner, path, recursive=False)
 
     observer.start()
+    runner.process_existing()
     try:
         while True:
             time.sleep(1)
