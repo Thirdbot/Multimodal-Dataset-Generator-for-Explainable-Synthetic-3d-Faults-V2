@@ -33,7 +33,6 @@ class RagWorkflow(object):
         self.graph_root = Path(graph_root)
         self.output_path = Path(output_path)
         self.output_started = False
-        self.written_row_keys = set()
         self.rag = Rag(embedding_model="all-MiniLM-L6-v2")
         self.llm = LLMMachine()
 
@@ -233,12 +232,8 @@ class RagWorkflow(object):
 
     def start_output(self, truncate=False):
         self.output_path.parent.mkdir(parents=True, exist_ok=True)
-        self.written_row_keys = set()
         if truncate:
             self.output_path.write_text("")
-        elif self.output_path.exists():
-            for row in read_jsonl(self.output_path):
-                self.written_row_keys.add(row_key(row))
         else:
             self.output_path.touch()
         self.output_started = True
@@ -343,77 +338,9 @@ def normalize_text(text):
     return re.sub(r"\s+", " ", str(text or "").lower()).strip()
 
 
-def question_signature(question):
-    question = normalize_text(question)
-    question = re.sub(r"[^a-z0-9\s]", "", question)
-    question = re.sub(r"\b(the|a|an)\b", " ", question)
-    question = re.sub(r"\bdoes\s+", "", question)
-    question = re.sub(r"\bis\s+", "", question)
-    question = re.sub(r"\bare\s+", "", question)
-    question = re.sub(r"\s+", " ", question).strip()
-    question = re.sub(r"\bexists\b", "present", question)
-    question = re.sub(r"\bexist\b", "present", question)
-    question = re.sub(r"\bpresent in section\b", "present", question)
-    question = re.sub(r"\bin section\b", "", question)
-    question = re.sub(r"\s+", " ", question).strip()
-    return question
-
-
 def row_id(sample_id, question, answer):
     payload = "|".join([sample_id, normalize_text(question), normalize_text(answer)])
     return hashlib.sha1(payload.encode()).hexdigest()
-
-
-def dedupe(items):
-    seen = set()
-    unique = []
-    for item in items:
-        key = normalize_text(item)
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        unique.append(item)
-    return unique
-
-
-def dedupe_rows(rows):
-    seen = set()
-    output = []
-    for row in rows:
-        key = (
-            row.get("sample_id", ""),
-            row.get("view", ""),
-            question_signature(row.get("question", "")),
-        )
-        if key in seen:
-            continue
-        seen.add(key)
-        output.append(row)
-    return output
-
-
-def row_key(row):
-    return (
-        row.get("sample_id", ""),
-        row.get("view", ""),
-        question_signature(row.get("question", "")),
-    )
-
-
-def read_jsonl(path):
-    path = Path(path)
-    if not path.exists():
-        return []
-    rows = []
-    with open(path) as file:
-        for line in file:
-            if not line.strip():
-                continue
-            try:
-                rows.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
-    return rows
 
 
 def generate_multimodal_dataset(graph_root=DEFAULT_GRAPH_ROOT, output_path=DEFAULT_OUTPUT, max_graphs=None):
