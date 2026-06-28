@@ -12,8 +12,12 @@ from langchain_openai import ChatOpenAI
 class AnswerBatchStructure(BaseModel):
     ANSWERS:list[str]
 
+class QuestionQueryPair(BaseModel):
+    QUESTION:str
+    RETRIEVAL_QUERY:str
+
 class QuestionBatchStructure(BaseModel):
-    QUESTIONS:list[str]
+    QUESTIONS:list[QuestionQueryPair]
 
 class ReasonStructure(BaseModel):
     REASON:str
@@ -29,6 +33,14 @@ Use only the Evidences input as factual ground.
 Write naturally, as a scientist explaining what the evidence says.
 You may vary wording and style, but do not invent objects, values, causes, or geological events.
 Do not mention graph, metadata, database, generated data, synthetic data, prompt, or verification.
+Evidence sentences may contain markup:
+- <object>...</object> marks the geological object being described.
+- <nums>...</nums> marks numeric counts or measured properties.
+- <center>...</center> marks a visible 2D object center.
+- <bbox>...</bbox> marks a visible 2D region box.
+Treat these tags as evidence annotations.
+Questions must sound natural and must not copy the tags.
+Answers and reasoning may preserve the tags when they report a tagged object, value, center, or region from evidence.
 """
 
 answer_batch_generation_prompt = """
@@ -52,6 +64,9 @@ Rules:
 - Every answer must be supported by Evidences.
 - Answers may vary in wording, but each one must stay faithful to the same evidence.
 - Use the same objects, quantities, properties, regions, or colors stated in Evidences.
+- If an answer reports an object marked with <object>, keep the tag around that exact object name.
+- If an answer reports a value or region marked with <nums>, <center>, or <bbox>, keep the tag around that exact value.
+- Do not remove evidence tags from objects, values, centers, or regions that appear in the answer.
 - Do not invent facts outside Evidences.
 - Do not add causes or interpretations that are not stated in Evidences.
 
@@ -74,17 +89,19 @@ Output contract:
 - The first character must be {{ and the last character must be }}.
 - Do not use markdown.
 - Do not write text before or after the JSON object.
-- Required shape: {{"QUESTIONS":["question one?","question two?"]}}
+- Required shape: {{"QUESTIONS":[{{"QUESTION":"natural visual question?","RETRIEVAL_QUERY":"compact evidence lookup terms"}}]}}
 
 Generate seismic interpretation questions from the provided evidences.
 
 Rules:
 - Generate up to {count} questions.
-- Ask only about what appears in Evidences.
-- Write questions as if the user will ask them while looking at seismic images, not while reading the evidence text.
-- Simulate geological curiosity: ask what the image appears to show, where a feature is, what kind of feature it is, or what interpretation is supported.
-- The question should sound like a natural visual interpretation question for a VLM.
-- The question must not sound like it already knows the answer.
+- Each item must include QUESTION and RETRIEVAL_QUERY.
+- QUESTION is for a user looking at seismic image(s). It can be broad or concise, but must be answerable from Evidences.
+- RETRIEVAL_QUERY is for evidence lookup. It should be compact, direct, and use object names, property names, and tagged evidence terms.
+- RETRIEVAL_QUERY may include exact object names, property words, and tag words such as object, nums, center, bbox.
+- RETRIEVAL_QUERY should not be conversational.
+- Simulate GroundVQA-style curiosity: ask about the visible object, region, count, location, class, mask, or interpreted feature.
+- QUESTION must not sound like it already knows the answer.
 - If Evidences only mention onlap, ask only about onlap.
 - If Evidences only mention salt, ask only about salt.
 - If Evidences only mention a highlighted color or region, ask about that visual evidence.
@@ -100,20 +117,25 @@ Rules:
 - Ask what the interpreter sees in the evidence statements.
 - Convert evidence facts into image-facing questions.
 - It is okay to ask about counts, object attributes, intersections, locations, colors, regions, and visible masks only when those facts are in Evidences.
-- Do not include the answer inside the question.
+- Do not include the answer inside QUESTION.
 - Do not copy exact evidence values into the question.
 - Do not put coordinates, bounding boxes, throw values, percentages, fluid names, colors, or counts in the question.
-- Never write x=, y=, x_min, y_min, x_max, y_max, bbox, coordinate values, or "from x ... to ..." in a question.
+- Never write x=, y=, x_min, y_min, x_max, y_max, bbox, coordinate values, or "from x ... to ..." in QUESTION.
+- Never copy <object>, <nums>, <center>, or <bbox> into QUESTION.
 - Never ask a question that already contains the location, area, amount, or property value.
 - Ask for the missing value, not with the value.
 - Do not copy object types from examples; use only object types present in Evidences.
 - Do not ask cause questions unless the cause is explicitly stated in Evidences.
+- Make RETRIEVAL_QUERY match the expected evidence sentences, for example "Fault 1 object throw nums", "Closure 1 object bbox center fluid", or "onlap count nums".
+- If QUESTION asks where something is, RETRIEVAL_QUERY must include center or bbox.
+- If QUESTION asks how many, RETRIEVAL_QUERY must include count or nums.
+- If QUESTION asks what type/class/fluid/property, RETRIEVAL_QUERY must include that property word.
 
 Good:
-{{"QUESTIONS":["What geological feature is visible in the highlighted region?","How many visible episodes can be interpreted from the section?","Where is the highlighted feature located?","What color marks the interpreted feature?","What property can be interpreted for the highlighted object?","Does the image show the interpreted feature?"]}}
+{{"QUESTIONS":[{{"QUESTION":"What geological feature is visible in the highlighted region?","RETRIEVAL_QUERY":"highlighted region object bbox"}},{{"QUESTION":"How many visible episodes can be interpreted from the section?","RETRIEVAL_QUERY":"onlap episodes count nums"}},{{"QUESTION":"Where is the highlighted feature located?","RETRIEVAL_QUERY":"highlighted feature center bbox"}}]}}
 
 Bad:
-{{"QUESTIONS":["How many faults are present?","What fluid does Closure 1 contain?","Where is Fault 1 located?","Does the object sit at x=43 and y=112?","Is the highlighted object red?","The onlap is yellow, right?"]}}
+{{"QUESTIONS":[{{"QUESTION":"Does the object sit at x=43 and y=112?","RETRIEVAL_QUERY":"x=43 y=112"}},{{"QUESTION":"The onlap is yellow, right?","RETRIEVAL_QUERY":"onlap yellow"}}]}}
 
 Evidences:
 {evidences}
@@ -139,6 +161,9 @@ Rules:
 - This is for audit and dataset explanation.
 - Use two to four natural sentences.
 - Mention the evidence facts that support the answer.
+- If reasoning cites an object marked with <object>, keep the tag around that exact object name.
+- If reasoning cites a value or region marked with <nums>, <center>, or <bbox>, keep the tag around that exact value.
+- Do not remove evidence tags from objects, values, centers, or regions that appear in the reasoning.
 - Do not add unstated causes, processes, or interpretations.
 - Keep the conclusion aligned with the Answer.
 
@@ -194,18 +219,18 @@ def multimodal_dataset_instruction():
 
 class LLMMachine:
     def __init__(self):
-        self.DEFAULT_VLLM_ENDPOINT = "https://pd-third-qwen2-7b-i-c04894ffc6824922a1cc83d17c3b8bcc.nebius-eu-north.saturnenterprise.io/v1"
+        self.DEFAULT_VLLM_ENDPOINT = "http://localhost:8000/v1"
         self.temp = 0.2 # lower the better logic
         self.top_p = 0.95 # higher the better fluency
-        self.max_tok = 1024
+        self.max_tok = 128
         self.presence_penalty = 1 # -2,2 avoid repetition
         self.frequency_penalty = 0.2 # -2,2 more natural
         self.n = 1 # single response
         self.attempt = 5
 
         self.client = ChatOpenAI(base_url=self.DEFAULT_VLLM_ENDPOINT,
-                                 api_key=None,
-                                 model="RedHatAI/Qwen2-7B-Instruct-quantized.w4a16",
+                                 api_key="local",
+                                 model="Qwen/Qwen2.5-1.5B-Instruct",
                                  temperature=self.temp,
                                  frequency_penalty=self.frequency_penalty,
                                  presence_penalty=self.presence_penalty,
@@ -306,10 +331,11 @@ if __name__ == "__main__":
         "count": 3,
     })
     for q in batch.QUESTIONS:
-        print(f"question: {q}\n")
+        print(f"question: {q.QUESTION}\n")
+        print(f"retrieval_query: {q.RETRIEVAL_QUERY}\n")
         answers = llm_machine.answer_batch_generation().invoke({
             "evidences":example_evidence,
-            "question":q,
+            "question":q.QUESTION,
             "count": 3,
         })
         print(f"\tanswer: {answers.ANSWERS}\n")
