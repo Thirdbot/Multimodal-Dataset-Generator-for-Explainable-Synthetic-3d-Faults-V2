@@ -15,14 +15,13 @@ IMAGE_ROOT = ROOT / "build_objects" / "images"
 CSV_OUTPUT = ROOT / "Dataset" / "multimodal_multi_image_dataset.csv"
 
 INSTRUCTION = (
-    "Inspect the seismic image(s) and answer the question using grounded visual evidence. "
-    "Before the final answer, output one <region>...</region> block for each image region "
-    "that supports the answer. In each region, use this order: <object>...</object>, "
-    "<class_id>...</class_id>, one or more <evidence>...</evidence> "
-    "facts explaining why the region matters, <bbox>[x_min, y_min, x_max, y_max]</bbox>, "
-    "and exactly one <SEG> token. The bbox and <SEG> ground the evidence region to its "
-    "mask, so every region must correspond to one mask. After all regions, output one "
-    "concise <answer>...</answer>. Do not write markdown or prose outside these tags."
+    "Inspect all provided seismic images and their paired masks. Answer the question "
+    "from visible geological evidence only. For each supporting region, write one "
+    "<region> block containing the observed object, its class_id, the evidence used, "
+    "its <bbox>[x_min, y_min, x_max, y_max]</bbox>, and one <SEG> token that refers "
+    "to the paired mask. Then give the final response inside <answer>...</answer>. "
+    "Use concise geological wording and do not add facts that are not supported by "
+    "the shown regions."
 )
 
 OBJECT_TYPES = {"fault", "closure", "salt", "onlap", "lithology"}
