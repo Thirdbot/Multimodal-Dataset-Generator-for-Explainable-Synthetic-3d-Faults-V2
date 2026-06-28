@@ -92,6 +92,7 @@ EDGE_TEMPLATES = {
 }
 
 SPECIAL_TOKENS = {
+    "object": ("<object>", "</object>"),
     "bbox": ("<bbox>", "</bbox>"),
     "center": ("<center>", "</center>"),
     "nums": ("<nums>", "</nums>"),
@@ -135,12 +136,13 @@ class TextTransform(object):
         if node_id.startswith("category:"):
             return "the section"
         if node_id in NODE_NAMES:
-            return NODE_NAMES[node_id]
+            return self._tag("object", NODE_NAMES[node_id])
 
         match = re.match(r"^([a-z_]+)_(\d+)$", node_id)
         if match and match.group(1) in NUMBERED_NODE_NAMES:
             number = int(match.group(2)) + 1
-            return NUMBERED_NODE_NAMES[match.group(1)].format(number=number)
+            name = NUMBERED_NODE_NAMES[match.group(1)].format(number=number)
+            return self._tag("object", name)
 
         return node_id.replace("_", " ")
 
