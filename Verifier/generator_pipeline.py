@@ -81,11 +81,9 @@ class RagWorkflow(object):
                 continue
 
 
-            for question_item in question_items:
-                q = question_item.get("question", "")
-                retrieval_query = question_item.get("retrieval_query") or q
+            for q in question_items:
                 question_docs = filter_docs_by_retrieval_score(
-                    retrieve_many(retrieval_query),
+                    retrieve_many(q),
                     MIN_RETRIEVAL_SCORE,
                 ) # multiple question evidences
                 if best_doc_score(question_docs) < MIN_RETRIEVAL_SCORE:
@@ -95,7 +93,7 @@ class RagWorkflow(object):
 
                 answer = self.best_answer(
                     question=q,
-                    evidence_text=evidence_text,
+                    evidence_text=docs_to_text(question_docs),
                     question_docs=question_docs,
                     retrieve_many=retrieve_many,
                     number_of_answer=candidates_per_question,
@@ -132,11 +130,9 @@ class RagWorkflow(object):
                         "graph_path": graph_path.as_posix(),
                         "category": category,
                         "view": view,
-                        "retrieval_query": retrieval_query,
                     },
                     "trace": {
                         "reason": reason,
-                        "retrieval_query": retrieval_query,
                         "question_evidence": serialize_docs(question_docs),
                         "answer_evidence": serialize_docs(answer["docs"]),
                         "graph_evidence": docs_to_text(dedupe_docs([*question_docs, *answer["docs"]])).splitlines(),
@@ -175,12 +171,9 @@ class RagWorkflow(object):
             if not response:
                 return []
             return [
-                {
-                    "question": item.QUESTION.strip(),
-                    "retrieval_query": item.RETRIEVAL_QUERY.strip(),
-                }
+                item.strip()
                 for item in response.QUESTIONS
-                if item.QUESTION.strip()
+                if item.strip()
             ]
         except Exception as error:
             print(f"[QUESTION ERROR] {error}")
@@ -206,9 +199,12 @@ class RagWorkflow(object):
         except Exception as error:
             print(f"[ANSWER ERROR] {question}: {error}")
             return None
-        answer = response.ANSWERS if response else ""
+        answer = response.ANSWERS if response else []
 
         for a in answer:
+            a = a.strip()
+            if not a:
+                continue
             try:
                 answer_docs = retrieve_many(a)
 
@@ -217,9 +213,12 @@ class RagWorkflow(object):
 
                 if score_qa_evidence(question_docs, answer_docs) < 0.7:
                     continue
-                used_docs = filter_docs_by_retrieval_score([*answer_docs,*question_docs], MIN_RETRIEVAL_SCORE)
+                used_docs = dedupe_docs([*question_docs, *answer_docs])
+                used_docs = filter_docs_by_retrieval_score(used_docs, MIN_RETRIEVAL_SCORE)
                 filter_by_trust_docs = dedupe_docs(filter_docs_by_trust(a, used_docs))
                 if not filter_by_trust_docs:
+                    continue
+                if not preserves_evidence_tags(a, filter_by_trust_docs):
                     continue
                 verification_text = docs_to_text(filter_by_trust_docs)
                 verification = verify_answer(a, verification_text) # answer verify evidences
@@ -314,6 +313,14 @@ def docs_to_text(docs):
     return "\n".join(doc.page_content for doc in docs)
 
 
+def shared_docs(question_docs, answer_docs):
+    question_keys = {evidence_key(doc) for doc in question_docs}
+    return [
+        doc for doc in answer_docs
+        if evidence_key(doc) in question_keys
+    ]
+
+
 def filter_docs_by_retrieval_score(docs, min_score):
     return [
         doc for doc in docs
@@ -331,6 +338,30 @@ def filter_docs_by_trust(answer, docs, min_trust=0.7):
             doc.metadata['trust_score'] = trust_score
             kept.append(doc)
     return kept
+
+
+def preserves_evidence_tags(answer, docs):
+    evidence_text = docs_to_text(docs)
+    required_spans = tagged_spans(evidence_text)
+    if not required_spans:
+        return True
+
+    used_values = [
+        span for span in required_spans
+        if strip_tag(span) in answer
+    ]
+    if not used_values:
+        return True
+
+    return all(span in answer for span in used_values)
+
+
+def tagged_spans(text):
+    return re.findall(r"<(?:object|nums|center|bbox)>.*?</(?:object|nums|center|bbox)>", text)
+
+
+def strip_tag(span):
+    return re.sub(r"</?(?:object|nums|center|bbox)>", "", span)
 
 
 def verify_answer(answer, evidence_text):

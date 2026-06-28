@@ -95,7 +95,6 @@ def build_row(item):
             f"{evidence.get('text', '')}.\n"
             for evidence in matching_evidences
         )
-        # evidence_tokens = f"<evidence>{evidence_texts}</evidence>"
         regions_box += (
             "<region>\n"
             f"{evidence_texts}"

@@ -12,12 +12,8 @@ from langchain_openai import ChatOpenAI
 class AnswerBatchStructure(BaseModel):
     ANSWERS:list[str]
 
-class QuestionQueryPair(BaseModel):
-    QUESTION:str
-    RETRIEVAL_QUERY:str
-
 class QuestionBatchStructure(BaseModel):
-    QUESTIONS:list[QuestionQueryPair]
+    QUESTIONS:list[str]
 
 class ReasonStructure(BaseModel):
     REASON:str
@@ -82,25 +78,23 @@ Output contract:
 - The first character must be {{ and the last character must be }}.
 - Do not use markdown.
 - Do not write text before or after the JSON object.
-- Required shape: {{"QUESTIONS":[{{"QUESTION":"natural visual question?","RETRIEVAL_QUERY":"evidence-like retrieval sentence"}}]}}
+- Required shape: {{"QUESTIONS":["natural visual question?","another question?"]}}
 
 Generate seismic interpretation questions from the provided evidences.
 
 Rules:
 - Generate up to {count} questions.
-- Each item has QUESTION and RETRIEVAL_QUERY.
 - QUESTION: natural GroundVQA-style visual question; no tags; no exact values; no answer leakage.
 - QUESTION asks one answerable thing visible or described in Evidences.
 - Use only object/property types present in Evidences.
-- RETRIEVAL_QUERY: 1 to 3 evidence-like sentence queries, one per line.
-- RETRIEVAL_QUERY may use object names and tag words: object, nums, center, bbox.
-- RETRIEVAL_QUERY must not be a keyword bag.
+- Ask about orientation only if Evidences mention tilt, dip, strike, angle, center, or bbox.
+- If QUESTION compares or asks about multiple objects, the question must name those objects clearly.
 
 Good:
-{{"QUESTIONS":[{{"QUESTION":"What geological feature is visible in this region?","RETRIEVAL_QUERY":"The section includes a visible object feature\nThe object occupies the area from bbox"}},{{"QUESTION":"How many visible episodes can be interpreted from the section?","RETRIEVAL_QUERY":"The layering shows nums onlap episodes"}},{{"QUESTION":"Where is the feature located?","RETRIEVAL_QUERY":"The feature sits near center\nThe feature occupies the area from bbox"}}]}}
+{{"QUESTIONS":["What geological feature is visible in this region?","How many visible episodes can be interpreted from the section?","Where is the feature located?"]}}
 
 Bad:
-{{"QUESTIONS":[{{"QUESTION":"Does the object sit at x=43 and y=112?","RETRIEVAL_QUERY":"x=43 y=112"}},{{"QUESTION":"The onlap is yellow, right?","RETRIEVAL_QUERY":"onlap yellow"}},{{"QUESTION":"Where is the feature?","RETRIEVAL_QUERY":"feature center bbox object nums"}}]}}
+{{"QUESTIONS":["Does the object sit at x=43 and y=112?","The onlap is yellow, right?","Where is the feature?"]}}
 
 Evidences:
 {evidences}
@@ -294,15 +288,15 @@ if __name__ == "__main__":
         "count": 3,
     })
     for q in batch.QUESTIONS:
-        print(f"question: {q.QUESTION}\n")
-        print(f"retrieval_query: {q.RETRIEVAL_QUERY}\n")
+        print(f"question: {q}\n")
         answers = llm_machine.answer_batch_generation().invoke({
             "evidences":example_evidence,
-            "question":q.QUESTION,
+            "question":q,
             "count": 3,
         })
         print(f"\tanswer: {answers.ANSWERS}\n")
         print("---")
         for a in answers.ANSWERS:
             checking = check(a,[example_evidence])
-            print(f"\t{a}: verdict = {checking.verdict} trust = {checking.trust_score}\n")
+            print(f"\tanswer: {a}\n")
+            print(f"\tverdict = {checking.verdict} trust = {checking.trust_score}\n")
