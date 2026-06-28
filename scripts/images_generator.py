@@ -829,7 +829,21 @@ class GraphImageExtractor:
         data = xarray.open_dataset(sample_path,engine='zarr')
         return data
 
-if __name__ == "__main__":
+def generate_images_for_graph(graph_path, samples_path=None):
+    root = Path(__file__).parent.parent.absolute()
+    if samples_path is None:
+        setting_path = root.joinpath('settings.yaml')
+        yaml_helper = YAMLHelper(setting_path)
+        samples_path = yaml_helper.get_data('samples_path')
+    samples_path = Path(samples_path)
+    if not samples_path.is_absolute():
+        samples_path = root / samples_path
+
+    image_extractor = GraphImageExtractor(graph_path, samples_path)
+    return image_extractor.extract_object_images()
+
+
+def generate_images_for_all():
     root = Path(__file__).parent.parent.absolute()
     setting_path = root.joinpath('settings.yaml')
     yaml_helper = YAMLHelper(setting_path)
@@ -837,9 +851,13 @@ if __name__ == "__main__":
     properties_graph_path = root / graphs_path / 'properties_graph'
     samples_path = yaml_helper.get_data('samples_path')
     samples_path = root / samples_path
-    graph_list =list(properties_graph_path.iterdir())
-    # selected_graph_path = graph_list[0]
-    for selected_graph_path in graph_list:
-        image_extractor = GraphImageExtractor(selected_graph_path,samples_path)
-        image_extractor.extract_object_images()
+
+    generated = []
+    for selected_graph_path in sorted(properties_graph_path.glob("*.json")):
+        generated.append(generate_images_for_graph(selected_graph_path, samples_path))
     print('done')
+    return generated
+
+
+if __name__ == "__main__":
+    generate_images_for_all()

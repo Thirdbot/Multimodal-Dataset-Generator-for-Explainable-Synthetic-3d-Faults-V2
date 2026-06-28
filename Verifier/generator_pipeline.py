@@ -18,7 +18,7 @@ from Verifier.rag_verifier import best_doc_score, score_qa_evidence, serialize_d
 DEFAULT_GRAPH_ROOT = ROOT / "graphs" / "properties_2d_graph"
 DEFAULT_OUTPUT = ROOT / "Dataset" / "verified_qa.jsonl"
 MIN_RETRIEVAL_SCORE = 0.6
-QUESTION_PER_GRAPH  = 5
+QUESTION_PER_GRAPH  = 10
 CANDIDATE_PER_GRAPH = 5
 MAX_ROWS_PER_EVIDENCE = 2
 MAX_ATTEMPT = 2 * QUESTION_PER_GRAPH # max attempt for outer loop
@@ -81,9 +81,11 @@ class RagWorkflow(object):
                 continue
 
 
-            for q in question_items:
+            for question_item in question_items:
+                q = question_item.get("question", "")
+                retrieval_query = question_item.get("retrieval_query") or q
                 question_docs = filter_docs_by_retrieval_score(
-                    retrieve_many(q),
+                    retrieve_many(retrieval_query),
                     MIN_RETRIEVAL_SCORE,
                 ) # multiple question evidences
                 if best_doc_score(question_docs) < MIN_RETRIEVAL_SCORE:
@@ -171,9 +173,12 @@ class RagWorkflow(object):
             if not response:
                 return []
             return [
-                item.strip()
+                {
+                    "question": item.QUESTION.strip(),
+                    "retrieval_query": item.RETRIEVAL_QUERY.strip(),
+                }
                 for item in response.QUESTIONS
-                if item.strip()
+                if item.QUESTION.strip()
             ]
         except Exception as error:
             print(f"[QUESTION ERROR] {error}")
