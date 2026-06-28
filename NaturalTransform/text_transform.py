@@ -1,7 +1,12 @@
 import re
 
 
-# Manual edit zone. Keep these maps small and inspectable.
+# ---------------------------------------------------------------------------
+# Manual edit zone
+# ---------------------------------------------------------------------------
+# Keep this file as a small string builder. Add/remove evidence behavior here
+# first, before touching the class logic below.
+
 OBJECT_TYPES = ("fault", "closure")
 
 MODEL_KEYS = {
@@ -13,31 +18,28 @@ MODEL_KEYS = {
     "number_hc_closures",
     "number_fault_intersections",
 }
+
 CLOSURE_KEYS = {
     "fluid",
     "intersects_fault",
     "intersects_onlap",
     "intersects_salt",
 }
+
 FAULT_KEYS = {
     "throw",
     "tilt_pct",
     "shear_zone_width",
     "gouge_pctile",
 }
-VISUAL_KEYS = {
-    "color",
-}
-ALLOWED_PROPERTY_EDGES = MODEL_KEYS | CLOSURE_KEYS | FAULT_KEYS | VISUAL_KEYS
 
-SKIP_EDGES = {
-    "view",
-    "original_fault_index",
-}
+VISUAL_KEYS = set()
 
-LOW_VALUE_EXCEPTIONS = {"salt_inserted"}
 POSITION_EDGES = {"x", "y"}
 EXTENT_EDGES = {"x_min", "x_max", "y_min", "y_max"}
+SKIP_EDGES = {"view", "original_fault_index"}
+LOW_VALUE_EXCEPTIONS = {"salt_inserted"}
+ALLOWED_PROPERTY_EDGES = MODEL_KEYS | CLOSURE_KEYS | FAULT_KEYS | VISUAL_KEYS
 
 NODE_NAMES = {
     "fault": "the fault zone",
@@ -55,7 +57,6 @@ EDGE_LABELS = {
     "tilt_pct": "tilt",
     "shear_zone_width": "shear zone width",
     "gouge_pctile": "gouge percentile",
-    "color": "highlight color",
     "fluid": "fluid",
     "salt_inserted": "salt",
     "number_faults": "faults",
@@ -65,13 +66,12 @@ EDGE_LABELS = {
     "number_fan_episodes": "fan episodes",
 }
 
-EDGE_TEMPLATES = {
+PROPERTY_TEMPLATES = {
     "fault_mode": "{source} is {value}",
     "throw": "{source} has throw of about {value}",
     "tilt_pct": "{source} shows tilt of about {value}",
     "shear_zone_width": "{source} has a shear zone about {value} wide",
     "gouge_pctile": "{source} shows gouge near the {value} percentile",
-    "color": "{source} is highlighted in {value}",
     "fluid": "{source} contains {value}",
 }
 
@@ -87,34 +87,48 @@ BOOLEAN_TEMPLATES = {
     "salt_inserted": "Salt is present",
 }
 
+EDGE_TEMPLATES = {
+    "HAS_VISUAL_OBJECT": "{source} includes a visible {target} feature",
+}
+
+SPECIAL_TOKENS = {
+    "bbox": ("<bbox>", "</bbox>"),
+    "center": ("<center>", "</center>"),
+    "nums": ("<nums>", "</nums>"),
+}
+
 
 class TextTransform(object):
+    """Convert graph relations into inspectable natural evidence strings."""
+
     def relations_to_evidence(self, relations):
         relations = list(relations)
-        evidence = self._grouped_evidence(relations)
-        grouped_ids = {id(relation) for item in evidence for relation in item.pop("_group_relations")}
+        grouped_evidence, grouped_relation_ids = self._grouped_evidence(relations)
+        evidence = list(grouped_evidence)
 
         for relation in relations:
-            if id(relation) in grouped_ids:
+            if id(relation) in grouped_relation_ids:
                 continue
+
             sentence = self.relation_to_sentence(relation)
             if sentence:
                 evidence.append(self._evidence_item(relation, sentence))
+
         return evidence
 
     def relation_to_sentence(self, relation):
-        edge = relation.get("edge")
-        target = relation.get("target")
         if relation.get("trace_type") == "edge":
             return self._edge_sentence(relation)
 
-        if edge not in ALLOWED_PROPERTY_EDGES and edge not in POSITION_EDGES and edge not in EXTENT_EDGES:
-            return None
-        if edge in SKIP_EDGES or self._is_low_value(edge, target):
+        edge = relation.get("edge")
+        target = relation.get("target")
+        if not self._include_property(edge, target):
             return None
 
         source = self.node_name(relation.get("source"))
         return self._property_sentence(source, edge, target)
+
+    # Name and label helpers -------------------------------------------------
 
     def node_name(self, node_id):
         node_id = str(node_id)
@@ -127,6 +141,7 @@ class TextTransform(object):
         if match and match.group(1) in NUMBERED_NODE_NAMES:
             number = int(match.group(2)) + 1
             return NUMBERED_NODE_NAMES[match.group(1)].format(number=number)
+
         return node_id.replace("_", " ")
 
     def edge_label(self, edge):
@@ -139,58 +154,105 @@ class TextTransform(object):
             edge = edge.removeprefix("number_")
         return edge.replace("_", " ")
 
+    # Sentence builders ------------------------------------------------------
+
     def _property_sentence(self, source, edge, target):
-        value = self._value_text(target)
-
         if edge in BOOLEAN_TEMPLATES:
-            return BOOLEAN_TEMPLATES[edge] if self._is_true_value(target) else None
-
+            return self._boolean_sentence(edge, target)
         if edge in COUNT_TEMPLATES:
-            if self._is_false_value(target):
-                return None
-            noun = self.edge_label(edge)
-            return COUNT_TEMPLATES[edge].format(count=self._count_text(target), noun=self._plural(noun, target))
-
-        if edge in EDGE_TEMPLATES:
-            return self._sentence(EDGE_TEMPLATES[edge].format(source=source, value=value))
-
+            return self._count_sentence(edge, target)
+        if edge in PROPERTY_TEMPLATES:
+            return self._template_sentence(
+                PROPERTY_TEMPLATES[edge],
+                source,
+                self._tag_number(target),
+            )
         if str(edge).startswith("intersects_"):
-            target_name = self.edge_label(edge).replace("intersects ", "")
-            verb = "avoids" if self._is_false_value(target) else "intersects"
-            return self._sentence(f"{source} {verb} {target_name}")
-
+            return self._intersection_sentence(source, edge, target)
         return None
+
+    def _boolean_sentence(self, edge, target):
+        if not self._is_true_value(target):
+            return None
+        return self._sentence(BOOLEAN_TEMPLATES[edge])
+
+    def _count_sentence(self, edge, target):
+        if self._is_false_value(target):
+            return None
+
+        noun = self.edge_label(edge)
+        sentence = COUNT_TEMPLATES[edge].format(
+            count=self._tag_number(target),
+            noun=self._plural(noun, target),
+        )
+        return self._sentence(sentence)
+
+    def _template_sentence(self, template, source, value):
+        return self._sentence(template.format(
+            source=source,
+            value=value,
+        ))
+
+    def _intersection_sentence(self, source, edge, target):
+        target_name = self.edge_label(edge).replace("intersects ", "")
+        verb = "avoids" if self._is_false_value(target) else "intersects"
+        return self._sentence(f"{source} {verb} {target_name}")
 
     def _edge_sentence(self, relation):
         edge = relation.get("edge")
-        if edge != "HAS_VISUAL_OBJECT":
+        template = EDGE_TEMPLATES.get(edge)
+        if not template:
             return None
 
-        source = self.node_name(relation.get("source"))
-        target = self.node_name(relation.get("target"))
-        return self._sentence(f"{source} includes a visible {target} feature")
+        sentence = template.format(
+            source=self.node_name(relation.get("source")),
+            target=self.node_name(relation.get("target")),
+        )
+        return self._sentence(sentence)
+
+    # Grouped evidence builders --------------------------------------------
 
     def _grouped_evidence(self, relations):
         evidence = []
-        for source_id, group in self._groups_for(relations, POSITION_EDGES).items():
-            if POSITION_EDGES.issubset(group):
-                target = {edge: group[edge].get("target") for edge in POSITION_EDGES}
-                sentence = (
-                    f"{self.node_name(source_id)} sits near "
-                    f"x={self._value_text(target['x'])} and y={self._value_text(target['y'])}"
-                )
-                evidence.append(self._group_item(source_id, "position", group, self._sentence(sentence)))
+        grouped_relation_ids = set()
 
+        for item in self._position_evidence(relations):
+            evidence.append(item)
+            grouped_relation_ids.update(id(relation) for relation in item.pop("_group_relations"))
+
+        for item in self._extent_evidence(relations):
+            evidence.append(item)
+            grouped_relation_ids.update(id(relation) for relation in item.pop("_group_relations"))
+
+        return evidence, grouped_relation_ids
+
+    def _position_evidence(self, relations):
+        output = []
+        for source_id, group in self._groups_for(relations, POSITION_EDGES).items():
+            if not POSITION_EDGES.issubset(group):
+                continue
+
+            target = {edge: group[edge].get("target") for edge in POSITION_EDGES}
+            sentence = (
+                f"{self.node_name(source_id)} sits near "
+                f"{self._center_text(target['x'], target['y'])}"
+            )
+            output.append(self._group_item(source_id, "position", group, self._sentence(sentence)))
+        return output
+
+    def _extent_evidence(self, relations):
+        output = []
         for source_id, group in self._groups_for(relations, EXTENT_EDGES).items():
-            if EXTENT_EDGES.issubset(group):
-                target = {edge: group[edge].get("target") for edge in EXTENT_EDGES}
-                sentence = (
-                    f"{self.node_name(source_id)} occupies the area from "
-                    f"x={self._value_text(target['x_min'])} to {self._value_text(target['x_max'])} "
-                    f"and y={self._value_text(target['y_min'])} to {self._value_text(target['y_max'])}"
-                )
-                evidence.append(self._group_item(source_id, "extent", group, self._sentence(sentence)))
-        return evidence
+            if not EXTENT_EDGES.issubset(group):
+                continue
+
+            target = {edge: group[edge].get("target") for edge in EXTENT_EDGES}
+            sentence = (
+                f"{self.node_name(source_id)} occupies the area from "
+                f"{self._bbox_text(target['x_min'], target['y_min'], target['x_max'], target['y_max'])}"
+            )
+            output.append(self._group_item(source_id, "extent", group, self._sentence(sentence)))
+        return output
 
     @staticmethod
     def _groups_for(relations, edges):
@@ -200,6 +262,8 @@ class TextTransform(object):
             if edge in edges:
                 groups.setdefault(relation.get("source"), {})[edge] = relation
         return groups
+
+    # Evidence object builders ---------------------------------------------
 
     def _evidence_item(self, relation, sentence):
         return {
@@ -232,6 +296,7 @@ class TextTransform(object):
         source = str(relation.get("source", ""))
         target = str(relation.get("target", ""))
         object_pattern = rf"^({'|'.join(OBJECT_TYPES)})_\d+$"
+
         if re.match(object_pattern, source):
             return source
         if re.match(object_pattern, target):
@@ -239,6 +304,67 @@ class TextTransform(object):
         if source in OBJECT_TYPES:
             return source
         return source
+
+    # Include/filter helpers ------------------------------------------------
+
+    def _include_property(self, edge, target):
+        if edge not in ALLOWED_PROPERTY_EDGES and edge not in POSITION_EDGES and edge not in EXTENT_EDGES:
+            return False
+        if edge in SKIP_EDGES:
+            return False
+        return not self._is_low_value(edge, target)
+
+    @staticmethod
+    def _is_low_value(edge, value):
+        edge = str(edge)
+        if edge in LOW_VALUE_EXCEPTIONS or edge.startswith("intersects_"):
+            return False
+
+        value = str(value).strip().lower()
+        if edge.startswith("number_") and edge != "number_faults":
+            return value in {"0", "0.0"}
+        if edge.endswith("_pct") or edge.startswith("n_voxels_") or edge.endswith("_count"):
+            return value in {"0", "0.0"}
+        return False
+
+    # Value formatting helpers ---------------------------------------------
+
+    @classmethod
+    def _bbox_text(cls, x_min, y_min, x_max, y_max):
+        return cls._tag("bbox", [
+            cls._value_text(x_min),
+            cls._value_text(y_min),
+            cls._value_text(x_max),
+            cls._value_text(y_max),
+        ])
+
+    @classmethod
+    def _center_text(cls, x, y):
+        return cls._tag("center", [
+            cls._value_text(x),
+            cls._value_text(y),
+        ])
+
+    @classmethod
+    def _tag_number(cls, value):
+        return cls._tag("nums", cls._value_text(value)) if cls._is_number(value) else cls._value_text(value)
+
+    @staticmethod
+    def _tag(token_name, value):
+        open_tag, close_tag = SPECIAL_TOKENS[token_name]
+        if isinstance(value, (list, tuple)):
+            value = ",".join(str(item) for item in value)
+        return f"{open_tag}{value}{close_tag}"
+
+    @staticmethod
+    def _is_number(value):
+        if isinstance(value, bool):
+            return False
+        try:
+            float(value)
+        except (TypeError, ValueError):
+            return False
+        return True
 
     @staticmethod
     def _value_text(value):
@@ -276,18 +402,6 @@ class TextTransform(object):
         if not text:
             return text
         return text[0].upper() + text[1:]
-
-    @staticmethod
-    def _is_low_value(edge, value):
-        edge = str(edge)
-        if edge in LOW_VALUE_EXCEPTIONS or edge.startswith("intersects_"):
-            return False
-        value = str(value).strip().lower()
-        if edge.startswith("number_") and edge != "number_faults":
-            return value in {"0", "0.0"}
-        if edge.endswith("_pct") or edge.startswith("n_voxels_") or edge.endswith("_count"):
-            return value in {"0", "0.0"}
-        return False
 
     @staticmethod
     def _is_true_value(value):
