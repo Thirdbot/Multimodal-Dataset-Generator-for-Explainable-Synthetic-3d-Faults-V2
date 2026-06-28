@@ -28,19 +28,12 @@ AnswerBatchParser = PydanticOutputParser(pydantic_object=AnswerBatchStructure)
 ReasonParser = PydanticOutputParser(pydantic_object=ReasonStructure)
 
 MASTER_PROMPT = """
-You are a geophysicist reading evidence statements from a seismic interpretation workflow.
-Use only the Evidences input as factual ground.
-Write naturally, as a scientist explaining what the evidence says.
-You may vary wording and style, but do not invent objects, values, causes, or geological events.
+You are a geophysicist using only the Evidences as factual ground.
+Never invent objects, values, causes, or events.
 Do not mention graph, metadata, database, generated data, synthetic data, prompt, or verification.
-Evidence sentences may contain markup:
-- <object>...</object> marks the geological object being described.
-- <nums>...</nums> marks numeric counts or measured properties.
-- <center>...</center> marks a visible 2D object center.
-- <bbox>...</bbox> marks a visible 2D region box.
-Treat these tags as evidence annotations.
-Questions must sound natural and must not copy the tags.
-Answers and reasoning may preserve the tags when they report a tagged object, value, center, or region from evidence.
+Evidence tags: <object>...</object>, <nums>...</nums>, <center>...</center>, <bbox>...</bbox>.
+Questions must be natural and must not copy tags.
+Answers and reasoning MUST copy tagged spans exactly when using tagged evidence.
 """
 
 answer_batch_generation_prompt = """
@@ -59,16 +52,16 @@ Generate candidate answers to one seismic interpretation question using only the
 
 Rules:
 - Generate up to {count} answers.
-- Each answer should be one natural sentence.
-- Each answer must directly answer the same Question.
-- Every answer must be supported by Evidences.
-- Answers may vary in wording, but each one must stay faithful to the same evidence.
-- Use the same objects, quantities, properties, regions, or colors stated in Evidences.
-- If an answer reports an object marked with <object>, keep the tag around that exact object name.
-- If an answer reports a value or region marked with <nums>, <center>, or <bbox>, keep the tag around that exact value.
-- Do not remove evidence tags from objects, values, centers, or regions that appear in the answer.
-- Do not invent facts outside Evidences.
-- Do not add causes or interpretations that are not stated in Evidences.
+- One sentence per answer.
+- Directly answer Question using only Evidences.
+- Every factual word in the answer must be supported by Evidences.
+- If Evidences do not answer the Question, return {{"ANSWERS":[]}}.
+- Do not guess missing objects, counts, locations, regions, properties, fluids, or interpretations.
+- Do not combine facts from different objects unless Evidences explicitly connect them.
+- If using a tagged object/value/center/box, copy the full tagged span exactly.
+- Do not unwrap, rewrite, round, or paraphrase tagged spans.
+- Do not replace a tagged value with an untagged value.
+- Do not add unstated causes or interpretations.
 
 Evidences:
 {evidences}
@@ -89,53 +82,25 @@ Output contract:
 - The first character must be {{ and the last character must be }}.
 - Do not use markdown.
 - Do not write text before or after the JSON object.
-- Required shape: {{"QUESTIONS":[{{"QUESTION":"natural visual question?","RETRIEVAL_QUERY":"compact evidence lookup terms"}}]}}
+- Required shape: {{"QUESTIONS":[{{"QUESTION":"natural visual question?","RETRIEVAL_QUERY":"evidence-like retrieval sentence"}}]}}
 
 Generate seismic interpretation questions from the provided evidences.
 
 Rules:
 - Generate up to {count} questions.
-- Each item must include QUESTION and RETRIEVAL_QUERY.
-- QUESTION is for a user looking at seismic image(s). It can be broad or concise, but must be answerable from Evidences.
-- RETRIEVAL_QUERY is for evidence lookup. It should be compact, direct, and use object names, property names, and tagged evidence terms.
-- RETRIEVAL_QUERY may include exact object names, property words, and tag words such as object, nums, center, bbox.
-- RETRIEVAL_QUERY should not be conversational.
-- Simulate GroundVQA-style curiosity: ask about the visible object, region, count, location, class, mask, or interpreted feature.
-- QUESTION must not sound like it already knows the answer.
-- If Evidences only mention onlap, ask only about onlap.
-- If Evidences only mention salt, ask only about salt.
-- If Evidences only mention a highlighted color or region, ask about that visual evidence.
-- Do not ask about faults, closures, salt, onlap, fans, fluids, colors, or locations unless those words or facts appear in Evidences.
-- Each question should ask about one clear answerable target.
-- Every question must be directly answerable from Evidences.
-- Questions are prompts for a user who has not seen the evidence values.
-- The question must ask what the value/location/class/count is, not reveal it.
-- Prefer open visual question forms such as "What is visible...", "Where is...", "Which feature...", "How many...", "What kind of...", "Does the image show...".
-- Questions must be unique.
-- If there are fewer unique evidence facts than {count}, return fewer questions.
-- Use natural geological wording.
-- Ask what the interpreter sees in the evidence statements.
-- Convert evidence facts into image-facing questions.
-- It is okay to ask about counts, object attributes, intersections, locations, colors, regions, and visible masks only when those facts are in Evidences.
-- Do not include the answer inside QUESTION.
-- Do not copy exact evidence values into the question.
-- Do not put coordinates, bounding boxes, throw values, percentages, fluid names, colors, or counts in the question.
-- Never write x=, y=, x_min, y_min, x_max, y_max, bbox, coordinate values, or "from x ... to ..." in QUESTION.
-- Never copy <object>, <nums>, <center>, or <bbox> into QUESTION.
-- Never ask a question that already contains the location, area, amount, or property value.
-- Ask for the missing value, not with the value.
-- Do not copy object types from examples; use only object types present in Evidences.
-- Do not ask cause questions unless the cause is explicitly stated in Evidences.
-- Make RETRIEVAL_QUERY match the expected evidence sentences, for example "Fault 1 object throw nums", "Closure 1 object bbox center fluid", or "onlap count nums".
-- If QUESTION asks where something is, RETRIEVAL_QUERY must include center or bbox.
-- If QUESTION asks how many, RETRIEVAL_QUERY must include count or nums.
-- If QUESTION asks what type/class/fluid/property, RETRIEVAL_QUERY must include that property word.
+- Each item has QUESTION and RETRIEVAL_QUERY.
+- QUESTION: natural GroundVQA-style visual question; no tags; no exact values; no answer leakage.
+- QUESTION asks one answerable thing visible or described in Evidences.
+- Use only object/property types present in Evidences.
+- RETRIEVAL_QUERY: 1 to 3 evidence-like sentence queries, one per line.
+- RETRIEVAL_QUERY may use object names and tag words: object, nums, center, bbox.
+- RETRIEVAL_QUERY must not be a keyword bag.
 
 Good:
-{{"QUESTIONS":[{{"QUESTION":"What geological feature is visible in the highlighted region?","RETRIEVAL_QUERY":"highlighted region object bbox"}},{{"QUESTION":"How many visible episodes can be interpreted from the section?","RETRIEVAL_QUERY":"onlap episodes count nums"}},{{"QUESTION":"Where is the highlighted feature located?","RETRIEVAL_QUERY":"highlighted feature center bbox"}}]}}
+{{"QUESTIONS":[{{"QUESTION":"What geological feature is visible in this region?","RETRIEVAL_QUERY":"The section includes a visible object feature\nThe object occupies the area from bbox"}},{{"QUESTION":"How many visible episodes can be interpreted from the section?","RETRIEVAL_QUERY":"The layering shows nums onlap episodes"}},{{"QUESTION":"Where is the feature located?","RETRIEVAL_QUERY":"The feature sits near center\nThe feature occupies the area from bbox"}}]}}
 
 Bad:
-{{"QUESTIONS":[{{"QUESTION":"Does the object sit at x=43 and y=112?","RETRIEVAL_QUERY":"x=43 y=112"}},{{"QUESTION":"The onlap is yellow, right?","RETRIEVAL_QUERY":"onlap yellow"}}]}}
+{{"QUESTIONS":[{{"QUESTION":"Does the object sit at x=43 and y=112?","RETRIEVAL_QUERY":"x=43 y=112"}},{{"QUESTION":"The onlap is yellow, right?","RETRIEVAL_QUERY":"onlap yellow"}},{{"QUESTION":"Where is the feature?","RETRIEVAL_QUERY":"feature center bbox object nums"}}]}}
 
 Evidences:
 {evidences}
@@ -159,13 +124,11 @@ Create a concise reasoning note that connects the Evidences to the Answer.
 
 Rules:
 - This is for audit and dataset explanation.
-- Use two to four natural sentences.
-- Mention the evidence facts that support the answer.
-- If reasoning cites an object marked with <object>, keep the tag around that exact object name.
-- If reasoning cites a value or region marked with <nums>, <center>, or <bbox>, keep the tag around that exact value.
-- Do not remove evidence tags from objects, values, centers, or regions that appear in the reasoning.
-- Do not add unstated causes, processes, or interpretations.
-- Keep the conclusion aligned with the Answer.
+- Use one to three short sentences.
+- Explain which evidence supports the Answer.
+- If using a tagged object/value/center/box, copy the full tagged span exactly.
+- Do not unwrap, rewrite, round, or paraphrase tagged spans.
+- Do not add unstated causes or interpretations.
 
 Evidences:
 {evidences}
@@ -182,7 +145,7 @@ Return only JSON now:
 
 multimodal_qa_instruction = (
     "Interpret the provided seismic images and answer the question. "
-    "Use the visible geological features, masks, overlays, and highlighted regions "
+    "Use the visible geological features, masks, overlays, and regions "
     "when they are provided, and give a direct seismic interpretation answer."
 )
 
@@ -222,7 +185,7 @@ class LLMMachine:
         self.DEFAULT_VLLM_ENDPOINT = "http://localhost:8000/v1"
         self.temp = 0.2 # lower the better logic
         self.top_p = 0.95 # higher the better fluency
-        self.max_tok = 128
+        self.max_tok = 256
         self.presence_penalty = 1 # -2,2 avoid repetition
         self.frequency_penalty = 0.2 # -2,2 more natural
         self.n = 1 # single response

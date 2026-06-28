@@ -25,7 +25,7 @@ def serialize_docs(docs):
     return [
         {
             "text": doc.page_content,
-            "score": float(doc.metadata.get("_similarity_score", 0.0)),
+            "score": float(doc.metadata.get("trust_score", 0.0)),
             "trace_type": doc.metadata.get("trace_type"),
             "source": doc.metadata.get("source"),
             "object_id": doc.metadata.get("object_id"),

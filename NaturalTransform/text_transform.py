@@ -1,5 +1,6 @@
 import re
 
+from langchain_classic.schema.runnable import retry
 
 # ---------------------------------------------------------------------------
 # Manual edit zone
@@ -42,8 +43,8 @@ LOW_VALUE_EXCEPTIONS = {"salt_inserted"}
 ALLOWED_PROPERTY_EDGES = MODEL_KEYS | CLOSURE_KEYS | FAULT_KEYS | VISUAL_KEYS
 
 NODE_NAMES = {
-    "fault": "the fault zone",
-    "closure": "the closure zone",
+    "fault": "fault",
+    "closure": "closure",
 }
 
 NUMBERED_NODE_NAMES = {
@@ -356,7 +357,9 @@ class TextTransform(object):
         open_tag, close_tag = SPECIAL_TOKENS[token_name]
         if isinstance(value, (list, tuple)):
             value = ",".join(str(item) for item in value)
-        return f"{open_tag}{value}{close_tag}"
+        else:
+            return f"{open_tag}{value}{close_tag}"
+        return f"{open_tag}[{value}]{close_tag}"
 
     @staticmethod
     def _is_number(value):

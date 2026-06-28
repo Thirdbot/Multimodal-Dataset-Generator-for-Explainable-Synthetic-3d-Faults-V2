@@ -6,7 +6,6 @@ import hashlib
 from pathlib import Path
 
 from longtracer import LongTracer, check
-from sqlalchemy.ext.asyncio import result
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -85,7 +84,10 @@ class RagWorkflow(object):
             for question_item in question_items:
                 q = question_item.get("question", "")
                 retrieval_query = question_item.get("retrieval_query") or q
-                question_docs = retrieve_many(retrieval_query) # multiple question evidences
+                question_docs = filter_docs_by_retrieval_score(
+                    retrieve_many(retrieval_query),
+                    MIN_RETRIEVAL_SCORE,
+                ) # multiple question evidences
                 if best_doc_score(question_docs) < MIN_RETRIEVAL_SCORE:
                     print("[REJECT] question:",q)
                     continue
@@ -215,9 +217,12 @@ class RagWorkflow(object):
 
                 if score_qa_evidence(question_docs, answer_docs) < 0.7:
                     continue
-
-                all_docs = dedupe_docs([*question_docs, *answer_docs])
-                docs,verification = verify_answer(a, all_docs) # answer verify evidences
+                used_docs = filter_docs_by_retrieval_score([*answer_docs,*question_docs], MIN_RETRIEVAL_SCORE)
+                filter_by_trust_docs = dedupe_docs(filter_docs_by_trust(a, used_docs))
+                if not filter_by_trust_docs:
+                    continue
+                verification_text = docs_to_text(filter_by_trust_docs)
+                verification = verify_answer(a, verification_text) # answer verify evidences
             except Exception as error:
                 print(f"\t[ANSWER CHECK ERROR] {a}: {error}")
                 continue
@@ -227,7 +232,7 @@ class RagWorkflow(object):
 
             answers.append({
                 "answer": a,
-                "docs": docs,
+                "docs": filter_by_trust_docs,
                 "verification": verification,
             })
 
@@ -309,27 +314,31 @@ def docs_to_text(docs):
     return "\n".join(doc.page_content for doc in docs)
 
 
-# def filter_docs_by_score(docs, min_score):
-#     return [
-#         doc for doc in docs
-#         if float(doc.metadata.get("_similarity_score", 0.0)) >= min_score
-#     ]
+def filter_docs_by_retrieval_score(docs, min_score):
+    return [
+        doc for doc in docs
+        if float(doc.metadata.get("_similarity_score", 0.0)) >= min_score
+    ]
 
 
-def verify_answer(answer, all_docs,trust=0.6):
+def filter_docs_by_trust(answer, docs, min_trust=0.7):
     kept = []
-    verdict = ""
-    score = 0.0
-    for doc in all_docs:
+    for doc in docs:
         result = check(answer, [doc.page_content])
-        if getattr(result, "verdict", "") == "PASS" and float(getattr(result, "trust_score", 0.0)) >=  trust:
+        trust_score = float(getattr(result, "trust_score", 0.0) or 0.0)
+
+        if getattr(result, "verdict", "") == "PASS" and trust_score >= min_trust:
+            doc.metadata['trust_score'] = trust_score
             kept.append(doc)
-            verdict = getattr(result, "verdict", "")
-            score = float(getattr(result, "trust_score", 0.0) or 0.0)
-    return kept,{
-        "verdict": verdict,
-        "score": score
-        }
+    return kept
+
+
+def verify_answer(answer, evidence_text):
+    result = check(answer, [evidence_text])
+    return {
+        "verdict": getattr(result, "verdict", ""),
+        "score": float(getattr(result, "trust_score", 0.0) or 0.0),
+    }
 
 
 def sample_id_from_graph(graph_path):

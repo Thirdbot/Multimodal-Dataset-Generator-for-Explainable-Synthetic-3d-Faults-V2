@@ -18,17 +18,16 @@ INSTRUCTION = (
     "Inspect the seismic image(s) and answer the question using grounded visual evidence. "
     "Before the final answer, output one <region>...</region> block for each image region "
     "that supports the answer. In each region, use this order: <object>...</object>, "
-    "<class_id>...</class_id>, <color>...</color>, one or more <evidence>...</evidence> "
+    "<class_id>...</class_id>, one or more <evidence>...</evidence> "
     "facts explaining why the region matters, <bbox>[x_min, y_min, x_max, y_max]</bbox>, "
     "and exactly one <SEG> token. The bbox and <SEG> ground the evidence region to its "
     "mask, so every region must correspond to one mask. After all regions, output one "
     "concise <answer>...</answer>. Do not write markdown or prose outside these tags."
 )
 
-MIN_SCORE = 0.4
-OBJECT_TYPES = {"fault", "closure", "salt", "onlap", "lithology", "age_depth"}
+OBJECT_TYPES = {"fault", "closure", "salt", "onlap", "lithology"}
 
-CLASS_IDS = {"fault": 1, "closure": 2, "salt": 3, "onlap": 4, "lithology": 5, "age_depth": 6}
+CLASS_IDS = {"fault": 1, "closure": 2, "salt": 3, "onlap": 4, "lithology": 5}
 
 CLASS_COLORS = {
     1: "red",
@@ -78,6 +77,7 @@ def build_row(item):
     regions_box = ""
     used_indices = []
 
+    evidence_text = ""
     for region in regions:
         matching_evidences = [
             evidence for evidence in evidences
@@ -91,21 +91,14 @@ def build_row(item):
             continue
         used_indices.append(image_idx)
 
-        object_name = region.get("object_type") or region.get("class_name") or ""
-        class_id = region.get("class_id", "")
-        class_color = region.get("class_color", "")
-        bbox = region.get("bbox") or []
-        evidence_text = "\n".join(
-            f"<evidence>{evidence.get('text', '')}</evidence>"
+        evidence_texts = evidence_text.join(
+            f"{evidence.get('text', '')}.\n"
             for evidence in matching_evidences
         )
+        # evidence_tokens = f"<evidence>{evidence_texts}</evidence>"
         regions_box += (
             "<region>\n"
-            f"<object>{object_name}</object>\n"
-            f"<class_id>{class_id}</class_id>\n"
-            f"<color>{class_color}</color>\n"
-            f"{evidence_text}\n"
-            f"<bbox>{json.dumps(bbox)}</bbox>\n"
+            f"{evidence_texts}"
             "<SEG>\n"
             "</region>\n"
         )
@@ -134,22 +127,23 @@ def build_row(item):
 def collect_image_items(sample_dir, view, category, evidence):
     items, seen = [], set()
     for evidence_item in evidence:
-        if evidence_score(evidence_item) < MIN_SCORE:
-            continue
         object_id = evidence_item.get("object_id") or evidence_item.get("source") or ""
         edge = evidence_item.get("edge") or evidence_item.get("fact_name") or ""
-        for object_type, object_name, role in requested_objects(object_id, edge, category):
+        target = evidence_item.get("target") or ""
+        for object_type, object_name, role in requested_objects(object_id, edge, target, category):
             add_image_item(items, seen, sample_dir, view, object_type, object_name, role)
 
     return items
 
 
-def requested_objects(object_id, edge, category):
+def requested_objects(object_id, edge, target, category):
     if is_object_id(object_id):
         object_type = object_id.split("_", 1)[0]
         return [(object_type, object_id, "evidence")]
     if object_id in OBJECT_TYPES:
         return [(object_id, object_id, "context")]
+    if edge == "HAS_VISUAL_OBJECT" and target in OBJECT_TYPES:
+        return [(target, target, "evidence")]
     if str(object_id).startswith("category:"):
         return [(object_type, object_type, "context") for object_type in EDGE_TYPES.get(edge, CATEGORY_TYPES.get(category, []))]
     return []
@@ -171,8 +165,6 @@ def add_image_item(items, seen, sample_dir, view, object_type, object_id, role):
         "view": view,
         "role": role,
         "class_id": class_id,
-        "class_name": object_type,
-        "class_color": CLASS_COLORS.get(class_id, "white"),
         "image": image.as_posix(),
         "mask": mask.as_posix(),
     })
@@ -196,11 +188,6 @@ def collect_regions(sample_dir, image_items):
             "view": image_item["view"],
             "object_id":image_item["object_id"],
             "class_id": position.get("class_id", image_item["class_id"]),
-            "class_name": position.get("class_name", image_item["class_name"]),
-            "class_color": CLASS_COLORS.get(
-                int(position.get("class_id", image_item["class_id"]) or 0),
-                image_item.get("class_color", "white"),
-            ),
             "bbox": [bbox.get("x_min"), bbox.get("y_min"), bbox.get("x_max"), bbox.get("y_max")],
             "center": [center.get("x"), center.get("y")],
         })
@@ -246,6 +233,8 @@ def evidence_matches_region(evidence, region):
     if evidence_object_id == region_object_id:
         return True
     if evidence_object_id == region_object_type:
+        return True
+    if evidence.get("edge") == "HAS_VISUAL_OBJECT" and str(evidence.get("target")) == region_object_type:
         return True
     if is_object_id(evidence_object_id):
         return False
