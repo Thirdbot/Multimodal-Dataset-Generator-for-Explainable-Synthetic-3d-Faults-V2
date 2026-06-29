@@ -16,7 +16,19 @@ PROPERTIES_GRAPH_DIR = ROOT / "graphs" / "properties_graph"
 IMAGE_OBJECT_DIR = ROOT / "build_objects" / "images"
 OUTPUT_DIR = ROOT / "graphs" / "properties_2d_graph"
 VIEWS = ("inline", "crossline", "timeslice")
-EXCLUDED_VISUAL_OBJECTS = {"age_depth"}
+# Visual-only objects can be much noisier than DB-backed objects.
+# Recommended policy for a cleaner fault/closure dataset:
+# - fault: keep global and local objects
+# - closure: keep global and local objects
+# - salt: keep aggregate/global visual context
+# - onlap: keep aggregate/count evidence, but avoid numbered components
+# - lithology: usually exclude from local visual QA unless explicitly needed
+# - age_depth: exclude because it is broad background context, not an object
+EXCLUDED_VISUAL_OBJECTS = {
+    "age_depth",
+    "onlap",  # broad aggregate visual evidence; comment this line back in if needed
+    "lithology",  # broad facies volume; too noisy for current object-level QA
+}
 
 
 def main():
@@ -79,6 +91,8 @@ def _load_positions(sample_id):
 def _skip_visual_component(object_id, object_type):
     # Onlap connected components can explode into hundreds of unstable slices.
     # Keep the aggregate "onlap" object and drop numbered visual-only parts.
+    # If lithology becomes too broad during generation, apply the same aggregate
+    # policy here or add it to EXCLUDED_VISUAL_OBJECTS above.
     return object_type == "onlap" and re.match(r"^onlap_\d+$", str(object_id))
 
 

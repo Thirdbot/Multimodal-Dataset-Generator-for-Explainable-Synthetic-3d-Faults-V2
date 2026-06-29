@@ -14,8 +14,8 @@ MODEL_KEYS = {
     "number_faults",
     "fault_mode",
     "salt_inserted",
-    "number_onlap_episodes",
-    "number_fan_episodes",
+    # "number_onlap_episodes",  # too broad/noisy for current QA generation
+    # "number_fan_episodes",  # lithology/depositional evidence is broad for now
     "number_hc_closures",
     "number_fault_intersections",
 }
@@ -62,9 +62,9 @@ EDGE_LABELS = {
     "salt_inserted": "salt",
     "number_faults": "faults",
     "number_hc_closures": "hydrocarbon closures",
-    "number_onlap_episodes": "onlap episodes",
+    # "number_onlap_episodes": "onlap episodes",
     "number_fault_intersections": "fault intersections",
-    "number_fan_episodes": "fan episodes",
+    # "number_fan_episodes": "fan episodes",
 }
 
 PROPERTY_TEMPLATES = {
@@ -79,9 +79,9 @@ PROPERTY_TEMPLATES = {
 COUNT_TEMPLATES = {
     "number_faults": "The section shows {count} {noun}",
     "number_hc_closures": "The section contains {count} {noun}",
-    "number_onlap_episodes": "The layering shows {count} {noun}",
+    # "number_onlap_episodes": "The layering shows {count} {noun}",
     "number_fault_intersections": "Faults intersect {count} {noun}",
-    "number_fan_episodes": "The section shows {count} {noun}",
+    # "number_fan_episodes": "The section shows {count} {noun}",
 }
 
 BOOLEAN_TEMPLATES = {

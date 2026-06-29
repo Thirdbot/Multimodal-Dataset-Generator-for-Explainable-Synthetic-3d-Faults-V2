@@ -24,9 +24,27 @@ INSTRUCTION = (
     "the shown regions."
 )
 
-OBJECT_TYPES = {"fault", "closure", "salt", "onlap", "lithology"}
+# Visual-object policy notes:
+# - fault and closure are the strongest object-grounded dataset targets.
+# - salt can be useful as aggregate visual context.
+# - onlap should usually stay aggregate/count-based, not many local components.
+# - lithology is broad and can over-expand rows; remove it from these maps if it
+#   starts dominating evidence/image selection.
+OBJECT_TYPES = {
+    "fault",
+    "closure",
+    "salt",
+    # "onlap",  # broad visual context; keep out of object-level dataset rows for now
+    # "lithology",  # broad volume; too noisy for current region-grounded rows
+}
 
-CLASS_IDS = {"fault": 1, "closure": 2, "salt": 3, "onlap": 4, "lithology": 5}
+CLASS_IDS = {
+    "fault": 1,
+    "closure": 2,
+    "salt": 3,
+    # "onlap": 4,
+    # "lithology": 5,
+}
 
 CLASS_COLORS = {
     1: "red",
@@ -44,9 +62,9 @@ CATEGORY_TYPES = {
     "fault_complex": ["fault", "closure"],
     "salt_only": ["salt", "closure"],
     "salt_fault_mixed": ["fault", "salt", "closure"],
-    "onlap": ["onlap", "closure"],
-    "depositional": ["closure", "lithology"],
-    "full_mixed": ["fault", "salt", "onlap", "closure"],
+    "onlap": ["closure"],  # "onlap" commented out: aggregate/count evidence only for now
+    "depositional": ["closure"],  # "lithology" commented out: broad/noisy visual evidence
+    "full_mixed": ["fault", "salt", "closure"],  # "onlap" commented out
 }
 EDGE_TYPES = {
     "number_faults": ["fault"],
@@ -55,8 +73,8 @@ EDGE_TYPES = {
     "salt_inserted": ["salt"],
     "number_hc_closures": ["closure"],
     "fluid": ["closure"],
-    "number_onlap_episodes": ["onlap"],
-    "number_fan_episodes": ["lithology"],
+    # "number_onlap_episodes": ["onlap"],
+    # "number_fan_episodes": ["lithology"],
 }
 
 

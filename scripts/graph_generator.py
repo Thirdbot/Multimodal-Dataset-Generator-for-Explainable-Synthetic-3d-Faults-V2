@@ -20,8 +20,8 @@ MODEL_KEYS = {
             "number_faults",
             "fault_mode",
             "salt_inserted",
-            "number_onlap_episodes",
-            "number_fan_episodes",
+            # "number_onlap_episodes",  # too broad/noisy for current QA generation
+            # "number_fan_episodes",  # maps to broad lithology/depositional evidence
             "number_hc_closures",
             "number_fault_intersections",
             "fault_voxel_count_list",
