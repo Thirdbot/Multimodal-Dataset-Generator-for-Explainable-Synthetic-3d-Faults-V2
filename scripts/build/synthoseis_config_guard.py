@@ -13,7 +13,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 
-ROOT = Path(__file__).parent.parent
+ROOT = Path(__file__).resolve().parents[2]
 SYNTHOSEIS_ROOT = ROOT / "third_party" / "synthoseis"
 if str(SYNTHOSEIS_ROOT) not in sys.path:
     sys.path.insert(0, str(SYNTHOSEIS_ROOT))

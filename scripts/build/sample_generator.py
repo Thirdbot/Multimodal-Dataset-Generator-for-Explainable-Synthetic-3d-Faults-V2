@@ -1,36 +1,34 @@
-"""Watch recipe files and run Synthoseis builds for their referenced configs.
+"""Run Synthoseis builds once for the configs referenced by recipe files.
 
-The watcher treats each recipe as the orchestration unit. When a recipe appears,
-each listed build config is sent through the guarded Synthoseis build wrapper,
+Each recipe is treated as the orchestration unit. Every listed build config is
+sent through the guarded Synthoseis build wrapper,
 then success/failed YAML trackers are updated for downstream graph extraction.
 """
 
 import json
-import shutil
-import hashlib
 
 import yaml
-from watchdog.events import FileSystemEventHandler
-import time
-from logger_color import logger
 import sys
 from pathlib import Path
 
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
-from yaml_helper import YAMLHelper
-from watchdog.observers import Observer
+from scripts.common.logger_color import logger
+from scripts.common.yaml_helper import YAMLHelper
 
-SYNTHOSEIS_ROOT = Path(__file__).parent.parent / "third_party" / "synthoseis"
+SYNTHOSEIS_ROOT = ROOT / "third_party" / "synthoseis"
 sys.path.insert(0, str(SYNTHOSEIS_ROOT))
 from main import build_model
-from synthoseis_config_guard import guarded_build_model
+from scripts.build.synthoseis_config_guard import guarded_build_model
 
 
-class SampleBuildRunner(FileSystemEventHandler):
-    """Watchdog handler that converts recipe file events into build jobs."""
+class SampleBuildRunner:
+    """Convert recipe files into build jobs."""
 
     def __init__(self, recipes_path):
-        self.root = Path(__file__).parent.parent
+        self.root = ROOT
         self.recipes_path = self._resolve_path(recipes_path)
         self.recipes_name_path = None
         self.parent_path = self.recipes_path.parent
@@ -46,24 +44,11 @@ class SampleBuildRunner(FileSystemEventHandler):
 
         self.recipe_cache = {}
 
-        self.last_event_time = {}
-
     def _resolve_path(self, path):
         path = Path(path)
         if path.is_absolute():
             return path
         return self.root / path
-
-    # de-bouncing
-    def _should_skip(self, path, seconds=2):
-        now = time.time()
-        last = self.last_event_time.get(path, 0)
-
-        if now - last < seconds:
-            return True
-
-        self.last_event_time[path] = now
-        return False
 
     def _build_sample(self, build_config_path, run_id):
         """Run one Synthoseis config and track the resulting build folder."""
@@ -108,15 +93,12 @@ class SampleBuildRunner(FileSystemEventHandler):
 
             return False
 
-    # event only create
-    def on_created(self, event):
-        if event.is_directory:
-            return
-
-        path = Path(event.src_path)
+    def process_recipe(self, path):
+        """Build every sample listed in one recipe YAML."""
+        path = Path(path)
         if path.suffix != ".yaml":
             return
-        time.sleep(0.2)
+
         yaml_helper = YAMLHelper(path)
         population = yaml_helper.get_data("population")
         samples = population['samples']
@@ -135,40 +117,25 @@ class SampleBuildRunner(FileSystemEventHandler):
                 self.recipe_cache[path]["build_configs"][sample] = build_config
             self._build_sample(build_config_path, f"{path.stem}_{sample}")
 
-        self.last_event_time[path] = time.time()
+    def process_existing_recipes(self):
+        """Run all current recipe YAML files once."""
+        if not self.recipes_path.exists():
+            logger.warning(f"[SKIPPING] -> Path: {self.recipes_path}")
+            return
 
-def watch_recipes(recipes_path):
-    """Start a persistent watchdog observer over the recipe directory."""
-    observer = Observer()
-    recipe_build_runner = SampleBuildRunner(recipes_path)
-    path = recipe_build_runner.recipes_path
+        logger.info(f"[RUN ONCE] -> Recipes: {self.recipes_path}")
+        for recipe_path in sorted(self.recipes_path.glob("*.yaml")):
+            self.process_recipe(recipe_path)
 
-    if path.exists():
-        logger.info(f"[NOW MONITORING] -> Path: {path}")
-        observer.schedule(
-            recipe_build_runner,
-            path,
-            recursive=True,
-        )
-    else:
-        logger.warning(f"[SKIPPING] -> Path: {path}")
 
-    observer.start()
-
-    try:
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        logger.error(f"[STOPPING]")
-    finally:
-        observer.stop()
-        observer.join()
+def run_recipes_once(recipes_path):
+    """Build samples for all existing recipes and exit."""
+    SampleBuildRunner(recipes_path).process_existing_recipes()
 
 if __name__ == "__main__":
-    # Entry point used during live generation: watch recipes and build samples.
-    setting_path = Path(__file__).parent.parent.joinpath('settings.yaml')
+    # One-shot entry point: build samples for existing recipes and exit.
+    setting_path = ROOT.joinpath('settings.yaml')
     yaml_helper = YAMLHelper(setting_path)
     recipes_path = yaml_helper.get_data('recipes_path')
 
-    # watch over update in recipes
-    watch_recipes(recipes_path)
+    run_recipes_once(recipes_path)

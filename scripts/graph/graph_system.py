@@ -12,7 +12,7 @@ from pathlib import Path
 from ast import literal_eval
 import networkx as nx
 
-from yaml_helper import YAMLHelper
+from scripts.common.yaml_helper import YAMLHelper
 
 
 class GraphSystem:

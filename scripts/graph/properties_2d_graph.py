@@ -11,7 +11,7 @@ import re
 from pathlib import Path
 
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[2]
 PROPERTIES_GRAPH_DIR = ROOT / "graphs" / "properties_graph"
 IMAGE_OBJECT_DIR = ROOT / "build_objects" / "images"
 OUTPUT_DIR = ROOT / "graphs" / "properties_2d_graph"

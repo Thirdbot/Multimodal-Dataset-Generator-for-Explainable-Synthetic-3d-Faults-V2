@@ -6,12 +6,16 @@ folder from the graph filename. Image extraction is intentionally still a stub.
 """
 
 import json
+import os
 from pathlib import Path
-from yaml_helper import YAMLHelper
+from scripts.common.yaml_helper import YAMLHelper
 import re
 import xarray
 import numpy as np
 from scipy import ndimage
+
+os.environ.setdefault("MPLCONFIGDIR", "/tmp/mpl")
+
 import matplotlib.pyplot as plt
 from PIL import Image
 try:
@@ -830,7 +834,7 @@ class GraphImageExtractor:
         return data
 
 def generate_images_for_graph(graph_path, samples_path=None):
-    root = Path(__file__).parent.parent.absolute()
+    root = Path(__file__).resolve().parents[2]
     if samples_path is None:
         setting_path = root.joinpath('settings.yaml')
         yaml_helper = YAMLHelper(setting_path)
@@ -844,7 +848,7 @@ def generate_images_for_graph(graph_path, samples_path=None):
 
 
 def generate_images_for_all():
-    root = Path(__file__).parent.parent.absolute()
+    root = Path(__file__).resolve().parents[2]
     setting_path = root.joinpath('settings.yaml')
     yaml_helper = YAMLHelper(setting_path)
     graphs_path = yaml_helper.get_data('graphs_path')

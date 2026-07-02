@@ -6,11 +6,16 @@ settings.yaml -> category controls -> build_configs/*.json + recipes/*.yaml.
 
 from pathlib import Path
 import uuid
+import sys
 
 import yaml
 
-from logger_color import logger
-from yaml_helper import YAMLHelper
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts.common.logger_color import logger
+from scripts.common.yaml_helper import YAMLHelper
 from typing import Literal
 import json
 
@@ -444,7 +449,7 @@ high_level_controls = {
 if __name__ == "__main__":
     # CLI entry point: load settings, initialize the parameter template, then
     # populate a recipe plus the referenced JSON build configs.
-    setting_path = Path(__file__).parent.parent.joinpath('settings.yaml')
+    setting_path = ROOT.joinpath('settings.yaml')
     yaml_helper = YAMLHelper(setting_path)
 
     recipes_path = yaml_helper.get_data('recipes_path' )# store all high-level configuration (type-sample)

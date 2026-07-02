@@ -7,7 +7,7 @@ it preserves rows by table so graph_generator.py can decide what to keep.
 import json
 import sqlite3
 
-from yaml_helper import YAMLHelper
+from scripts.common.yaml_helper import YAMLHelper
 from pathlib import Path
 
 class ParameterDbTracer(object):
@@ -22,7 +22,7 @@ class ParameterDbTracer(object):
 
         self.sample_name = self.path.stem
 
-        setting_path = Path(__file__).parent.parent.joinpath("settings.yaml")
+        setting_path = Path(__file__).resolve().parents[2].joinpath("settings.yaml")
         yaml_helper = YAMLHelper(setting_path)
         graphs_path = yaml_helper.get_data('graphs_path')
         self.graphs_path = Path(graphs_path)

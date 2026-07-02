@@ -14,7 +14,7 @@ import numpy as np
 from numcodecs import blosc
 
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[2]
 BUILDS_ROOT = ROOT / "builds"
 
 

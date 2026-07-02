@@ -1,20 +1,23 @@
 """Extract DB metadata from completed builds and convert it into graph JSON.
 
-This script watches success.yaml, traces each successful Synthoseis build's
+This script reads success.yaml once, traces each successful Synthoseis build's
 parameters.db, filters the extracted tables by sample category, and writes a
 properties graph for downstream evidence/RAG/dataset generation.
 """
 
 import time
 from pathlib import Path
-from watchdog.events import FileSystemEventHandler
-from watchdog.observers import Observer
+import sys
 
-from logger_color import logger
 import yaml
-from yaml_helper import YAMLHelper
-from low_level_tracer import ParameterDbTracer
-from graph_system import GraphSystem
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts.common.logger_color import logger
+from scripts.common.yaml_helper import YAMLHelper
+from scripts.graph.low_level_tracer import ParameterDbTracer
+from scripts.graph.graph_system import GraphSystem
 
 MODEL_KEYS = {
             "number_faults",
@@ -88,34 +91,14 @@ CATEGORY_FILTERS = {
     },
 }
 
-class BuildGraphGenerator(FileSystemEventHandler):
-    """Watchdog handler for success.yaml updates emitted by the build stage."""
+class BuildGraphGenerator:
+    """Trace completed build folders listed in success.yaml."""
 
     def __init__(self):
         self.already_traced = set()
         self.last_success_mtime = None
 
-    def on_any_event(self, event):
-        self._trace_success_file(event)
-
-    def on_created(self, event):
-        self._trace_success_file(event)
-
-    def on_modified(self, event):
-        self._trace_success_file(event)
-
-    def on_moved(self, event):
-        self._trace_success_file(event)
-
-    def _trace_success_file(self, event):
-        if event.is_directory:
-            return
-
-        path = Path(getattr(event, "dest_path", event.src_path))
-
-        self._trace_success_path(path)
-
-    def _trace_success_path(self, path):
+    def trace_success_path(self, path):
         """Read success.yaml and trace any newly completed build folders."""
         path = Path(path)
 
@@ -126,9 +109,6 @@ class BuildGraphGenerator(FileSystemEventHandler):
             return
 
         current_mtime = path.stat().st_mtime
-        if self.last_success_mtime is not None and current_mtime == self.last_success_mtime:
-            return
-
         time.sleep(0.2)
         with open(path, 'r') as f:
             data = yaml.safe_load(f) or {}
@@ -177,41 +157,20 @@ class BuildGraphGenerator(FileSystemEventHandler):
             logger.error(f"[TRACE FAILED] -> Sample: {build_folder} Error: {exc}")
             return False
 
-    def on_deleted(self, event):
-
-        if not event.is_directory:
-            return
-
-
-def watch_success_tracker(success_tracker_path):
-    """Run the graph-generation watcher around the build success tracker."""
-    observer = Observer()
+def trace_success_tracker_once(success_tracker_path):
+    """Run graph generation once from the build success tracker."""
     success_tracker_path = Path(success_tracker_path)
 
-    if success_tracker_path.parent.exists():
-        logger.info(f"[NOW MONITORING] -> Path: {success_tracker_path}")
-
-        graph_generator = BuildGraphGenerator()
-        if success_tracker_path.exists():
-            graph_generator._trace_success_path(success_tracker_path)
-        observer.schedule(graph_generator, success_tracker_path.parent, recursive=False)
-    else:
+    if not success_tracker_path.exists():
         logger.warning(f"file {success_tracker_path} does not exist")
+        return
 
-    observer.start()
-    try:
-        while True:
-            graph_generator._trace_success_path(success_tracker_path)
-            time.sleep(1)
-    except KeyboardInterrupt:
-        logger.error(f"[STOPPING]")
-    finally:
-        observer.stop()
-    observer.join()
+    logger.info(f"[RUN ONCE] -> Success tracker: {success_tracker_path}")
+    BuildGraphGenerator().trace_success_path(success_tracker_path)
 
 
 if __name__ == "__main__":
-    root = Path(__file__).parent.parent
+    root = ROOT
     setting_path = root.joinpath('settings.yaml')
     yaml_helper = YAMLHelper(setting_path)
     samples_path = yaml_helper.get_data('samples_path')
@@ -220,5 +179,5 @@ if __name__ == "__main__":
         samples_path = root / samples_path
     success_tracker_path = samples_path / 'success.yaml'
 
-    # watch over update in recipes
-    watch_success_tracker(success_tracker_path)
+    # One-shot entry point: trace completed builds and exit.
+    trace_success_tracker_once(success_tracker_path)

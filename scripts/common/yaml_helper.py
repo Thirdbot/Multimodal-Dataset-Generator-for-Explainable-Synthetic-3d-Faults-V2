@@ -63,6 +63,6 @@ class YAMLHelper:
 # test
 if __name__ == "__main__":
     from pathlib import Path
-    path = Path(__file__).parent.parent.joinpath('settings.yaml')
+    path = Path(__file__).resolve().parents[2].joinpath('settings.yaml')
     yaml_helper = YAMLHelper(path)
     print(yaml_helper.get_data('recipes_path'))

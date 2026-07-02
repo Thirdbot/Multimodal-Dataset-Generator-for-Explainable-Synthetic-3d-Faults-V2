@@ -14,7 +14,7 @@ import matplotlib.pyplot as plt
 import networkx as nx
 
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[2]
 GRAPH_DIR = ROOT / "graphs" / "properties_2d_graph"
 OUTPUT_DIR = ROOT / "graphs" / "visualizations"
 

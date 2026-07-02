@@ -21,7 +21,7 @@ The important design rule is:
    - Fault individual masks are captured through a wrapper during build, not by editing Synthoseis internals.
 
 3. **Low-level DB extraction**
-   - `scripts/low_level_tracer.py` reads `parameters.db`.
+   - `scripts/graph/low_level_tracer.py` reads `parameters.db`.
    - It extracts tables such as:
      - `model_parameters`
      - `fault_parameters`
@@ -29,14 +29,14 @@ The important design rule is:
    - The output is a DB-extracted JSON used as raw metadata.
 
 4. **Properties graph generation**
-   - `scripts/graph_generator.py` and `scripts/graph_system.py` turn DB extracts into graph JSON.
+   - `scripts/graph/graph_generator.py` and `scripts/graph/graph_system.py` turn DB extracts into graph JSON.
    - Output:
      - `graphs/properties_graph/*_properties_graph.json`
    - This is the main factual graph.
    - It is filtered by sample category using `CATEGORY_FILTERS`.
 
 5. **2D image and mask extraction**
-   - `scripts/images_generator.py` reads a properties graph and the matching build folder.
+   - `scripts/images/images_generator.py` reads a properties graph and the matching build folder.
    - It creates global and local images under:
      - `build_objects/images/<sample_id>/`
    - For each object type it can write:
@@ -58,7 +58,7 @@ The important design rule is:
      - `age_depth_object_position.json`
 
 6. **2D properties graph projection**
-   - `scripts/properties_2d_graph.py` copies `properties_graph` and updates only matching object positions from the image metadata.
+   - `scripts/graph/properties_2d_graph.py` copies `properties_graph` and updates only matching object positions from the image metadata.
    - Output:
      - `graphs/properties_2d_graph/*_inline_properties_2d_graph.json`
      - `graphs/properties_2d_graph/*_crossline_properties_2d_graph.json`
@@ -95,7 +95,7 @@ The important design rule is:
 
 ## Key Files
 
-### `scripts/graph_generator.py`
+### `scripts/graph/graph_generator.py`
 
 Builds properties graphs from DB extracts. The important structure is `CATEGORY_FILTERS`.
 
@@ -114,7 +114,7 @@ Example categories:
 
 This is where graph content is intentionally restricted. If a field is not in the filter, it will not appear in the graph or text evidence.
 
-### `scripts/graph_system.py`
+### `scripts/graph/graph_system.py`
 
 Turns filtered DB rows into a graph.
 
@@ -127,7 +127,7 @@ Important behavior:
 - Reindexes visible faults so graph IDs stay continuous.
 - Stores `original_fault_index` for fault wrapper matching, but this is filtered out of text evidence.
 
-### `scripts/images_generator.py`
+### `scripts/images/images_generator.py`
 
 Extracts 2D images and masks from generated 3D arrays.
 
@@ -165,7 +165,7 @@ Closure works well because graph nodes map directly to fluid masks and DB extent
 
 Fault individual extraction depends on wrapper-generated `faults/fault_*.zarr`. Existing global `fault_segments` cannot reliably be split into individual faults after the build.
 
-### `scripts/properties_2d_graph.py`
+### `scripts/graph/properties_2d_graph.py`
 
 Copies DB-grounded properties graphs into view-specific 2D graphs.
 
@@ -463,19 +463,19 @@ Do not use these arrays to invent semantic relations yet. They are useful for fu
 Generate DB/properties graphs from successful builds:
 
 ```bash
-python scripts/graph_generator.py
+python -m scripts.graph.graph_generator
 ```
 
 Generate 2D object images and object position JSON:
 
 ```bash
-python scripts/images_generator.py
+python -m scripts.images.images_generator
 ```
 
 Generate 2D properties graphs:
 
 ```bash
-python scripts/properties_2d_graph.py
+python -m scripts.graph.properties_2d_graph
 ```
 
 Inspect all evidence from one graph:
@@ -569,4 +569,3 @@ For dataset generation by view:
    - verification result
 
 Do not make the answer say which view it came from unless the final VLM task explicitly needs view classification.
-
