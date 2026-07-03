@@ -157,27 +157,17 @@ class BuildGraphGenerator:
             logger.error(f"[TRACE FAILED] -> Sample: {build_folder} Error: {exc}")
             return False
 
-def trace_success_tracker_once(success_tracker_path):
-    """Run graph generation once from the build success tracker."""
-    success_tracker_path = Path(success_tracker_path)
+def trace_success_tracker(successfuL_list):
+    success_cache = []
+    for success_tracker_path in successfuL_list:
+        success_tracker_path = Path(success_tracker_path)
+        if not success_tracker_path.exists():
+            logger.warning(f"file {success_tracker_path} does not exist")
+            return
 
-    if not success_tracker_path.exists():
-        logger.warning(f"file {success_tracker_path} does not exist")
-        return
-
-    logger.info(f"[RUN ONCE] -> Success tracker: {success_tracker_path}")
-    BuildGraphGenerator().trace_success_path(success_tracker_path)
-
-
-if __name__ == "__main__":
-    root = ROOT
-    setting_path = root.joinpath('settings.yaml')
-    yaml_helper = YAMLHelper(setting_path)
-    samples_path = yaml_helper.get_data('samples_path')
-    samples_path = Path(samples_path)
-    if not samples_path.is_absolute():
-        samples_path = root / samples_path
-    success_tracker_path = samples_path / 'success.yaml'
-
-    # One-shot entry point: trace completed builds and exit.
-    trace_success_tracker_once(success_tracker_path)
+        logger.info(f"[RUN ONCE] -> Success tracker: {success_tracker_path}")
+        if success_tracker_path not in set(success_cache):
+            BuildGraphGenerator()._trace_sample(success_tracker_path)
+            success_cache.append(success_tracker_path)
+        else:
+            continue

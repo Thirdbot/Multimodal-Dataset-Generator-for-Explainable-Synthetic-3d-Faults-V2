@@ -208,11 +208,11 @@ class GraphSystem:
         }
 
     def _parse_model_id(self, model_id):
-        match = re.match(r"seismic__\d{4}_\d{4}_(recipe_\d+)_(.+)", model_id)
+        match = re.match(r"seismic__\d{4}_\d{4}_(.+)", model_id)
         if not match:
             return "unknown"
 
-        sample_id = match.group(2)
+        sample_id = match.group(1)
         category = sample_id.split("_", 1)[0]
         if sample_id.startswith("fault_only_"):
             category = "fault_only"
