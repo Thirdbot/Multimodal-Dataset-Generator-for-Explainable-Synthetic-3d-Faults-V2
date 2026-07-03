@@ -185,10 +185,18 @@ def _seed_processed_graphs():
 
 async def dataset_worker(queue):
     """Single consumer: append rows per new 2d-graph, serial, never truncating."""
-    print("Dataset worker ready...")
-    workflow = RagWorkflow()               # expensive init (embeddings + LLM) — build once
+    print("Dataset worker starting...")
+    workflow = None
+    while workflow is None:                # keep retrying init so a transient OOM can't kill the worker
+        try:
+            workflow = await asyncio.to_thread(RagWorkflow)  # expensive init (embeddings + LLM)
+        except Exception as exc:
+            print(f"[DATASET] init failed, retrying: {exc}")
+            _cuda_cleanup()
+            await asyncio.sleep(5)
     workflow.start_output(truncate=False)  # append mode; keeps existing verified_qa.jsonl
     processed = _seed_processed_graphs()
+    print("Dataset worker ready.")
 
     while True:
         first = await queue.get()          # blocks until data is ready
