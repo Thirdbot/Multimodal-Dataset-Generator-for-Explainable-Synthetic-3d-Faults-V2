@@ -1,5 +1,6 @@
 import os
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+os.environ["MPLBACKEND"] = "Agg"  # non-interactive, thread-safe; image gen runs in worker threads
 
 import watchfiles
 from functools import partial
@@ -115,7 +116,9 @@ async def builds_watcher():
                 asyncio.create_task(on_build_delete(Path(cfg).stem, build_path))
 
     print("Watching success builds...")
-    async for changes in watchfiles.awatch(build_path.as_posix()):
+    if builds_success_path.exists():                            # phase 1: trace builds already on disk
+        asyncio.create_task(read_yaml(builds_success_path.as_posix())).add_done_callback(read_add)
+    async for changes in watchfiles.awatch(build_path.as_posix()):  # phase 2: new builds
         for change_type,file_path in changes:
 
             if change_type not in (Change.added, Change.modified):
@@ -132,18 +135,29 @@ async def builds_watcher():
 
 async def graph_properties_watcher():
     print("Watching properties graph...")
-    async for changes in watchfiles.awatch(properties_graph_path.as_posix()):
+    seen = set()
+    for g in sorted(properties_graph_path.glob("*.json")):      # phase 1: existing graphs
+        p = g.as_posix()
+        seen.add(p)
+        asyncio.create_task(asyncio.to_thread(generate_images_for_graph, p))
+    async for changes in watchfiles.awatch(properties_graph_path.as_posix()):  # phase 2: new graphs
         for change_type, file_path in changes:
             if change_type not in (Change.added, Change.modified):
                 continue
+            p = Path(file_path).as_posix()
+            if change_type == Change.added and p in seen:
+                continue                                        # already handled in catch-up
+            seen.add(p)
             # forward to image generators
             asyncio.create_task(
-                asyncio.to_thread(generate_images_for_graph, file_path)
+                asyncio.to_thread(generate_images_for_graph, p)
             )
 
 async def images_watcher():
     print("Watching images...")
-    async for changes in watchfiles.awatch(images_path.as_posix()):
+    if any(images_path.iterdir()):                              # phase 1: build 2d graphs from existing images
+        asyncio.create_task(asyncio.to_thread(generate_properties_2d_graphs))
+    async for changes in watchfiles.awatch(images_path.as_posix()):  # phase 2: new images
         if not any(t in (Change.added, Change.modified) for t, _ in changes):
             continue
         # forward to properties 2d graph (one batch rebuild per change-set)
@@ -152,12 +166,23 @@ async def images_watcher():
         )
 
 async def dataset_gen_pipeline(queue):
-    """Producer: enqueue each new/modified 2d-graph file for row generation."""
+    """Producer: enqueue each 2d-graph file for row generation.
+    Phase 1 (catch-up): enqueue files already on disk (awatch never replays them).
+    Phase 2 (live): enqueue new/modified files. `seen` keeps the two phases from double-enqueuing."""
     print("Watching 2d graphs -> enqueue dataset work...")
-    async for changes in watchfiles.awatch(properties_2d_graph_path.as_posix()):
+    seen = set()
+    for g in sorted(properties_2d_graph_path.glob("*.json")):   # phase 1: existing files
+        p = g.as_posix()
+        seen.add(p)
+        queue.put_nowait(p)
+    async for changes in watchfiles.awatch(properties_2d_graph_path.as_posix()):  # phase 2: new files
         for change_type, file_path in changes:
             if change_type in (Change.added, Change.modified):
-                queue.put_nowait(Path(file_path).as_posix())
+                p = Path(file_path).as_posix()
+                if change_type == Change.added and p in seen:
+                    continue                                    # already handled in catch-up
+                seen.add(p)
+                queue.put_nowait(p)
 
 def _cuda_cleanup():
     """Release fragmented GPU cache so the next graph can retry after an OOM."""
@@ -167,6 +192,19 @@ def _cuda_cleanup():
             torch.cuda.empty_cache()
     except Exception:
         pass
+
+def _init_nli_on_cpu():
+    """Force longtracer's NLI/STS verifier onto CPU so it doesn't fight the LLM for VRAM."""
+    from longtracer.guard import nli_model as nm
+    if nm._shared_model is not None:
+        return
+    orig_st, orig_ce = nm.SentenceTransformer, nm.CrossEncoder
+    nm.SentenceTransformer = lambda *a, **k: orig_st(*a, **{**k, "device": "cpu"})
+    nm.CrossEncoder = lambda *a, **k: orig_ce(*a, **{**k, "device": "cpu"})
+    try:
+        nm._shared_model = nm.HybridVerificationModel(verbose=False)
+    finally:
+        nm.SentenceTransformer, nm.CrossEncoder = orig_st, orig_ce
 
 def _seed_processed_graphs():
     """Graph files already turned into rows, so we never regenerate/override them."""
