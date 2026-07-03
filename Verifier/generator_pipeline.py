@@ -379,7 +379,7 @@ def verify_answer(answer, evidence_text):
     result = check(answer, [evidence_text])
     return {
         "verdict": getattr(result, "verdict", ""),
-        "score": float(getattr(result, "trust_score", 0.0) or 0.0),
+        "score": min(1.0, max(0.0, float(getattr(result, "trust_score", 0.0) or 0.0))),
     }
 
 
