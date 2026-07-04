@@ -23,4 +23,5 @@ graphs/
 Dataset/*.csv
 Dataset/*.jsonl
 Dataset/multimodal_images
+Dataset/masks
 docs/

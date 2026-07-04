@@ -165,6 +165,7 @@ class GraphImageExtractor:
         base_volume = self._prepare_3d_array(self._as_array(basic_objects[0]))
 
         selected_objects = {}
+        object_type_by_id = {}
         for object_type,patterns in OBJECT_ZARR_CANDIDATES.items():
             if object_type == "fault":
                 self._warn_missing_wrapper_faults(sample_name)
@@ -216,6 +217,10 @@ class GraphImageExtractor:
                 self._position_records(sample_name, object_type, selected_type_slices),
             )
             selected_objects.update(selected_type_slices)
+            for object_id in selected_type_slices:
+                object_type_by_id[object_id] = object_type
+        # one seismic image + one multi-class mask per view, shared across all objects
+        self._build_scene(sample_name, base_volume, selected_objects, object_type_by_id)
         return selected_objects
 
     def _warn_missing_wrapper_faults(self,sample_name):
@@ -468,6 +473,8 @@ class GraphImageExtractor:
                 "crossline": self._display_slice("crossline", mask[:, crossline_index, :]),
                 "timeslice": self._display_slice("timeslice", mask[:, :, timeslice_index]),
             },
+            # keep the full 3D mask so a shared-slice scene can be composited later
+            "mask3d": np.asarray(mask, dtype=bool),
         }
 
     @staticmethod
@@ -644,6 +651,139 @@ class GraphImageExtractor:
     @staticmethod
     def _slice_mask_area(sliced):
         return sum(int(np.asarray(mask_slice).sum()) for mask_slice in sliced.get("mask", {}).values())
+
+    def _build_scene(self,sample_name,base_volume,selected_objects,object_type_by_id):
+        # One seismic image per view (all objects live in the same section), plus a
+        # per-object mask registered to that shared slice. The final row mask is
+        # composited downstream from only the objects a question retrieves, so we
+        # keep the object masks separable here. The all-objects overlay is a preview.
+        objects = [
+            (object_id, object_type_by_id.get(object_id, ""), sliced["mask3d"])
+            for object_id, sliced in selected_objects.items()
+            if isinstance(sliced, dict)
+            and sliced.get("mask3d") is not None
+            and np.asarray(sliced["mask3d"]).any()
+        ]
+        if not objects:
+            return
+
+        scene_dir = self.image2d_path.joinpath(sample_name, "scene")
+        scene_dir.mkdir(parents=True, exist_ok=True)
+        scene_records = {}
+
+        for view, axis in (("inline", 0), ("crossline", 1), ("timeslice", 2)):
+            index = self._scene_index([mask for _, _, mask in objects], axis)
+            if index is None:
+                continue
+            index = min(index, base_volume.shape[axis] - 1)
+
+            seismic2d = self._normalize_image(
+                self._display_slice(view, np.take(base_volume, index, axis=axis))
+            )
+
+            painted = []
+            for object_id, object_type, mask3d in objects:
+                slice_2d = self._display_mask(
+                    object_type,
+                    self._display_slice(view, np.take(mask3d, index, axis=axis)),
+                )
+                slice_2d = self._fit_mask(np.asarray(slice_2d, dtype=bool), seismic2d.shape)
+                if slice_2d.any():
+                    painted.append((object_id, object_type, slice_2d))
+            if not painted:
+                continue
+
+            types_with_parts = {
+                object_type for object_id, object_type, _ in painted
+                if self._object_index(object_id) is not None
+            }
+
+            mask_dir = scene_dir / f"{view}_masks"
+            overlay_class_mask = np.zeros(seismic2d.shape, dtype=np.uint8)
+            # preview only: paint large first so small objects / thin traces stay on top
+            for object_id, object_type, mask_bool in sorted(painted, key=lambda item: int(item[2].sum()), reverse=True):
+                overlay_class_mask[mask_bool] = self._class_id(object_type)
+
+            view_records = []
+            for object_id, object_type, mask_bool in painted:
+                is_individual = self._object_index(object_id) is not None
+                if not is_individual and object_type in types_with_parts:
+                    continue  # drop the redundant union aggregate; parts are saved individually
+                bbox = self._mask_bbox(mask_bool)
+                if bbox is None:
+                    continue
+                mask_dir.mkdir(parents=True, exist_ok=True)
+                rel_mask = Path(f"{view}_masks") / f"{self._safe_filename(object_id)}.png"
+                self._save_mask_png(scene_dir / rel_mask, mask_bool)
+                view_records.append({
+                    "object_id": str(object_id),
+                    "object_type": object_type,
+                    "class_id": self._class_id(object_type),
+                    "class_color": self._class_color(object_type),
+                    "bbox": bbox,
+                    "center": {
+                        "x": (bbox["x_min"] + bbox["x_max"]) / 2,
+                        "y": (bbox["y_min"] + bbox["y_max"]) / 2,
+                    },
+                    "mask_path": (Path("scene") / rel_mask).as_posix(),
+                })
+
+            self._save_png(scene_dir / f"{view}.png", seismic2d, cmap="gray")
+            self._save_scene_overlay(scene_dir / f"{view}_overlay.png", seismic2d, overlay_class_mask)
+            scene_records[view] = {
+                "index": int(index),
+                "image_path": (Path("scene") / f"{view}.png").as_posix(),
+                "overlay_path": (Path("scene") / f"{view}_overlay.png").as_posix(),
+                "objects": view_records,
+            }
+
+        self._save_scene_positions(sample_name, scene_records)
+
+    @staticmethod
+    def _scene_index(masks,axis):
+        # Index along `axis` that maximizes how many objects are present, tie-broken
+        # by total union area, so the scene shows as much of the sample as possible.
+        other = tuple(a for a in (0, 1, 2) if a != axis)
+        size = min(mask.shape[axis] for mask in masks)
+        if size <= 0:
+            return None
+        count = np.zeros(size)
+        area = np.zeros(size)
+        for mask in masks:
+            profile = np.asarray(mask, dtype=bool).sum(axis=other)[:size]
+            count[:profile.shape[0]] += profile > 0
+            area[:profile.shape[0]] += profile
+        if count.max() == 0:
+            return None
+        return int(np.lexsort((area, count))[-1])
+
+    @staticmethod
+    def _fit_mask(mask,shape):
+        fitted = np.zeros(shape, dtype=bool)
+        height = min(shape[0], mask.shape[0])
+        width = min(shape[1], mask.shape[1])
+        fitted[:height, :width] = mask[:height, :width]
+        return fitted
+
+    @staticmethod
+    def _save_scene_overlay(path,seismic2d,class_mask):
+        overlay = np.dstack([seismic2d, seismic2d, seismic2d]).astype(float)
+        for class_id, color in CLASS_RGB_COLORS.items():
+            region = class_mask == class_id
+            if region.any():
+                overlay[region] = overlay[region] * 0.35 + (np.asarray(color, dtype=float) / 255.0) * 0.65
+        plt.imsave(path, np.clip(overlay, 0.0, 1.0))
+
+    def _save_scene_positions(self,sample_name,scene_records):
+        if not scene_records:
+            return
+        output_path = self.image2d_path / sample_name / "scene_position.json"
+        payload = {
+            "sample_id": sample_name,
+            "class_legend": {str(class_id): name for class_id, name in CLASS_COLOR_NAMES.items()},
+            "views": scene_records,
+        }
+        output_path.write_text(json.dumps(payload, indent=2))
 
     def make_image(self,sample_name,object_type,selected_slices):
         output_folder = self.image2d_path.joinpath(sample_name, object_type)

@@ -5,14 +5,19 @@ Output: Dataset/multimodal_multi_image_dataset.csv and .jsonl
 """
 
 import csv
+import hashlib
 import json
 from pathlib import Path
+
+import numpy as np
+from PIL import Image
 
 
 ROOT = Path(__file__).resolve().parent.parent
 INPUT = ROOT / "Dataset" / "verified_qa.jsonl"
 IMAGE_ROOT = ROOT / "build_objects" / "images"
 CSV_OUTPUT = ROOT / "Dataset" / "multimodal_multi_image_dataset.csv"
+MASK_OUTPUT_DIR = ROOT / "Dataset" / "masks"
 
 INSTRUCTION = (
     "Inspect all provided seismic images and their paired masks. Answer the question "
@@ -62,13 +67,14 @@ CATEGORY_TYPES = {
     "fault_complex": ["fault", "closure"],
     "salt_only": ["salt", "closure"],
     "salt_fault_mixed": ["fault", "salt", "closure"],
-    "onlap": ["closure"],  # "onlap" commented out: aggregate/count evidence only for now
+    # "onlap": ["onlap"],  # "onlap" commented out: aggregate/count evidence only for now
     "depositional": ["closure"],  # "lithology" commented out: broad/noisy visual evidence
     "full_mixed": ["fault", "salt", "closure"],  # "onlap" commented out
 }
 EDGE_TYPES = {
     "number_faults": ["fault"],
     "fault_mode": ["fault"],
+    "intersects_fault":["fault"],
     "number_fault_intersections": ["fault"],
     "salt_inserted": ["salt"],
     "number_hc_closures": ["closure"],
@@ -88,14 +94,22 @@ def build_row(item):
     sample_id = item.get("sample_id", "")
     view = item.get("view") or "inline"
     sample_dir = IMAGE_ROOT / sample_id
-    image_items = collect_image_items(sample_dir, view, item.get("category", ""), item.get("evidence", []))
-    regions = collect_regions(sample_dir, image_items)
-    evidences = compact_evidences(item.get("evidence", []))
-    regions_box = ""
-    used_indices = []
+    # one shared scene image (all objects in the same section); the mask is built
+    # below from only the objects this row retrieves, highlighted together.
+    image_path, scene_objects = load_scene(sample_dir, view)
+    if not image_path:
+        return None
 
-    evidence_text = ""
-    for region in regions:
+    evidences = compact_evidences(item.get("evidence", []))
+    regions = []
+    retrieved = []
+    regions_box = ""
+
+    for object_id, scene_object in scene_objects.items():
+        object_type = scene_object.get("object_type", "")
+        if object_type not in CLASS_IDS:            # keep only dataset object classes
+            continue
+        region = {"object_type": object_type, "object_id": object_id, "view": view}
         matching_evidences = [
             evidence for evidence in evidences
             if evidence_matches_region(evidence, region)
@@ -103,14 +117,10 @@ def build_row(item):
         if not matching_evidences:
             continue
 
-        image_idx = region.get("image_idx")
-        if image_idx is None:
-            continue
-        used_indices.append(image_idx)
-
-        evidence_texts = evidence_text.join(
-            f"{evidence.get('text', '')}.\n"
-            for evidence in matching_evidences
+        bbox = scene_object.get("bbox") or {}
+        center = scene_object.get("center") or {}
+        evidence_texts = "".join(
+            f"{evidence.get('text', '')}.\n" for evidence in matching_evidences
         )
         regions_box += (
             "<region>\n"
@@ -118,109 +128,111 @@ def build_row(item):
             "<SEG>\n"
             "</region>\n"
         )
+        regions.append({
+            "image_idx": 0,                          # single shared scene image
+            "mask_idx": 0,                           # single composited row mask
+            "region_idx": len(regions),
+            "object_type": object_type,
+            "view": view,
+            "object_id": object_id,
+            "class_id": scene_object.get("class_id", CLASS_IDS.get(object_type, 0)),
+            "bbox": [bbox.get("x_min"), bbox.get("y_min"), bbox.get("x_max"), bbox.get("y_max")],
+            "center": [center.get("x"), center.get("y")],
+        })
+        retrieved.append(scene_object)
 
-    used_indices = sorted(set(used_indices))
-    used_image_items = [image_items[index] for index in used_indices]
-    used_regions = [
-        {**region, "image_idx": new_index, "mask_idx": new_index, "region_idx": new_index}
-        for new_index, region in enumerate(regions)
-        if region.get("image_idx") in used_indices
-    ]
+    if not regions:
+        return None
+
+    mask_path = build_row_mask(sample_dir, item, view, retrieved)
+    if not mask_path:
+        return None
 
     return {
         "sample_id":sample_id,
-        "images": [image["image"] for image in used_image_items],
-        "masks": [image["mask"] for image in used_image_items],
+        "images": [image_path],
+        "masks": [mask_path],
         "instruction": INSTRUCTION,
         "question": f"{item.get('question', '')}",
         "reason": f'<think>{item.get("trace", {}).get("reason", "")}</think>',
         "answer": f'<answer>{item.get("answer", "")}</answer>',
         "evidence": regions_box,
-        "regions": used_regions,
+        "regions": regions,
     }
 
 
-def collect_image_items(sample_dir, view, category, evidence):
-    items, seen = [], set()
-    for evidence_item in evidence:
-        object_id = evidence_item.get("object_id") or evidence_item.get("source") or ""
-        edge = evidence_item.get("edge") or evidence_item.get("fact_name") or ""
-        target = evidence_item.get("target") or ""
-        for object_type, object_name, role in requested_objects(object_id, edge, target, category):
-            add_image_item(items, seen, sample_dir, view, object_type, object_name, role)
-
-    return items
-
-
-def requested_objects(object_id, edge, target, category):
-    if is_object_id(object_id):
-        object_type = object_id.split("_", 1)[0]
-        return [(object_type, object_id, "evidence")]
-    if object_id in OBJECT_TYPES:
-        return [(object_id, object_id, "context")]
-    if edge == "HAS_VISUAL_OBJECT" and target in OBJECT_TYPES:
-        return [(target, target, "evidence")]
-    if str(object_id).startswith("category:"):
-        return [(object_type, object_type, "context") for object_type in EDGE_TYPES.get(edge, CATEGORY_TYPES.get(category, []))]
-    return []
-
-
-def add_image_item(items, seen, sample_dir, view, object_type, object_id, role):
-    image = sample_dir / object_type / object_id / f"{view}.png"
-    mask = sample_dir / object_type / object_id / f"{view}_mask.png"
-    key = (object_type, object_id, view)
-    if key in seen:
-        return True
-    if not image.exists() or not mask.exists():
-        return False
-    seen.add(key)
-    class_id = CLASS_IDS.get(object_type, 0)
-    items.append({
-        "object_type": object_type,
-        "object_id": object_id,
-        "view": view,
-        "role": role,
-        "class_id": class_id,
-        "image": image.as_posix(),
-        "mask": mask.as_posix(),
-    })
-    return True
-
-
-def collect_regions(sample_dir, image_items):
-    positions = load_positions(sample_dir)
-    regions = []
-    for index, image_item in enumerate(image_items):
-        position = positions.get((image_item["object_type"], image_item["object_id"], image_item["view"]))
-        if not position:
+def build_row_mask(sample_dir, item, view, retrieved_objects):
+    # Composite only the retrieved objects' scene-registered masks into one binary
+    # white mask, so the row's single mask highlights exactly what the question pulled.
+    combined = None
+    for scene_object in sorted(retrieved_objects, key=_object_mask_area, reverse=True):
+        mask = _read_object_mask(sample_dir, scene_object.get("mask_path"))
+        if mask is None:
             continue
-        bbox = position.get("bbox") or {}
-        center = position.get("center") or {}
-        regions.append({
-            "image_idx":index,
-            "mask_idx":index,
-            "region_idx":index,
-            "object_type": image_item["object_type"],
-            "view": image_item["view"],
-            "object_id":image_item["object_id"],
-            "class_id": position.get("class_id", image_item["class_id"]),
-            "bbox": [bbox.get("x_min"), bbox.get("y_min"), bbox.get("x_max"), bbox.get("y_max")],
-            "center": [center.get("x"), center.get("y")],
-        })
-    return regions
+        if combined is None:
+            combined = np.zeros(mask.shape, dtype=np.uint8)
+        height = min(combined.shape[0], mask.shape[0])
+        width = min(combined.shape[1], mask.shape[1])
+        region = mask[:height, :width]
+        combined[:height, :width][region] = 255
+
+    if combined is None or not combined.any():
+        return ""
+
+    MASK_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    row_id = item.get("row_id") or hashlib.sha1(
+        f"{item.get('sample_id','')}|{item.get('question','')}|{item.get('answer','')}".encode()
+    ).hexdigest()
+    output_path = MASK_OUTPUT_DIR / f"{row_id}_{view}_mask.png"
+    Image.fromarray(combined, mode="L").save(output_path)
+    return output_path.as_posix()
 
 
-def load_positions(sample_dir):
-    positions = {}
-    for path in sample_dir.glob("*_object_position.json"):
-        try:
-            data = json.loads(path.read_text())
-        except (OSError, json.JSONDecodeError):
-            continue
-        for item in data.get("objects", []):
-            key = (item.get("object_type"), item.get("object_id"), item.get("view"))
-            positions[key] = item
-    return positions
+def _read_object_mask(sample_dir, rel_path):
+    if not rel_path:
+        return None
+    path = sample_dir / rel_path
+    if not path.exists():
+        return None
+    return np.asarray(Image.open(path).convert("L")) > 0
+
+
+def _object_mask_area(scene_object):
+    bbox = scene_object.get("bbox") or {}
+    if not bbox:
+        return 0
+    return (bbox.get("x_max", 0) - bbox.get("x_min", 0)) * (bbox.get("y_max", 0) - bbox.get("y_min", 0))
+
+
+def load_scene(sample_dir, view):
+    # Read the shared per-view scene: (image_path, {object_id: object}). Each object
+    # carries its own scene-registered mask path, combined per row downstream.
+    scene_path = sample_dir / "scene_position.json"
+    if not scene_path.exists():
+        return "", {}
+    try:
+        data = json.loads(scene_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return "", {}
+
+    view_block = (data.get("views") or {}).get(view)
+    if not view_block:
+        return "", {}
+
+    image_path = _scene_file(sample_dir, view_block.get("image_path"))
+    objects = {
+        obj.get("object_id"): obj
+        for obj in view_block.get("objects", [])
+        if obj.get("object_id")
+    }
+    return image_path, objects
+
+
+def _scene_file(sample_dir, rel_path):
+    if not rel_path:
+        return ""
+    path = sample_dir / rel_path
+    return path.as_posix() if path.exists() else ""
 
 
 def read_jsonl(path):

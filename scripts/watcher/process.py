@@ -250,8 +250,10 @@ async def dataset_worker(queue):
         try:
             new_graphs = [g for g in batch
                           if g not in processed and Path(g).exists()]
+            filtered_graph = [ Path(graph) for graph in new_graphs for view in ('inline','crossline') if view in Path(graph).name]
+
             made_rows = False
-            for gp in new_graphs:
+            for gp in filtered_graph:
                 try:
                     print(f"[DATASET] generating rows for {Path(gp).name}")
                     await asyncio.to_thread(workflow.generate_for_graph, Path(gp))

@@ -35,30 +35,30 @@ class RagWorkflow(object):
         self.output_started = False
         self.rag = Rag(embedding_model="all-MiniLM-L6-v2")
         self.llm = LLMMachine()
+        self.rows = []
 
     def generate_dataset(self, max_graphs=None, graph_views=("inline", "crossline"), questions_per_graph=5, candidates_per_question=5):
         self.start_output(truncate=True)
-        rows = []
+
         for graph_path in self.graph_paths(max_graphs=max_graphs, views=graph_views):
-            rows.extend(self.generate_for_graph(
+            self.rows.extend(self.generate_for_graph(
                 graph_path,
                 questions_per_graph=questions_per_graph,
                 candidates_per_question=candidates_per_question,
             ))
-        return rows
+        return self.rows
 
     def generate_for_graph(self, graph_path, questions_per_graph=5, candidates_per_question=10):
         graph_path = Path(graph_path)
         sample_id = sample_id_from_graph(graph_path)
         category = category_from_sample_id(sample_id)
         view = view_from_graph(graph_path)
+        scene = self._scene_metadata(graph_path)
 
         vector_store, edges = self.rag.mapping_graph_rag(graph_path)
         retrieval = self.rag.graph_retrieval(vector_store, edges) # graph retrieval is not deep enough
         retrieve_many = self.llm.retrieve_many(retrieval)
         all_docs = self.rag.evidence_documents(graph_path)
-        evidence_text = self.rag.format_docs(all_docs)
-        rows = []
 
         # evidences seeds
         number_of_passes_questions = 0
@@ -95,7 +95,7 @@ class RagWorkflow(object):
 
                 answer = self.best_answer(
                     question=q,
-                    evidence_text=evidence_text,
+                    evidence_text=self.rag.format_docs(question_docs),
                     question_docs=question_docs,
                     retrieve_many=retrieve_many,
                     number_of_answer=candidates_per_question,
@@ -126,24 +126,37 @@ class RagWorkflow(object):
                     "instruction":INSTRUCTION ,
                     "question": q,
                     "answer": answer["answer"],
-                    "evidence": serialize_docs(answer["docs"]),
+                    "evidence": dedupe_docs(shared_docs(question_docs,answer['docs'])),
                     "verification": answer["verification"],
                     "metadata": {
                         "graph_path": graph_path.as_posix(),
                         "category": category,
                         "view": view,
+                        # shared scene image; the row mask is composited downstream
+                        # from only the retrieved objects (see DatasetMaker).
+                        "image_path": scene.get("image_path", ""),
+                        "overlay_path": scene.get("overlay_path", ""),
                     },
                     "trace": {
                         "reason": reason,
                         "question_evidence": serialize_docs(question_docs),
                         "answer_evidence": serialize_docs(answer["docs"]),
-                        "graph_evidence": docs_to_text(dedupe_docs([*question_docs, *answer["docs"]])).splitlines(),
+                        "graph_evidence": docs_to_text(dedupe_docs(shared_docs(question_docs,answer['docs']))).splitlines(),
                     },
                 }
                 if self.append_row(row):
-                    rows.append(row)
+                    self.rows.append(row)
                 number_of_passes_questions += 1
-        return rows
+        return self.rows
+
+    @staticmethod
+    def _scene_metadata(graph_path):
+        # the 2d graph carries the shared scene's image/mask paths for its view
+        try:
+            data = json.loads(Path(graph_path).read_text())
+        except Exception:
+            return {}
+        return data.get("scene") or {}
 
     def evidence_seeds(self, docs, packet_size=1):
         docs = list(docs)
@@ -218,7 +231,9 @@ class RagWorkflow(object):
                 # this is not be use because the evidences is from question, and it is now chunking
                 if score_qa_evidence(question_docs, answer_docs) < 0.7:
                     continue
-                used_docs = dedupe_docs([*question_docs, *answer_docs])
+                # intersect (by evidence key): keep only docs that are both
+                # question-relevant and answer-supporting, so evidence stays on-topic
+                used_docs = dedupe_docs(shared_docs(question_docs, answer_docs))
                 used_docs = filter_docs_by_retrieval_score(used_docs, MIN_RETRIEVAL_SCORE)
                 filter_by_trust_docs = dedupe_docs(filter_docs_by_trust(a, used_docs))
                 if not filter_by_trust_docs:
