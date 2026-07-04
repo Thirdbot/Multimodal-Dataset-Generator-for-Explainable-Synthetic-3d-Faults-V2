@@ -34,7 +34,7 @@ EXCLUDED_VISUAL_OBJECTS = {
 def main():
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     written = []
-
+    samples = []
     for graph_path in sorted(PROPERTIES_GRAPH_DIR.glob("*.json")):
         sample_id = _sample_id_from_graph_path(graph_path)
         graph = _read_json(graph_path)
@@ -49,8 +49,10 @@ def main():
             output_path = OUTPUT_DIR / f"{graph_path.stem}_{view}_properties_2d_graph.json"
             output_path.write_text(json.dumps(copied_graph, indent=2, default=str))
             written.append(output_path)
+            samples.append(sample_id)
 
     print(f"wrote {len(written)} 2d graph files to {OUTPUT_DIR}")
+    return samples
 
 
 def _sample_id_from_graph_path(graph_path):

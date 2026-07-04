@@ -98,6 +98,7 @@ class RagWorkflow(object):
 
                 answer = self.best_answer(
                     question=q,
+                    q_query=retrieval_query,
                     evidence_text=self.rag.format_docs(question_docs),  # ground on retrieved evidence, not the whole graph (2048-tok context)
                     question_docs=question_docs,
                     retrieve_many=retrieve_many,
@@ -215,7 +216,7 @@ class RagWorkflow(object):
                 kept.append(doc)
         return kept
 
-    def best_answer(self, question,evidence_text, question_docs, retrieve_many, number_of_answer=5):
+    def best_answer(self, question,q_query,evidence_text, question_docs, retrieve_many, number_of_answer=5):
         answers = []
         try:
             response = self.llm.answer_batch_generation().invoke({
@@ -235,7 +236,7 @@ class RagWorkflow(object):
                 continue
             try:
                 answer_docs = retrieve_many(a_query)  # retrieve on the short claim, not the verbose prose answer
-                filter_answer_docs_by_trust = filter_docs_by_trust(question,answer_docs)
+                filter_answer_docs_by_trust = filter_docs_by_trust(q_query,answer_docs)
                 # filter with the object-bearing a_query, not the bare answer: NLI's
                 # verdict rejects wrong-object docs (Closure 2 avoids fault FAILs vs a
                 # "Closure 1 avoids fault" claim) where similarity and a bare "avoids

@@ -43,6 +43,15 @@ async def on_build_delete(files,dest):
         print(f"removing file: {f_path}")
         shutil.rmtree(f_path)
 
+def on_image_gen_delete_built(change):
+    files = change.result() or []
+    if files:
+        for f in files:
+            file_path = Path(build_path).glob(f)
+            for f_path in file_path:
+                print(f"removing file: {f_path}")
+                shutil.rmtree(f_path)
+
 async def on_build_failed(files):
     for f_path in files:
         if Path(f_path).exists:
@@ -163,7 +172,7 @@ async def images_watcher():
         # forward to properties 2d graph (one batch rebuild per change-set)
         asyncio.create_task(
             asyncio.to_thread(generate_properties_2d_graphs)
-        )
+        ).add_done_callback(on_image_gen_delete_built)
 
 async def dataset_gen_pipeline(queue):
     """Producer: enqueue each 2d-graph file for row generation.
