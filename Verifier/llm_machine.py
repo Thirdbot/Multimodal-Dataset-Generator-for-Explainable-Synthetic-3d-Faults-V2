@@ -9,8 +9,12 @@ from longtracer import check
 from langchain_openai import ChatOpenAI
 
 
+class AnswerQueryPair(BaseModel):
+    ANSWER:str
+    RETRIEVAL_QUERY:str
+
 class AnswerBatchStructure(BaseModel):
-    ANSWERS:list[str]
+    ANSWERS:list[AnswerQueryPair]
 
 class QuestionQueryPair(BaseModel):
     QUESTION:str
@@ -46,14 +50,15 @@ Output contract:
 - The first character must be {{ and the last character must be }}.
 - Do not use markdown.
 - Do not write text before or after the JSON object.
-- Required shape: {{"ANSWERS":["one answer.","another answer."]}}
+- Required shape: {{"ANSWERS":[{{"ANSWER":"one answer.","RETRIEVAL_QUERY":"evidence-like retrieval sentence"}}]}}
 
 Generate candidate answers to one seismic interpretation question using only the provided evidences.
 
 Rules:
 - Generate up to {count} answers.
-- One sentence per answer.
-- Directly answer Question using only Evidences.
+- Each item has ANSWER and RETRIEVAL_QUERY.
+- ANSWER: one natural, concise sentence answering Question from Evidences, phrased the way a geologist would say it.
+- RETRIEVAL_QUERY: one short evidence-like sentence mirroring the fact behind the answer; name the object it is about (for example "Closure 1 contains gas"). A sentence, not a keyword bag.
 - Every factual word in the answer must be supported by Evidences.
 - If Evidences do not answer the Question, return {{"ANSWERS":[]}}.
 - Do not guess missing objects, counts, locations, regions, properties, fluids, or interpretations.
@@ -96,15 +101,13 @@ Rules:
 - Use only object/property types present in Evidences.
 - Ask about orientation only if Evidences mention tilt, dip, strike, angle, center, or bbox.
 - If QUESTION compares or asks about multiple objects, QUESTION must name those objects clearly.
-- RETRIEVAL_QUERY: 1 to 3 evidence-like sentence queries, one per line.
-- RETRIEVAL_QUERY may use object names and tag words: object, nums, center, bbox.
-- RETRIEVAL_QUERY must not be a keyword bag.
+- RETRIEVAL_QUERY: one or two short evidence-like sentences (one per line) mirroring the fact behind the answer. Name the object for a specific question ("Closure 1 avoids fault"); keep it generic for a broad question ("closure contains oil"). A sentence, not a keyword bag.
 
 Good:
-{{"QUESTIONS":[{{"QUESTION":"What geological feature is visible in this region?","RETRIEVAL_QUERY":"The section includes a visible object feature\nThe object occupies the area from bbox"}},{{"QUESTION":"How many visible episodes can be interpreted from the section?","RETRIEVAL_QUERY":"The layering shows nums onlap episodes"}},{{"QUESTION":"Where is the feature located?","RETRIEVAL_QUERY":"The feature sits near center\nThe feature occupies the area from bbox"}}]}}
+{{"QUESTIONS":[{{"QUESTION":"Where is oil contained in this section?","RETRIEVAL_QUERY":"closure contains oil"}},{{"QUESTION":"What does Closure 1 avoid?","RETRIEVAL_QUERY":"Closure 1 avoids fault\nClosure 1 avoids onlap"}},{{"QUESTION":"How many onlap episodes are visible?","RETRIEVAL_QUERY":"the layering shows nums onlap episodes"}}]}}
 
 Bad:
-{{"QUESTIONS":[{{"QUESTION":"Does the object sit at x=43 and y=112?","RETRIEVAL_QUERY":"x=43 y=112"}},{{"QUESTION":"The onlap is yellow, right?","RETRIEVAL_QUERY":"onlap yellow"}},{{"QUESTION":"Where is the feature?","RETRIEVAL_QUERY":"feature center bbox object nums"}}]}}
+{{"QUESTIONS":[{{"QUESTION":"What is the orientation of Closure 1?","RETRIEVAL_QUERY":"orientation of closure 1"}},{{"QUESTION":"Where is oil?","RETRIEVAL_QUERY":"oil location"}},{{"QUESTION":"The onlap is yellow, right?","RETRIEVAL_QUERY":"onlap yellow"}}]}}
 
 Evidences:
 {evidences}

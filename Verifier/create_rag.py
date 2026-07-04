@@ -56,7 +56,10 @@ class Rag:
             ("category_id", "parent_id"),
             ("source", "parent_id"),
             ("parent_id", "source"),
-            ("edge", "edge"),
+            # ("edge", "edge") dropped: it linked every doc sharing a relation
+            # (all closures with intersects_fault) into one clique, so a narrow
+            # seed still walked out to every object. Breadth now comes from the
+            # query (generic seed hits many docs), not from cross-object fan-out.
         }
         return vector_store, edges
 

@@ -3,6 +3,7 @@ import random
 import re
 import sys
 import hashlib
+from collections import Counter
 from pathlib import Path
 
 from longtracer import LongTracer, check
@@ -18,10 +19,10 @@ from Verifier.rag_verifier import best_doc_score, score_qa_evidence, serialize_d
 DEFAULT_GRAPH_ROOT = ROOT / "graphs" / "properties_2d_graph"
 DEFAULT_OUTPUT = ROOT / "Dataset" / "verified_qa.jsonl"
 MIN_RETRIEVAL_SCORE = 0.6
-QUESTION_PER_GRAPH  = 10
+QUESTION_PER_GRAPH  = 5
 CANDIDATE_PER_GRAPH = 5
 MAX_ROWS_PER_EVIDENCE = 2
-MAX_ATTEMPT = 2 * QUESTION_PER_GRAPH # max attempt for outer loop
+MAX_ATTEMPT = 3 * QUESTION_PER_GRAPH # max attempt for outer loop
 INSTRUCTION = (
     "Inspect the seismic images, use the visible regions as visual evidence, "
     "and answer the question with concise geological reasoning."
@@ -65,6 +66,7 @@ class RagWorkflow(object):
         evidence_seeds = self.evidence_seeds(all_docs)
 
         seen_evidences = {} # same evidences lead to the same images and cause overfitting
+        tally = Counter() # where attempts die, to decide if MAX_ATTEMPT is the bottleneck
 
         attempts = 0
         while number_of_passes_questions < questions_per_graph and attempts < MAX_ATTEMPT: # retry batches regenerations
@@ -90,12 +92,13 @@ class RagWorkflow(object):
                 ) # multiple question evidences
                 if best_doc_score(question_docs) < MIN_RETRIEVAL_SCORE:
                     print("[REJECT] question:",q)
+                    tally["q_reject"] += 1
                     continue
                 print("[ACCEPT] question:",q)
 
                 answer = self.best_answer(
                     question=q,
-                    evidence_text=self.rag.format_docs(question_docs),
+                    evidence_text=self.rag.format_docs(question_docs),  # ground on retrieved evidence, not the whole graph (2048-tok context)
                     question_docs=question_docs,
                     retrieve_many=retrieve_many,
                     number_of_answer=candidates_per_question,
@@ -103,19 +106,21 @@ class RagWorkflow(object):
 
                 if not answer:
                     print(f"[ANSWER SKIP] {sample_id}: no supported answer")
+                    tally["a_reject"] += 1
                     continue
                 print("[ACCEPT] answer:", answer["answer"])
 
                 answer_evidence_keys = tuple(sorted(evidence_key(doc) for doc in answer["docs"]))
                 if answer_evidence_keys and seen_evidences.get(answer_evidence_keys, 0) >= MAX_ROWS_PER_EVIDENCE:
                     print(f"[ROW SKIP] {sample_id}: evidence already used")
+                    tally["row_skip"] += 1
                     continue
 
                 seen_evidences[answer_evidence_keys] = seen_evidences.get(answer_evidence_keys, 0) + 1
                 reason = self.generate_reason(
                     question=q,
                     answer=answer["answer"],
-                    docs=dedupe_docs([*question_docs, *answer["docs"]]),
+                    docs=dedupe_docs(shared_or_fallback_docs(question_docs,answer['docs'])),
                 )
 
                 row = {
@@ -126,7 +131,7 @@ class RagWorkflow(object):
                     "instruction":INSTRUCTION ,
                     "question": q,
                     "answer": answer["answer"],
-                    "evidence": dedupe_docs(shared_docs(question_docs,answer['docs'])),
+                    "evidence": serialize_docs(dedupe_docs(shared_or_fallback_docs(question_docs,answer['docs']))),
                     "verification": answer["verification"],
                     "metadata": {
                         "graph_path": graph_path.as_posix(),
@@ -141,12 +146,16 @@ class RagWorkflow(object):
                         "reason": reason,
                         "question_evidence": serialize_docs(question_docs),
                         "answer_evidence": serialize_docs(answer["docs"]),
-                        "graph_evidence": docs_to_text(dedupe_docs(shared_docs(question_docs,answer['docs']))).splitlines(),
+                        "graph_evidence": docs_to_text(dedupe_docs(shared_or_fallback_docs(question_docs,answer['docs']))).splitlines(),
                     },
                 }
                 if self.append_row(row):
                     self.rows.append(row)
+                tally["passed"] += 1
                 number_of_passes_questions += 1
+        print(f"[TALLY] {sample_id} {view}: attempts={attempts}/{MAX_ATTEMPT} "
+              f"passed={tally['passed']} q_reject={tally['q_reject']} "
+              f"a_reject={tally['a_reject']} row_skip={tally['row_skip']}")
         return self.rows
 
     @staticmethod
@@ -158,7 +167,7 @@ class RagWorkflow(object):
             return {}
         return data.get("scene") or {}
 
-    def evidence_seeds(self, docs, packet_size=1):
+    def evidence_seeds(self, docs, packet_size=2):
         docs = list(docs)
         random.shuffle(docs)
         by_object = {}
@@ -219,25 +228,24 @@ class RagWorkflow(object):
             return None
         answer = response.ANSWERS if response else []
 
-        for a in answer:
-            a = a.strip()
+        for item in answer:
+            a = item.ANSWER.strip()
+            a_query = item.RETRIEVAL_QUERY.strip() or a  # concise claim for retrieval, mirrors the question path
             if not a:
                 continue
             try:
-                answer_docs = retrieve_many(a)
+                answer_docs = retrieve_many(a_query)  # retrieve on the short claim, not the verbose prose answer
+                filter_answer_docs_by_trust = filter_docs_by_trust(question,answer_docs)
+                # filter with the object-bearing a_query, not the bare answer: NLI's
+                # verdict rejects wrong-object docs (Closure 2 avoids fault FAILs vs a
+                # "Closure 1 avoids fault" claim) where similarity and a bare "avoids
+                # fault" claim both pass everything. Generic a_query stays broad.
+                filter_by_trust_docs = dedupe_docs(filter_docs_by_trust(a_query, shared_or_fallback_docs(question_docs, filter_answer_docs_by_trust)))
 
-                if not answer_docs:
-                    continue
-                # this is not be use because the evidences is from question, and it is now chunking
-                if score_qa_evidence(question_docs, answer_docs) < 0.7:
-                    continue
-                # intersect (by evidence key): keep only docs that are both
-                # question-relevant and answer-supporting, so evidence stays on-topic
-                used_docs = dedupe_docs(shared_docs(question_docs, answer_docs))
-                used_docs = filter_docs_by_retrieval_score(used_docs, MIN_RETRIEVAL_SCORE)
-                filter_by_trust_docs = dedupe_docs(filter_docs_by_trust(a, used_docs))
                 if not filter_by_trust_docs:
+                    print("\t[REJECT] not supported by question evidence:", a)
                     continue
+
                 if not preserves_evidence_tags(a, filter_by_trust_docs):
                     continue
                 verification_text = docs_to_text(filter_by_trust_docs)
@@ -347,6 +355,17 @@ def shared_docs(question_docs, answer_docs):
     ]
 
 
+def shared_or_fallback_docs(question_docs, answer_docs):
+    # Prefer the intersection (docs that are both question-relevant and
+    # answer-supporting). When it is empty, fall back to the union so the row
+    # keeps evidence instead of being dropped; downstream trust/verification
+    # filters still discard docs that do not entail the answer.
+    shared = shared_docs(question_docs, answer_docs)
+    if shared:
+        return shared
+    return [*question_docs, *answer_docs]
+
+
 def filter_docs_by_retrieval_score(docs, min_score):
     return [
         doc for doc in docs
@@ -364,6 +383,24 @@ def filter_docs_by_trust(answer, docs, min_trust=0.7):
             doc.metadata['trust_score'] = trust_score
             kept.append(doc)
     return kept
+
+
+def object_mentions(text):
+    return {
+        normalize_text(match)
+        for match in re.findall(r"<object>(.*?)</object>", str(text or ""), flags=re.DOTALL)
+    }
+
+
+def answer_objects_in_docs(answer, docs):
+    # The object(s) the answer names must actually appear in the grounding
+    # evidence. Blocks entity swaps (asked Closure 10, answered Closure 8) that
+    # NLI would wave through on near-duplicate wording. No tagged object in the
+    # answer -> nothing to anchor, so don't reject.
+    answer_objects = object_mentions(answer)
+    if not answer_objects:
+        return True
+    return answer_objects <= object_mentions(docs_to_text(docs))
 
 
 def preserves_evidence_tags(answer, docs):
