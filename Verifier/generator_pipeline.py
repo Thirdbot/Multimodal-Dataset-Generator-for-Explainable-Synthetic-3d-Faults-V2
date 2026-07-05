@@ -100,7 +100,6 @@ class RagWorkflow(object):
 
                 answer = self.best_answer(
                     question=q,
-                    q_query=retrieval_query,
                     evidence_text=self.rag.format_docs(question_docs),  # ground on retrieved evidence, not the whole graph (2048-tok context)
                     question_docs=question_docs,
                     retrieve_many=retrieve_many,
@@ -218,7 +217,7 @@ class RagWorkflow(object):
                 kept.append(doc)
         return kept
 
-    def best_answer(self, question,q_query,evidence_text, question_docs, retrieve_many, number_of_answer=5):
+    def best_answer(self, question, evidence_text, question_docs, retrieve_many, number_of_answer=5):
         answers = []
         try:
             response = self.llm.answer_batch_generation().invoke({
@@ -233,21 +232,22 @@ class RagWorkflow(object):
 
         for item in answer:
             a = item.ANSWER.strip()
-            a_query = item.RETRIEVAL_QUERY.strip() or a  # concise claim for retrieval, mirrors the question path
+            a_query = item.RETRIEVAL_QUERY.strip() or a  # concise claim for retrieval, not the verbose prose answer
             if not a:
                 continue
             try:
-                answer_docs = retrieve_many(a_query) or a  # retrieve on the short claim, not the verbose prose answer
-                filter_answer_docs_by_trust = filter_docs_by_trust(q_query,answer_docs)
-
-                filter_by_trust_docs = dedupe_docs(filter_docs_by_trust(a_query, shared_or_fallback_docs(question_docs, filter_answer_docs_by_trust)))
-
-                if not filter_by_trust_docs:
-                    print("\t[REJECT] not supported by question evidence:", a)
+                # One common evidence set: the question's grounding plus what the
+                # answer's own claim pulls, kept only where it entails the answer.
+                # Verify the natural answer itself, never the retrieval proxy.
+                answer_docs = retrieve_many(a_query)
+                shared = dedupe_docs(shared_or_fallback_docs(question_docs, answer_docs))
+                grounding = filter_docs_by_trust(a, shared)
+                if not grounding:
+                    print("\t[REJECT] not supported by evidence:", a)
                     continue
-
-                verification_text = docs_to_text(filter_by_trust_docs)
-                verification = verify_answer(a_query, verification_text) # answer verify evidences
+                if not preserves_evidence_tags(a, grounding):
+                    continue
+                verification = verify_answer(a, docs_to_text(grounding))
             except Exception as error:
                 print(f"\t[ANSWER CHECK ERROR] {a}: {error}")
                 continue
@@ -257,7 +257,7 @@ class RagWorkflow(object):
 
             answers.append({
                 "answer": a,
-                "docs": filter_by_trust_docs,
+                "docs": grounding,
                 "verification": verification,
             })
 

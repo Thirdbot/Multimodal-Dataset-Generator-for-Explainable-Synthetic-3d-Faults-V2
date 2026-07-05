@@ -58,6 +58,7 @@ Rules:
 - Generate up to {count} answers.
 - Each item has ANSWER and RETRIEVAL_QUERY.
 - ANSWER: one natural, concise sentence answering Question from Evidences, phrased the way a geologist would say it.
+- If the Evidences state only a section-level or negative fact (e.g. no faults, none), answer with that fact directly (the section is featureless / shows no such structures). Do NOT introduce any object the Evidences do not name.
 - RETRIEVAL_QUERY: one short evidence-like sentence mirroring the fact behind the answer; name the object exactly as it is written in Evidences. A sentence, not a keyword bag.
 - Ground everything in the Evidences below. Use only the objects, properties, and values that appear there; never introduce an object, feature, or fluid that is not in the Evidences. These instructions name no example objects; do not invent any.
 - Every factual word in the answer must be supported by Evidences.
@@ -99,6 +100,7 @@ Rules:
 - Each item has QUESTION and RETRIEVAL_QUERY.
 - QUESTION: natural GroundVQA-style visual question; no tags; no exact values; no answer leakage.
 - QUESTION asks one answerable thing visible or described in Evidences.
+- If the Evidences state only a section-level or negative fact (e.g. no faults, none), ask about that fact directly (the overall condition of the section or the absence). Do NOT add any object the Evidences do not name.
 - Use only object/property types present in Evidences.
 - Ask about orientation only if Evidences mention tilt, dip, strike, angle, center, or bbox.
 - If QUESTION compares or asks about multiple objects, QUESTION must name those objects clearly.
