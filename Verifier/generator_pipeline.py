@@ -173,7 +173,7 @@ class RagWorkflow(object):
             return {}
         return data.get("scene") or {}
 
-    def evidence_seeds(self, docs, packet_size=2):
+    def evidence_seeds(self, docs, packet_size=1):
         docs = list(docs)
         random.shuffle(docs)
         by_object = {}

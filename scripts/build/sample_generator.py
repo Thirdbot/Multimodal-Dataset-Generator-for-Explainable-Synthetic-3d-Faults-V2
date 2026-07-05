@@ -41,6 +41,23 @@ def _merge_tracker(path, key, new_entries):
         os.replace(tmp, path)  # atomic: no torn reads, no lost writes
     return merged
 
+
+def _drop_from_tracker(path, key, drop_entries):
+    drop = {str(entry) for entry in drop_entries}
+    with _TRACKER_LOCK:
+        if not path.exists():
+            return
+        with open(path, "r") as file:
+            existing = yaml.safe_load(file) or {}
+        current = existing.get(key, [])
+        kept = [entry for entry in current if str(entry) not in drop]
+        if kept == current:
+            return
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        with open(tmp, "w") as file:
+            yaml.dump({key: kept}, file)
+        os.replace(tmp, path)
+
 class BuildGenerator:
     def __init__(self):
         self.failed = []
@@ -63,6 +80,9 @@ class BuildGenerator:
                 completed_build_folders = list(Path(self.samples_path).glob(f'seismic__*_{run_id}'))
                 new_success = [folder.as_posix() for folder in completed_build_folders if folder.exists()]
                 _merge_tracker(success_tracker_path, "success_build_obj", new_success)
+                # A build that now succeeds must not linger in failed.yaml, or a later
+                # failed.yaml rewrite would rmtree this good build folder.
+                _drop_from_tracker(self.samples_path / 'failed.yaml', "failed_build_config", [str(build_config_path)])
                 logger.info(f"[TRACK SUCCESS] -> Path: {success_tracker_path}")
 
                 return True

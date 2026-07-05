@@ -5,6 +5,7 @@ os.environ["MPLBACKEND"] = "Agg"  # non-interactive, thread-safe; image gen runs
 import watchfiles
 from functools import partial
 import json
+import time
 import asyncio
 from pathlib import Path
 import yaml
@@ -30,10 +31,23 @@ properties_graph_path = Path(__file__).parent.parent.parent / "graphs" / "proper
 images_path = Path(__file__).parent.parent.parent / "build_objects" / "images"
 properties_2d_graph_path = Path(__file__).parent.parent.parent / "graphs" / "properties_2d_graph"
 
-# Image extraction loads full 3D volumes; running one per graph concurrently on top
-# of the concurrent builds spikes memory and can silently kill the worker. Serialize
-# it so only one graph is extracted at a time.
-_image_gen_semaphore = asyncio.Semaphore(1)
+# Image extraction is memory-bound, not thread-bound: it loads full 3D volumes, but
+# outputs are per-sample and plt.imsave is safe to parallelize. Builds are serial now,
+# so the memory the old concurrent builds used is free — a small bounded concurrency is
+# fine. Tune with IMAGE_GEN_CONCURRENCY; keep it low so big volumes don't swap.
+_image_gen_concurrency = max(1, int(os.environ.get("IMAGE_GEN_CONCURRENCY", "2")))
+_image_gen_semaphore = asyncio.Semaphore(_image_gen_concurrency)
+
+# Synthoseis is NOT thread-safe: the config guard monkeypatches process-global class
+# attributes (Parameters._fault_settings, Faults.get_displacement_vector), so two
+# builds running in threads at once clobber each other's fault settings — a boring
+# build's no-fault override (number_faults=0, fmode="none") leaks into a fault_complex
+# build. Serialize builds so only one owns the patched globals at a time.
+_build_semaphore = asyncio.Semaphore(1)
+
+async def _run_build(generator, config_path, run_id):
+    async with _build_semaphore:
+        await asyncio.to_thread(generator.build_sample, config_path, run_id)
 
 def _sample_id_from_graph(graph_path):
     return Path(graph_path).stem.removesuffix("_db_extract_properties_graph")
@@ -44,6 +58,24 @@ def _delete_build_for_sample(sample_id):
     # if already gone.
     for folder in build_path.glob(sample_id):
         print(f"removing extracted build: {folder}")
+        shutil.rmtree(folder, ignore_errors=True)
+
+def _sweep_partial_builds(min_idle_seconds=120):
+    # Run once at startup, before any build launches. parameters.db is written last,
+    # so a build folder without it is a leftover from an interrupted run. The idle
+    # guard keeps us from touching anything a concurrent run might still be writing.
+    now = time.time()
+    for folder in build_path.glob("seismic__*"):
+        if (folder / "parameters.db").exists():
+            continue
+        try:
+            last = max((child.stat().st_mtime for child in folder.iterdir()),
+                       default=folder.stat().st_mtime)
+        except OSError:
+            continue
+        if now - last < min_idle_seconds:
+            continue                                # recently written -> likely still building
+        print(f"[SWEEP] removing interrupted build (no parameters.db): {folder.name}")
         shutil.rmtree(folder, ignore_errors=True)
 
 async def _run_image_gen(graph_path):
@@ -140,16 +172,14 @@ async def builds_config_watcher():
         if _config_already_built(cfg.stem):
             continue
         print("Catch-up build for existing config:", cfg.name)
-        asyncio.create_task(asyncio.to_thread(generator.build_sample, cfg.as_posix(), cfg.stem))
+        asyncio.create_task(_run_build(generator, cfg.as_posix(), cfg.stem))
 
     async for changes in watchfiles.awatch(build_configs_path.as_posix()):
         for change_type, file_path in changes:
             if change_type == Change.added:
                 print("Added configs:", file_path)
-                # pass to build function
-                asyncio.create_task(
-                    asyncio.to_thread(generator.build_sample, file_path, Path(file_path).stem)
-                )
+                # pass to build function (serialized: synthoseis is not thread-safe)
+                asyncio.create_task(_run_build(generator, file_path, Path(file_path).stem))
             elif change_type == Change.deleted:
                 print("Deleted configs:", file_path)
                 asyncio.create_task(on_build_delete(Path(file_path).stem,build_path))
@@ -350,6 +380,7 @@ async def dataset_worker(queue):
 async def gather():
     for p in (build_path, properties_graph_path, images_path, properties_2d_graph_path):
         Path(p).mkdir(parents=True, exist_ok=True)
+    _sweep_partial_builds()                          # clear interrupted builds before starting
     dataset_queue = asyncio.Queue()
     await asyncio.gather(
         recipes_watcher(),
