@@ -86,8 +86,10 @@ class RagWorkflow(object):
             for question_item in question_items:
                 q = question_item.get("question", "")
                 retrieval_query = question_item.get("retrieval_query") or q
-                question_docs = filter_docs_by_trust(
-                    q,retrieve_many(retrieval_query)
+
+                question_docs = filter_docs_by_retrieval_score(
+                    retrieve_many(retrieval_query),
+                    MIN_RETRIEVAL_SCORE
                 ) # multiple question evidences
                 if not question_docs:
                     print("[REJECT] question:",q)
@@ -237,20 +239,15 @@ class RagWorkflow(object):
             try:
                 answer_docs = retrieve_many(a_query) or a  # retrieve on the short claim, not the verbose prose answer
                 filter_answer_docs_by_trust = filter_docs_by_trust(q_query,answer_docs)
-                # filter with the object-bearing a_query, not the bare answer: NLI's
-                # verdict rejects wrong-object docs (Closure 2 avoids fault FAILs vs a
-                # "Closure 1 avoids fault" claim) where similarity and a bare "avoids
-                # fault" claim both pass everything. Generic a_query stays broad.
-                filter_by_trust_docs = dedupe_docs(filter_docs_by_trust(a, shared_or_fallback_docs(question_docs, filter_answer_docs_by_trust)))
+
+                filter_by_trust_docs = dedupe_docs(filter_docs_by_trust(a_query, shared_or_fallback_docs(question_docs, filter_answer_docs_by_trust)))
 
                 if not filter_by_trust_docs:
                     print("\t[REJECT] not supported by question evidence:", a)
                     continue
 
-                if not preserves_evidence_tags(a, filter_by_trust_docs):
-                    continue
                 verification_text = docs_to_text(filter_by_trust_docs)
-                verification = verify_answer(a, verification_text) # answer verify evidences
+                verification = verify_answer(a_query, verification_text) # answer verify evidences
             except Exception as error:
                 print(f"\t[ANSWER CHECK ERROR] {a}: {error}")
                 continue
