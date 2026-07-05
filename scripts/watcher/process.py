@@ -30,6 +30,14 @@ properties_graph_path = Path(__file__).parent.parent.parent / "graphs" / "proper
 images_path = Path(__file__).parent.parent.parent / "build_objects" / "images"
 properties_2d_graph_path = Path(__file__).parent.parent.parent / "graphs" / "properties_2d_graph"
 
+# Image extraction loads full 3D volumes; running one per graph concurrently on top
+# of the concurrent builds spikes memory and can silently kill the worker. Serialize
+# it so only one graph is extracted at a time.
+_image_gen_semaphore = asyncio.Semaphore(1)
+
+async def _run_image_gen(graph_path):
+    async with _image_gen_semaphore:
+        await asyncio.to_thread(generate_images_for_graph, graph_path)
 
 async def on_recipes_delete(files,dest,types=""):
     for f_path in files:
@@ -148,7 +156,7 @@ async def graph_properties_watcher():
     for g in sorted(properties_graph_path.glob("*.json")):      # phase 1: existing graphs
         p = g.as_posix()
         seen.add(p)
-        asyncio.create_task(asyncio.to_thread(generate_images_for_graph, p))
+        asyncio.create_task(_run_image_gen(p))
     async for changes in watchfiles.awatch(properties_graph_path.as_posix()):  # phase 2: new graphs
         for change_type, file_path in changes:
             if change_type not in (Change.added, Change.modified):
@@ -157,10 +165,8 @@ async def graph_properties_watcher():
             if change_type == Change.added and p in seen:
                 continue                                        # already handled in catch-up
             seen.add(p)
-            # forward to image generators
-            asyncio.create_task(
-                asyncio.to_thread(generate_images_for_graph, p)
-            )
+            # forward to image generators (serialized via _run_image_gen)
+            asyncio.create_task(_run_image_gen(p))
 
 async def images_watcher():
     print("Watching images...")

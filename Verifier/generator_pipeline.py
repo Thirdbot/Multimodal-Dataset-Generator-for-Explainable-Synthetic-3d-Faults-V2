@@ -18,7 +18,7 @@ from Verifier.rag_verifier import best_doc_score, score_qa_evidence, serialize_d
 
 DEFAULT_GRAPH_ROOT = ROOT / "graphs" / "properties_2d_graph"
 DEFAULT_OUTPUT = ROOT / "Dataset" / "verified_qa.jsonl"
-MIN_RETRIEVAL_SCORE = 0.6
+MIN_RETRIEVAL_SCORE = 0.5
 QUESTION_PER_GRAPH  = 5
 CANDIDATE_PER_GRAPH = 5
 MAX_ROWS_PER_EVIDENCE = 2
@@ -61,6 +61,15 @@ class RagWorkflow(object):
         retrieve_many = self.llm.retrieve_many(retrieval)
         all_docs = self.rag.evidence_documents(graph_path)
 
+        # An empty/degenerate graph (only a category node, no objects) has nothing
+        # to ask about. The lone section doc still carries object_id="category:...",
+        # so key off a real named object (<object> tag) instead. Feeding
+        # "The section is none" to the LLM just makes it hallucinate, so skip first.
+        object_docs = [doc for doc in all_docs if object_mentions(doc.page_content)]
+        if not object_docs:
+            print(f"[SKIP] {sample_id} {view}: graph has no objects, nothing to ask")
+            return self.rows
+
         # evidences seeds
         number_of_passes_questions = 0
         evidence_seeds = self.evidence_seeds(all_docs)
@@ -87,8 +96,7 @@ class RagWorkflow(object):
                 q = question_item.get("question", "")
                 retrieval_query = question_item.get("retrieval_query") or q
                 question_docs = filter_docs_by_retrieval_score(
-                    retrieve_many(retrieval_query),
-                    MIN_RETRIEVAL_SCORE,
+                    retrieve_many(retrieval_query),MIN_RETRIEVAL_SCORE
                 ) # multiple question evidences
                 if best_doc_score(question_docs) < MIN_RETRIEVAL_SCORE:
                     print("[REJECT] question:",q)
@@ -235,7 +243,7 @@ class RagWorkflow(object):
             if not a:
                 continue
             try:
-                answer_docs = retrieve_many(a_query)  # retrieve on the short claim, not the verbose prose answer
+                answer_docs = retrieve_many(a_query) or a  # retrieve on the short claim, not the verbose prose answer
                 filter_answer_docs_by_trust = filter_docs_by_trust(q_query,answer_docs)
                 # filter with the object-bearing a_query, not the bare answer: NLI's
                 # verdict rejects wrong-object docs (Closure 2 avoids fault FAILs vs a
@@ -250,7 +258,7 @@ class RagWorkflow(object):
                 if not preserves_evidence_tags(a, filter_by_trust_docs):
                     continue
                 verification_text = docs_to_text(filter_by_trust_docs)
-                verification = verify_answer(a, verification_text) # answer verify evidences
+                verification = verify_answer(a_query, verification_text) # answer verify evidences
             except Exception as error:
                 print(f"\t[ANSWER CHECK ERROR] {a}: {error}")
                 continue

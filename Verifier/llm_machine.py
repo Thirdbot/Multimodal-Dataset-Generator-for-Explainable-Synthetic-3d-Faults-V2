@@ -58,7 +58,8 @@ Rules:
 - Generate up to {count} answers.
 - Each item has ANSWER and RETRIEVAL_QUERY.
 - ANSWER: one natural, concise sentence answering Question from Evidences, phrased the way a geologist would say it.
-- RETRIEVAL_QUERY: one short evidence-like sentence mirroring the fact behind the answer; name the object it is about (for example "Closure 1 contains gas"). A sentence, not a keyword bag.
+- RETRIEVAL_QUERY: one short evidence-like sentence mirroring the fact behind the answer; name the object exactly as it is written in Evidences. A sentence, not a keyword bag.
+- Ground everything in the Evidences below. Use only the objects, properties, and values that appear there; never introduce an object, feature, or fluid that is not in the Evidences. These instructions name no example objects; do not invent any.
 - Every factual word in the answer must be supported by Evidences.
 - If Evidences do not answer the Question, return {{"ANSWERS":[]}}.
 - Do not guess missing objects, counts, locations, regions, properties, fluids, or interpretations.
@@ -101,13 +102,9 @@ Rules:
 - Use only object/property types present in Evidences.
 - Ask about orientation only if Evidences mention tilt, dip, strike, angle, center, or bbox.
 - If QUESTION compares or asks about multiple objects, QUESTION must name those objects clearly.
-- RETRIEVAL_QUERY: one or two short evidence-like sentences (one per line) mirroring the fact behind the answer. Name the object for a specific question ("Closure 1 avoids fault"); keep it generic for a broad question ("closure contains oil"). A sentence, not a keyword bag.
-
-Good:
-{{"QUESTIONS":[{{"QUESTION":"Where is oil contained in this section?","RETRIEVAL_QUERY":"closure contains oil"}},{{"QUESTION":"What does Closure 1 avoid?","RETRIEVAL_QUERY":"Closure 1 avoids fault\nClosure 1 avoids onlap"}},{{"QUESTION":"How many onlap episodes are visible?","RETRIEVAL_QUERY":"the layering shows nums onlap episodes"}}]}}
-
-Bad:
-{{"QUESTIONS":[{{"QUESTION":"What is the orientation of Closure 1?","RETRIEVAL_QUERY":"orientation of closure 1"}},{{"QUESTION":"Where is oil?","RETRIEVAL_QUERY":"oil location"}},{{"QUESTION":"The onlap is yellow, right?","RETRIEVAL_QUERY":"onlap yellow"}}]}}
+- RETRIEVAL_QUERY: one or two short evidence-like sentences (one per line) that mirror the exact fact and wording of the Evidences. For a specific question, name the object exactly as it is written in Evidences; for a broad question, keep it general. A sentence, not a keyword bag.
+- Ground everything in the Evidences below. Only use object names, types, properties, and values that appear there; never introduce an object, feature, or fluid that is not in the Evidences.
+- These instructions name no example objects. If the Evidences describe one kind of object, every QUESTION and RETRIEVAL_QUERY must be about that same kind. Do not invent subjects.
 
 Evidences:
 {evidences}
