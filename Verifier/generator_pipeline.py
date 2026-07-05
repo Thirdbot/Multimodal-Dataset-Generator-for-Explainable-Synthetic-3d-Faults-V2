@@ -61,12 +61,6 @@ class RagWorkflow(object):
         retrieve_many = self.llm.retrieve_many(retrieval)
         all_docs = self.rag.evidence_documents(graph_path)
 
-        # An empty/degenerate graph (only a category node, no objects) has nothing
-        # to ask about. The lone section doc still carries object_id="category:...",
-        # so key off a real named object (<object> tag) instead. Feeding
-        # "The section is none" to the LLM just makes it hallucinate, so skip first.
-
-
         # evidences seeds
         number_of_passes_questions = 0
         evidence_seeds = self.evidence_seeds(all_docs)
@@ -92,13 +86,14 @@ class RagWorkflow(object):
             for question_item in question_items:
                 q = question_item.get("question", "")
                 retrieval_query = question_item.get("retrieval_query") or q
-                question_docs = filter_docs_by_retrieval_score(
-                    retrieve_many(retrieval_query),MIN_RETRIEVAL_SCORE
+                question_docs = filter_docs_by_trust(
+                    retrieval_query,retrieve_many(retrieval_query)
                 ) # multiple question evidences
-                if best_doc_score(question_docs) < MIN_RETRIEVAL_SCORE:
+                if not question_docs:
                     print("[REJECT] question:",q)
                     tally["q_reject"] += 1
                     continue
+
                 print("[ACCEPT] question:",q)
 
                 answer = self.best_answer(
