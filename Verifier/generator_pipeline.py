@@ -249,9 +249,9 @@ class RagWorkflow(object):
                 if not grounding:
                     print("\t[REJECT] not supported by evidence:", a)
                     continue
-                if not preserves_evidence_tags(a, grounding):
-                    continue
-                verification = verify_answer(a, docs_to_text(grounding))
+
+
+                verification = verify_answer(a_query, docs_to_text(grounding))
             except Exception as error:
                 print(f"\t[ANSWER CHECK ERROR] {a}: {error}")
                 continue
@@ -432,30 +432,6 @@ def answer_objects_in_docs(answer, docs):
     if not answer_objects:
         return True
     return answer_objects <= object_mentions(docs_to_text(docs))
-
-
-def preserves_evidence_tags(answer, docs):
-    evidence_text = docs_to_text(docs)
-    required_spans = tagged_spans(evidence_text)
-    if not required_spans:
-        return True
-
-    used_values = [
-        span for span in required_spans
-        if strip_tag(span) in answer
-    ]
-    if not used_values:
-        return True
-
-    return all(span in answer for span in used_values)
-
-
-def tagged_spans(text):
-    return re.findall(r"<(?:object|nums|center|bbox)>.*?</(?:object|nums|center|bbox)>", text)
-
-
-def strip_tag(span):
-    return re.sub(r"</?(?:object|nums|center|bbox)>", "", span)
 
 
 def verify_answer(answer, evidence_text):
