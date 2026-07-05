@@ -65,10 +65,7 @@ class RagWorkflow(object):
         # to ask about. The lone section doc still carries object_id="category:...",
         # so key off a real named object (<object> tag) instead. Feeding
         # "The section is none" to the LLM just makes it hallucinate, so skip first.
-        object_docs = [doc for doc in all_docs if object_mentions(doc.page_content)]
-        if not object_docs:
-            print(f"[SKIP] {sample_id} {view}: graph has no objects, nothing to ask")
-            return self.rows
+
 
         # evidences seeds
         number_of_passes_questions = 0
