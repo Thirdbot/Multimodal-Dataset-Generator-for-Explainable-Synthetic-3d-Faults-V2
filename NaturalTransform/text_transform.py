@@ -68,7 +68,6 @@ EDGE_LABELS = {
 }
 
 PROPERTY_TEMPLATES = {
-    "fault_mode": "{source} is {value}",
     "throw": "{source} has throw of about {value}",
     "tilt_pct": "{source} shows tilt of about {value}",
     "shear_zone_width": "{source} has a shear zone about {value} wide",
@@ -160,6 +159,8 @@ class TextTransform(object):
     # Sentence builders ------------------------------------------------------
 
     def _property_sentence(self, source, edge, target):
+        if edge == "fault_mode":
+            return self._fault_mode_sentence(source, target)
         if edge in BOOLEAN_TEMPLATES:
             return self._boolean_sentence(edge, target)
         if edge in COUNT_TEMPLATES:
@@ -195,6 +196,15 @@ class TextTransform(object):
             source=source,
             value=value,
         ))
+
+    def _fault_mode_sentence(self, source, target):
+        # fault_mode is a categorical pattern (none/random/self_branching/
+        # stairs/relay_ramps/horst_graben), not a number; "none" is a real
+        # fact meaning no faulting, so phrase it as an absence, not "is none".
+        value = str(target).strip().lower()
+        if value in {"none", "", "0", "false"}:
+            return self._sentence(f"{source} shows no faulting")
+        return self._sentence(f"{source} shows a {value.replace('_', ' ')} fault pattern")
 
     def _intersection_sentence(self, source, edge, target):
         target_name = self.edge_label(edge).replace("intersects ", "")

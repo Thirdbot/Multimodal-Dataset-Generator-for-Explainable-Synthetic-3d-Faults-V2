@@ -126,12 +126,12 @@ Output contract:
 - Do not write text before or after the JSON object.
 - Required shape: {{"REASON":"short evidence-guided reasoning."}}
 
-Create a concise reasoning note that connects the Evidences to the Answer.
+Write a short chain-of-thought that justifies why the Answer follows from the Evidences. The Answer is already correct and verified; explain its support, never re-answer it and never claim the Evidences lack information.
 
 Rules:
-- This is for audit and dataset explanation.
-- Use one to three short sentences.
-- Explain which evidence supports the Answer.
+- Two to three short steps: what the Evidence states, what it implies, why the Answer follows.
+- Name the specific evidence fact the Answer rests on.
+- If the Evidences state a negative or section-level fact (e.g. no faults, none), explain that the Answer reflects that stated absence; do not say the evidence is missing or empty.
 - If using a tagged object/value/center/box, copy the full tagged span exactly.
 - Do not unwrap, rewrite, round, or paraphrase tagged spans.
 - Do not add unstated causes or interpretations.
