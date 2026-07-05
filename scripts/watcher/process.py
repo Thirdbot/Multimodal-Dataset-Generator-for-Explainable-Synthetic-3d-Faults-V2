@@ -35,9 +35,39 @@ properties_2d_graph_path = Path(__file__).parent.parent.parent / "graphs" / "pro
 # it so only one graph is extracted at a time.
 _image_gen_semaphore = asyncio.Semaphore(1)
 
+def _sample_id_from_graph(graph_path):
+    return Path(graph_path).stem.removesuffix("_db_extract_properties_graph")
+
+def _delete_build_for_sample(sample_id):
+    # Remove the heavy build only after its images + 2d graph exist and tracing is
+    # idempotent, so nothing is still reading it. glob matches the one folder; no-op
+    # if already gone.
+    for folder in build_path.glob(sample_id):
+        print(f"removing extracted build: {folder}")
+        shutil.rmtree(folder, ignore_errors=True)
+
 async def _run_image_gen(graph_path):
+    # Serialized owner of the per-sample tail: images -> 2d graph -> delete build.
+    # Chaining them in one coroutine (instead of via a separate image watcher) means
+    # the build is deleted only after everything that reads it has finished, which
+    # removes the extraction/deletion race. Every stage is idempotent so restarts and
+    # repeated graph events are safe.
     async with _image_gen_semaphore:
-        await asyncio.to_thread(generate_images_for_graph, graph_path)
+        graph_path = Path(graph_path)
+        sample_id = _sample_id_from_graph(graph_path)
+        scene_position = images_path / sample_id / "scene_position.json"
+        if not scene_position.exists():  # skip re-imaging a sample already done
+            try:
+                await asyncio.to_thread(generate_images_for_graph, graph_path)
+            except Exception as exc:
+                print(f"[IMAGE GEN FAILED] {sample_id}: {exc}")
+                return
+        try:
+            await asyncio.to_thread(generate_properties_2d_graphs, {sample_id})
+        except Exception as exc:
+            print(f"[2D GRAPH FAILED] {sample_id}: {exc}")
+            return
+        _delete_build_for_sample(sample_id)
 
 async def on_recipes_delete(files,dest,types=""):
     for f_path in files:
@@ -50,15 +80,6 @@ async def on_build_delete(files,dest):
     for f_path in file_path:
         print(f"removing file: {f_path}")
         shutil.rmtree(f_path)
-
-def on_image_gen_delete_built(change):
-    files = change.result() or []
-    if files:
-        for f in files:
-            file_path = Path(build_path).glob(f)
-            for f_path in file_path:
-                print(f"removing file: {f_path}")
-                shutil.rmtree(f_path)
 
 async def on_build_failed(files):
     for f_path in files:
@@ -102,10 +123,24 @@ async def recipes_watcher():
                 print("Deleted:",file_path)
 
 
+def _config_already_built(run_id):
+    # already extracted (3d graph exists) or built and pending (build folder on disk)
+    if list(properties_graph_path.glob(f"seismic__*_{run_id}_db_extract_properties_graph.json")):
+        return True
+    if list(build_path.glob(f"seismic__*_{run_id}")):
+        return True
+    return False
+
 async def builds_config_watcher():
 
     print("Watching builds configs...")
     generator = BuildGenerator()
+
+    for cfg in sorted(build_configs_path.glob("*.json")):   # phase 1: configs already on disk
+        if _config_already_built(cfg.stem):
+            continue
+        print("Catch-up build for existing config:", cfg.name)
+        asyncio.create_task(asyncio.to_thread(generator.build_sample, cfg.as_posix(), cfg.stem))
 
     async for changes in watchfiles.awatch(build_configs_path.as_posix()):
         for change_type, file_path in changes:
@@ -122,18 +157,38 @@ async def builds_config_watcher():
 async def builds_watcher():
 
     def read_add(change):
-        objs = [Path(p) for p in (change.result() or {}).get('success_build_obj', [])]
+        try:
+            data = change.result() or {}
+        except Exception as exc:                                # torn read of success.yaml
+            print(f"[SUCCESS READ FAILED] {exc}")
+            return
+        objs = [Path(p) for p in data.get('success_build_obj', [])]
         if not objs:
             return
         print("tracing success builds:", objs)
         asyncio.create_task(asyncio.to_thread(trace_success_tracker, objs))
 
     def read_failed(change):
-            for cfg in (change.result() or {}).get("failed_build_config", []):
-                asyncio.create_task(on_build_delete(Path(cfg).stem, build_path))
+        try:
+            data = change.result() or {}
+        except Exception as exc:
+            print(f"[FAILED READ FAILED] {exc}")
+            return
+        for cfg in data.get("failed_build_config", []):
+            asyncio.create_task(on_build_delete(Path(cfg).stem, build_path))
 
     print("Watching success builds...")
-    if builds_success_path.exists():                            # phase 1: trace builds already on disk
+    # phase 1a: reconcile — trace any build on disk with a parameters.db but no graph
+    # yet. This recovers builds whose success.yaml entry was ever lost to a race,
+    # independent of the yaml, so nothing stays built-but-unextracted.
+    for folder in sorted(build_path.glob("seismic__*")):
+        if not (folder / "parameters.db").exists():
+            continue
+        if (properties_graph_path / f"{folder.name}_db_extract_properties_graph.json").exists():
+            continue
+        print(f"[RECONCILE] tracing orphaned build: {folder.name}")
+        asyncio.create_task(asyncio.to_thread(trace_success_tracker, [folder]))
+    if builds_success_path.exists():                            # phase 1b: trace builds from success.yaml
         asyncio.create_task(read_yaml(builds_success_path.as_posix())).add_done_callback(read_add)
     async for changes in watchfiles.awatch(build_path.as_posix()):  # phase 2: new builds
         for change_type,file_path in changes:
@@ -165,20 +220,9 @@ async def graph_properties_watcher():
             if change_type == Change.added and p in seen:
                 continue                                        # already handled in catch-up
             seen.add(p)
-            # forward to image generators (serialized via _run_image_gen)
+            # forward to image gen; _run_image_gen owns images -> 2d graph -> delete,
+            # all serialized, so there is no separate images watcher to race it.
             asyncio.create_task(_run_image_gen(p))
-
-async def images_watcher():
-    print("Watching images...")
-    if any(images_path.iterdir()):                              # phase 1: build 2d graphs from existing images
-        asyncio.create_task(asyncio.to_thread(generate_properties_2d_graphs))
-    async for changes in watchfiles.awatch(images_path.as_posix()):  # phase 2: new images
-        if not any(t in (Change.added, Change.modified) for t, _ in changes):
-            continue
-        # forward to properties 2d graph (one batch rebuild per change-set)
-        asyncio.create_task(
-            asyncio.to_thread(generate_properties_2d_graphs)
-        ).add_done_callback(on_image_gen_delete_built)
 
 async def dataset_gen_pipeline(queue):
     """Producer: enqueue each 2d-graph file for row generation.
@@ -222,18 +266,35 @@ def _init_nli_on_cpu():
         nm.SentenceTransformer, nm.CrossEncoder = orig_st, orig_ce
 
 def _seed_processed_graphs():
-    """Graph files already turned into rows, so we never regenerate/override them."""
-    processed = set()
+    """Graphs already turned into rows. A graph counts as processed only if its file
+    has not been modified since the row recorded it, so a rebuilt graph is reprocessed
+    on the next run. Set DATASET_REGEN=1 to reprocess everything (after a prompt change)."""
+    stored = {}
     if DEFAULT_OUTPUT.exists():
         for line in DEFAULT_OUTPUT.read_text().splitlines():
             if not line.strip():
                 continue
             try:
-                gp = json.loads(line).get("metadata", {}).get("graph_path")
+                meta = json.loads(line).get("metadata", {})
             except json.JSONDecodeError:
                 continue
-            if gp:
-                processed.add(Path(gp).as_posix())
+            gp = meta.get("graph_path")
+            if not gp:
+                continue
+            gp = Path(gp).as_posix()
+            stored[gp] = max(stored.get(gp, 0.0), float(meta.get("graph_mtime", 0.0) or 0.0))
+
+    processed = set()
+    for gp, mtime in stored.items():
+        path = Path(gp)
+        if not path.exists():
+            processed.add(gp)                  # graph gone; nothing to reprocess
+            continue
+        try:
+            if path.stat().st_mtime <= mtime + 1.0:  # not modified since (1s tolerance)
+                processed.add(gp)
+        except OSError:
+            processed.add(gp)
     return processed
 
 async def dataset_worker(queue):
@@ -247,8 +308,9 @@ async def dataset_worker(queue):
             print(f"[DATASET] init failed, retrying: {exc}")
             _cuda_cleanup()
             await asyncio.sleep(5)
-    workflow.start_output(truncate=False)  # append mode; keeps existing verified_qa.jsonl
-    processed = _seed_processed_graphs()
+    regen = os.environ.get("DATASET_REGEN") == "1"   # force full rebuild after a prompt change
+    workflow.start_output(truncate=regen)            # else append mode; keeps existing verified_qa.jsonl
+    processed = set() if regen else _seed_processed_graphs()
     print("Dataset worker ready.")
 
     while True:
@@ -294,7 +356,6 @@ async def gather():
         builds_config_watcher(),
         builds_watcher(),
         graph_properties_watcher(),
-        images_watcher(),
         dataset_gen_pipeline(dataset_queue),
         dataset_worker(dataset_queue),
         return_exceptions=True

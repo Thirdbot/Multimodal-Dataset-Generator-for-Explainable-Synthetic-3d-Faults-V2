@@ -86,7 +86,8 @@ EDGE_TYPES = {
 
 def main():
     rows = [build_row(item) for item in read_jsonl(INPUT)]
-    rows = [row for row in rows if row and row["images"] and row["masks"]]
+    # mask is optional now: object rows carry a mask, negative/featureless rows don't.
+    rows = [row for row in rows if row and row["images"]]
     write_csv(rows, CSV_OUTPUT)
 
 
@@ -142,7 +143,22 @@ def build_row(item):
         retrieved.append(scene_object)
 
     if not regions:
-        return None
+        # Featureless / negative example (e.g. "the section shows no faulting"): there
+        # is no object to outline, but the scene image plus the section-level evidence
+        # is still a valid VQA row. Emit it with no mask and no regions instead of
+        # dropping it, so negatives reach the dataset.
+        evidence_text = "".join(f"{evidence.get('text', '')}.\n" for evidence in evidences)
+        return {
+            "sample_id": sample_id,
+            "images": [image_path],
+            "masks": [],
+            "instruction": INSTRUCTION,
+            "question": f"{item.get('question', '')}",
+            "reason": f'<think>{item.get("trace", {}).get("reason", "")}</think>',
+            "answer": f'<answer>{item.get("answer", "")}</answer>',
+            "evidence": evidence_text,
+            "regions": [],
+        }
 
     mask_path = build_row_mask(sample_dir, item, view, retrieved)
     if not mask_path:

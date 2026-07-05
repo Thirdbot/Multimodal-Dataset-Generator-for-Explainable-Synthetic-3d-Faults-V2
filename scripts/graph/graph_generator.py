@@ -6,6 +6,7 @@ properties graph for downstream evidence/RAG/dataset generation.
 """
 
 import time
+import threading
 from pathlib import Path
 import sys
 
@@ -15,6 +16,15 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.common.logger_color import logger
+
+PROPERTIES_GRAPH_DIR = ROOT / "graphs" / "properties_graph"
+
+# success.yaml is re-read whole on every write, so the same build is handed here
+# many times. Trace each build once: claim it under a lock, and treat an existing
+# graph on disk as already-done (idempotent across restarts). This kills the
+# O(N^2) re-trace churn and stops a re-trace from racing the build's deletion.
+_TRACE_LOCK = threading.Lock()
+_TRACED = set()
 from scripts.common.yaml_helper import YAMLHelper
 from scripts.graph.low_level_tracer import ParameterDbTracer
 from scripts.graph.graph_system import GraphSystem
@@ -135,6 +145,12 @@ class BuildGraphGenerator:
 
     def _trace_sample(self, build_folder):
         """Extract one build's DB tables and save its filtered properties graph."""
+        graph_file = PROPERTIES_GRAPH_DIR / f"{build_folder.name}_db_extract_properties_graph.json"
+        with _TRACE_LOCK:
+            if build_folder.name in _TRACED or graph_file.exists():
+                _TRACED.add(build_folder.name)
+                return True
+            _TRACED.add(build_folder.name)  # claim so concurrent callers skip
         try:
             logger.info(f"[TRACE START] -> Sample: {build_folder.name}")
 
@@ -154,6 +170,8 @@ class BuildGraphGenerator:
             logger.info(f"[TRACE DONE] -> Graph: {properties_graph_path}")
             return True
         except Exception as exc:
+            with _TRACE_LOCK:
+                _TRACED.discard(build_folder.name)  # allow retry on failure
             logger.error(f"[TRACE FAILED] -> Sample: {build_folder} Error: {exc}")
             return False
 

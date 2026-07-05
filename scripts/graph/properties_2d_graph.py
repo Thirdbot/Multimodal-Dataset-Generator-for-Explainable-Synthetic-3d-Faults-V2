@@ -31,12 +31,17 @@ EXCLUDED_VISUAL_OBJECTS = {
 }
 
 
-def main():
+def main(sample_ids=None):
+    # sample_ids: optional iterable to build only those samples' 2d graphs.
+    # None means rebuild every graph on disk (startup catch-up).
+    sample_filter = set(sample_ids) if sample_ids is not None else None
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     written = []
     samples = []
     for graph_path in sorted(PROPERTIES_GRAPH_DIR.glob("*.json")):
         sample_id = _sample_id_from_graph_path(graph_path)
+        if sample_filter is not None and sample_id not in sample_filter:
+            continue
         graph = _read_json(graph_path)
 
         for view in VIEWS:

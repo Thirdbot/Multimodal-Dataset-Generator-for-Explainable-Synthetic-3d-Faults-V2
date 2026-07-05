@@ -37,6 +37,7 @@ class RagWorkflow(object):
         self.rag = Rag(embedding_model="all-MiniLM-L6-v2")
         self.llm = LLMMachine()
         self.rows = []
+        self._seen_row_ids = set()  # dedup so a reprocess/regen never appends duplicates
 
     def generate_dataset(self, max_graphs=None, graph_views=("inline", "crossline"), questions_per_graph=5, candidates_per_question=5):
         self.start_output(truncate=True)
@@ -143,6 +144,9 @@ class RagWorkflow(object):
                         # from only the retrieved objects (see DatasetMaker).
                         "image_path": scene.get("image_path", ""),
                         "overlay_path": scene.get("overlay_path", ""),
+                        # mtime of the graph this row came from; the watcher reprocesses
+                        # a graph whose file is newer than the row that recorded it.
+                        "graph_mtime": _safe_mtime(graph_path),
                     },
                     "trace": {
                         "reason": reason,
@@ -297,13 +301,20 @@ class RagWorkflow(object):
         self.output_path.parent.mkdir(parents=True, exist_ok=True)
         if truncate:
             self.output_path.write_text("")
+            self._seen_row_ids = set()
         else:
             self.output_path.touch()
+            self._seen_row_ids = _existing_row_ids(self.output_path)
         self.output_started = True
 
     def append_row(self, row):
         if not self.output_started:
             self.start_output(truncate=False)
+
+        rid = row.get("row_id")
+        if rid in self._seen_row_ids:
+            return False
+        self._seen_row_ids.add(rid)
 
         with open(self.output_path, "a") as file:
             file.write(json.dumps(row, default=str) + "\n")
@@ -313,6 +324,28 @@ class RagWorkflow(object):
                 Answer:{row.get('answer')}
                 Evidences:{row.get('evidence')}\n""")
         return True
+
+
+def _safe_mtime(path):
+    try:
+        return Path(path).stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def _existing_row_ids(output_path):
+    ids = set()
+    if Path(output_path).exists():
+        for line in Path(output_path).read_text().splitlines():
+            if not line.strip():
+                continue
+            try:
+                rid = json.loads(line).get("row_id")
+            except json.JSONDecodeError:
+                continue
+            if rid:
+                ids.add(rid)
+    return ids
 
 
 def dedupe_docs(docs):
