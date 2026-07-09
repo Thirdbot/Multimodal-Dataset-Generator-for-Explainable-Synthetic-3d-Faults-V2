@@ -19,10 +19,19 @@ from Verifier.rag_verifier import best_doc_score, score_qa_evidence, serialize_d
 DEFAULT_GRAPH_ROOT = ROOT / "graphs" / "properties_2d_graph"
 DEFAULT_OUTPUT = ROOT / "Dataset" / "verified_qa.jsonl"
 MIN_RETRIEVAL_SCORE = 0.5
-QUESTION_PER_GRAPH  = 5
-CANDIDATE_PER_GRAPH = 5
+QUESTION_PER_GRAPH  = 10
+CANDIDATE_PER_GRAPH = 15
 MAX_ROWS_PER_EVIDENCE = 2
-MAX_ATTEMPT = 3 * QUESTION_PER_GRAPH # max attempt for outer loop
+MAX_ATTEMPT = 4 * QUESTION_PER_GRAPH # max attempt for outer loop
+# Rotated per batch so questions spread across angles instead of clustering on one
+# phrasing. Evidence-gated in the prompt: an angle the Evidences cannot answer is skipped.
+QUESTION_FACETS = (
+    "whether a structure is present or the section is featureless",
+    "how many of a structure there are",
+    "where a structure sits in the section",
+    "the orientation or geometry of a structure",
+    "how two named structures relate",
+)
 INSTRUCTION = (
     "Inspect the seismic images, use the visible regions as visual evidence, "
     "and answer the question with concise geological reasoning."
@@ -50,7 +59,7 @@ class RagWorkflow(object):
             ))
         return self.rows
 
-    def generate_for_graph(self, graph_path, questions_per_graph=5, candidates_per_question=10):
+    def generate_for_graph(self, graph_path, questions_per_graph=QUESTION_PER_GRAPH, candidates_per_question=CANDIDATE_PER_GRAPH):
         graph_path = Path(graph_path)
         sample_id = sample_id_from_graph(graph_path)
         category = category_from_sample_id(sample_id)
@@ -193,10 +202,12 @@ class RagWorkflow(object):
             yield packet
 
     def generate_question(self, evidence_text, number_of_questions):
+        facets = ", ".join(random.sample(QUESTION_FACETS, len(QUESTION_FACETS)))
         try:
             response = self.llm.question_batch_generation().invoke({
                 "evidences": evidence_text,
                 "count": number_of_questions,
+                "facets": facets,
             })
             if not response:
                 return []
@@ -251,7 +262,7 @@ class RagWorkflow(object):
                     continue
 
 
-                verification = verify_answer(a_query, docs_to_text(grounding))
+                verification = verify_answer(a, docs_to_text(grounding))
             except Exception as error:
                 print(f"\t[ANSWER CHECK ERROR] {a}: {error}")
                 continue

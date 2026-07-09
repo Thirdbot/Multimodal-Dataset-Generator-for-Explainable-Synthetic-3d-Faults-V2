@@ -1,5 +1,4 @@
 import os
-os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 os.environ["MPLBACKEND"] = "Agg"  # non-interactive, thread-safe; image gen runs in worker threads
 
 import watchfiles
@@ -9,7 +8,6 @@ import time
 import asyncio
 from pathlib import Path
 import yaml
-from anyio import to_thread
 from watchfiles import Change
 import shutil
 

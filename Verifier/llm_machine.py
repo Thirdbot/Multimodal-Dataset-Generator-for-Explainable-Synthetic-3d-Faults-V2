@@ -59,7 +59,7 @@ Rules:
 - Each item has ANSWER and RETRIEVAL_QUERY.
 - ANSWER: one natural, concise sentence answering Question from Evidences, phrased the way a geologist would say it.
 - If the Evidences state only a section-level or negative fact (e.g. no faults, none), answer with that fact directly (the section is featureless / shows no such structures). Do NOT introduce any object the Evidences do not name.
-- RETRIEVAL_QUERY: one short evidence-like sentence mirroring the fact behind the answer; name the object exactly as it is written in Evidences. A sentence, not a keyword bag.
+- RETRIEVAL_QUERY: one evidence-like sentence per line, each stating a single fact behind the answer and naming the object exactly as written in Evidences. Put separate facts on separate lines instead of combining them. Sentences, not a keyword bag.
 - Ground everything in the Evidences below. Use only the objects, properties, and values that appear there; never introduce an object, feature, or fluid that is not in the Evidences. These instructions name no example objects; do not invent any.
 - Every factual word in the answer must be supported by Evidences.
 - If Evidences do not answer the Question, return {{"ANSWERS":[]}}.
@@ -101,10 +101,11 @@ Rules:
 - QUESTION: natural GroundVQA-style visual question; no tags; no exact values; no answer leakage.
 - QUESTION asks one answerable thing visible or described in Evidences.
 - If the Evidences state only a section-level or negative fact (e.g. no faults, none), ask about that fact directly (the overall condition of the section or the absence). Do NOT add any object the Evidences do not name.
+- Vary the questions across these angles wherever the Evidences support them, and never force an angle the Evidences cannot answer: {facets}.
 - Use only object/property types present in Evidences.
 - Ask about orientation only if Evidences mention tilt, dip, strike, angle, center, or bbox.
 - If QUESTION compares or asks about multiple objects, QUESTION must name those objects clearly.
-- RETRIEVAL_QUERY: one or two short evidence-like sentences (one per line) that mirror the exact fact and wording of the Evidences. For a specific question, name the object exactly as it is written in Evidences; for a broad question, keep it general. A sentence, not a keyword bag.
+- RETRIEVAL_QUERY: one evidence-like sentence per line, each stating a single fact behind the question and naming the object exactly as written in Evidences. Split multiple facts onto separate lines instead of combining them; for a broad question keep the line general. Sentences, not a keyword bag.
 - Ground everything in the Evidences below. Only use object names, types, properties, and values that appear there; never introduce an object, feature, or fluid that is not in the Evidences.
 - These instructions name no example objects. If the Evidences describe one kind of object, every QUESTION and RETRIEVAL_QUERY must be about that same kind. Do not invent subjects.
 
@@ -155,9 +156,11 @@ multimodal_qa_instruction = (
     "when they are provided, and give a direct seismic interpretation answer."
 )
 
+DEFAULT_QUESTION_FACETS = "presence or absence, count, location, orientation, relationship"
+
 QuestionBatchPrompt = PromptTemplate(
     template=question_batch_generation_prompt,
-    input_variables=["evidences","count"],
+    input_variables=["evidences","count","facets"],
     partial_variables={
         "format_instructions":QuestionBatchParser.get_format_instructions(),
         "master_prompt": MASTER_PROMPT,
@@ -231,6 +234,7 @@ class LLMMachine:
                 {
                     "evidences":itemgetter("evidences"),
                     "count": lambda x: x.get("count", 5),
+                    "facets": lambda x: x.get("facets", DEFAULT_QUESTION_FACETS),
                 } | QuestionBatchPrompt | self.question_client | QuestionBatchParser
         ).with_retry(
         stop_after_attempt=self.attempt,
