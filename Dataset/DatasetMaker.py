@@ -104,6 +104,10 @@ def build_row(item):
     retrieved = []
     regions_box = ""
 
+    # Individual scene objects (fault_0, closure_1, ...); used so object-specific
+    # evidence only falls back to the type-global mask when its own mask is absent.
+    individual_ids = frozenset(oid for oid in scene_objects if is_object_id(oid))
+
     for object_id, scene_object in scene_objects.items():
         object_type = scene_object.get("object_type", "")
         if object_type not in CLASS_IDS:            # keep only dataset object classes
@@ -111,7 +115,7 @@ def build_row(item):
         region = {"object_type": object_type, "object_id": object_id, "view": view}
         matching_evidences = [
             evidence for evidence in evidences
-            if evidence_matches_region(evidence, region)
+            if evidence_matches_region(evidence, region, individual_ids)
         ]
         if not matching_evidences:
             continue
@@ -267,7 +271,7 @@ def compact_evidences(evidence):
     return output
 
 
-def evidence_matches_region(evidence, region):
+def evidence_matches_region(evidence, region, individual_ids=frozenset()):
     evidence_object_id = str(evidence.get("object_id") or "")
     region_object_id = str(region.get("object_id") or "")
     region_object_type = str(region.get("object_type") or "")
@@ -279,10 +283,18 @@ def evidence_matches_region(evidence, region):
     if evidence.get("edge") == "HAS_VISUAL_OBJECT" and str(evidence.get("target")) == region_object_type:
         return True
     if is_object_id(evidence_object_id):
+        # Object-specific evidence (e.g. fault_0). Fall back to the type-global
+        # region (object_id == object_type, e.g. "fault") ONLY when this object has
+        # no individual mask in the scene -- so "tilt of fault 1" still lights up the
+        # fault mask instead of nothing. Never bleed onto a different individual
+        # (fault_0 evidence must not mask fault_1), and prefer the individual when it
+        # exists (don't also drag in the all-faults global mask).
+        if (not is_object_id(region_object_id)
+                and evidence_object_id.startswith(f"{region_object_type}_")
+                and evidence_object_id not in individual_ids):
+            return True
         return False
-    if evidence_object_id.startswith("category:"):
-        return region_object_type in EDGE_TYPES.get(evidence.get("edge"), [])
-    return False
+    return True if region_object_type in EDGE_TYPES.get(evidence.get("edge"), []) else False
 
 
 def write_csv(rows, path):

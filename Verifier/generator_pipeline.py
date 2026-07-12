@@ -13,16 +13,16 @@ sys.path.insert(0, str(ROOT))
 
 from Verifier.create_rag import Rag
 from Verifier.llm_machine import LLMMachine
-from Verifier.rag_verifier import best_doc_score, score_qa_evidence, serialize_docs
+from Verifier.rag_verifier import serialize_docs
 
 
 DEFAULT_GRAPH_ROOT = ROOT / "graphs" / "properties_2d_graph"
 DEFAULT_OUTPUT = ROOT / "Dataset" / "verified_qa.jsonl"
-MIN_RETRIEVAL_SCORE = 0.5
-QUESTION_PER_GRAPH  = 10
-CANDIDATE_PER_GRAPH = 15
+MIN_RETRIEVAL_SCORE = 0.9
+QUESTION_PER_GRAPH  = 100
+CANDIDATE_PER_QUESTION = 100
 MAX_ROWS_PER_EVIDENCE = 2
-MAX_ATTEMPT = 4 * QUESTION_PER_GRAPH # max attempt for outer loop
+MAX_ATTEMPT = 2 * QUESTION_PER_GRAPH # max attempt for outer loop
 # Rotated per batch so questions spread across angles instead of clustering on one
 # phrasing. Evidence-gated in the prompt: an angle the Evidences cannot answer is skipped.
 QUESTION_FACETS = (
@@ -59,7 +59,7 @@ class RagWorkflow(object):
             ))
         return self.rows
 
-    def generate_for_graph(self, graph_path, questions_per_graph=QUESTION_PER_GRAPH, candidates_per_question=CANDIDATE_PER_GRAPH):
+    def generate_for_graph(self, graph_path, questions_per_graph=QUESTION_PER_GRAPH, candidates_per_question=CANDIDATE_PER_QUESTION):
         graph_path = Path(graph_path)
         sample_id = sample_id_from_graph(graph_path)
         category = category_from_sample_id(sample_id)
@@ -74,7 +74,6 @@ class RagWorkflow(object):
         # evidences seeds
         number_of_passes_questions = 0
         evidence_seeds = self.evidence_seeds(all_docs)
-
         seen_evidences = {} # same evidences lead to the same images and cause overfitting
         tally = Counter() # where attempts die, to decide if MAX_ATTEMPT is the bottleneck
 
@@ -110,7 +109,7 @@ class RagWorkflow(object):
 
                 answer = self.best_answer(
                     question=q,
-                    evidence_text=self.rag.format_docs(question_docs),  # ground on retrieved evidence, not the whole graph (2048-tok context)
+                    evidence_text=seed_text,  # ground on retrieved evidence, not the whole graph (2048-tok context)
                     question_docs=question_docs,
                     retrieve_many=retrieve_many,
                     number_of_answer=candidates_per_question,
@@ -182,7 +181,7 @@ class RagWorkflow(object):
             return {}
         return data.get("scene") or {}
 
-    def evidence_seeds(self, docs, packet_size=1):
+    def evidence_seeds(self, docs, packet_size=3):
         docs = list(docs)
         random.shuffle(docs)
         by_object = {}
@@ -223,15 +222,6 @@ class RagWorkflow(object):
             print(f"[QUESTION ERROR] {error}")
             return []
 
-    @staticmethod
-    def filter_docs_by_trust(answer, docs, min_trust=0.7):
-        kept = []
-        for doc in docs:
-            result = check(answer, [doc.page_content])
-            if getattr(result, "verdict", "") == "PASS" and float(getattr(result, "trust_score", 0.0)) >= min_trust:
-                kept.append(doc)
-        return kept
-
     def best_answer(self, question, evidence_text, question_docs, retrieve_many, number_of_answer=5):
         answers = []
         try:
@@ -255,14 +245,22 @@ class RagWorkflow(object):
                 # answer's own claim pulls, kept only where it entails the answer.
                 # Verify the natural answer itself, never the retrieval proxy.
                 answer_docs = retrieve_many(a_query)
-                shared = dedupe_docs(shared_or_fallback_docs(question_docs, answer_docs))
+                answer_docs = filter_docs_by_retrieval_score(answer_docs,MIN_RETRIEVAL_SCORE)
+                merge_docs = [*question_docs, *answer_docs]
+                shared = dedupe_docs(merge_docs)
                 grounding = filter_docs_by_trust(a, shared)
                 if not grounding:
                     print("\t[REJECT] not supported by evidence:", a)
                     continue
 
+                # The object(s) the answer names must actually appear in the grounding,
+                # or it is an entity swap (asked Closure 10, answered Closure 8) that NLI
+                # would wave through on near-duplicate wording.
+                if not answer_objects_in_docs(a, grounding):
+                    print("\t[REJECT] answer names an object not in evidence:", a)
+                    continue
 
-                verification = verify_answer(a, docs_to_text(grounding))
+                verification = verify_answer(a, self.rag.format_docs(grounding))
             except Exception as error:
                 print(f"\t[ANSWER CHECK ERROR] {a}: {error}")
                 continue
@@ -434,15 +432,35 @@ def object_mentions(text):
     }
 
 
+def entity_pairs(text):
+    # A named object reference like "Fault 1" / "Closure 8" -> (type, id). Capitalised
+    # leading word so it targets proper object names, not values ("about 62", "of 2").
+    _ENTITY_RE = re.compile(r"\b([A-Z][A-Za-z_-]*)\s*#?\s*(\d+)")
+    return {(match.group(1).lower(), match.group(2)) for match in _ENTITY_RE.finditer(str(text or ""))}
+
+
 def answer_objects_in_docs(answer, docs):
     # The object(s) the answer names must actually appear in the grounding
-    # evidence. Blocks entity swaps (asked Closure 10, answered Closure 8) that
-    # NLI would wave through on near-duplicate wording. No tagged object in the
-    # answer -> nothing to anchor, so don't reject.
-    answer_objects = object_mentions(answer)
-    if not answer_objects:
-        return True
-    return answer_objects <= object_mentions(docs_to_text(docs))
+    # evidence. Blocks entity swaps (asked Closure 10, answered Closure 8) that NLI
+    # would wave through on near-duplicate wording -- and, unlike the tag-only
+    # check, still bites when the natural answer drops the <object> tag.
+    evidence_text = docs_to_text(docs)
+    evidence_objects = object_mentions(evidence_text)
+    evidence_pairs = entity_pairs(evidence_text)
+    evidence_types = {type_name for type_name, _ in evidence_pairs}
+
+    # Tagged objects in the answer must be present verbatim in the evidence.
+    tagged = object_mentions(answer)
+    if tagged and not tagged <= evidence_objects:
+        return False
+
+    # Untagged "Type N": only judge a type the evidence actually enumerates (an
+    # unknown type is left to NLI). A known type with an id the evidence never
+    # names is a swap -- "Closure 8" when the grounding only holds "Closure 10".
+    for type_name, obj_id in entity_pairs(answer):
+        if type_name in evidence_types and (type_name, obj_id) not in evidence_pairs:
+            return False
+    return True
 
 
 def verify_answer(answer, evidence_text):
@@ -508,7 +526,7 @@ def row_id(sample_id, question, answer):
 def generate_multimodal_dataset(graph_root=DEFAULT_GRAPH_ROOT, output_path=DEFAULT_OUTPUT, max_graphs=None):
     workflow = RagWorkflow(graph_root=graph_root, output_path=output_path)
     return workflow.generate_dataset(max_graphs=max_graphs, graph_views=("inline", "crossline"),
-                                     candidates_per_question=CANDIDATE_PER_GRAPH, questions_per_graph=QUESTION_PER_GRAPH)
+                                     candidates_per_question=CANDIDATE_PER_QUESTION, questions_per_graph=QUESTION_PER_GRAPH)
 
 if __name__ == "__main__":
     rows = generate_multimodal_dataset()

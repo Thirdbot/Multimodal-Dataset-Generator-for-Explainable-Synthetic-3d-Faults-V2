@@ -4,6 +4,8 @@ os.environ["MPLBACKEND"] = "Agg"  # non-interactive, thread-safe; image gen runs
 import watchfiles
 from functools import partial
 import json
+import signal
+import sys
 import time
 import asyncio
 from pathlib import Path
@@ -29,19 +31,13 @@ properties_graph_path = Path(__file__).parent.parent.parent / "graphs" / "proper
 images_path = Path(__file__).parent.parent.parent / "build_objects" / "images"
 properties_2d_graph_path = Path(__file__).parent.parent.parent / "graphs" / "properties_2d_graph"
 
-# Image extraction is memory-bound, not thread-bound: it loads full 3D volumes, but
-# outputs are per-sample and plt.imsave is safe to parallelize. Builds are serial now,
-# so the memory the old concurrent builds used is free — a small bounded concurrency is
-# fine. Tune with IMAGE_GEN_CONCURRENCY; keep it low so big volumes don't swap.
+
 _image_gen_concurrency = max(1, int(os.environ.get("IMAGE_GEN_CONCURRENCY", "2")))
 _image_gen_semaphore = asyncio.Semaphore(_image_gen_concurrency)
 
-# Synthoseis is NOT thread-safe: the config guard monkeypatches process-global class
-# attributes (Parameters._fault_settings, Faults.get_displacement_vector), so two
-# builds running in threads at once clobber each other's fault settings — a boring
-# build's no-fault override (number_faults=0, fmode="none") leaks into a fault_complex
-# build. Serialize builds so only one owns the patched globals at a time.
+
 _build_semaphore = asyncio.Semaphore(1)
+STOP_SIGNAL = object()
 
 async def _run_build(generator, config_path, run_id):
     async with _build_semaphore:
@@ -51,17 +47,11 @@ def _sample_id_from_graph(graph_path):
     return Path(graph_path).stem.removesuffix("_db_extract_properties_graph")
 
 def _delete_build_for_sample(sample_id):
-    # Remove the heavy build only after its images + 2d graph exist and tracing is
-    # idempotent, so nothing is still reading it. glob matches the one folder; no-op
-    # if already gone.
     for folder in build_path.glob(sample_id):
         print(f"removing extracted build: {folder}")
         shutil.rmtree(folder, ignore_errors=True)
 
 def _sweep_partial_builds(min_idle_seconds=120):
-    # Run once at startup, before any build launches. parameters.db is written last,
-    # so a build folder without it is a leftover from an interrupted run. The idle
-    # guard keeps us from touching anything a concurrent run might still be writing.
     now = time.time()
     for folder in build_path.glob("seismic__*"):
         if (folder / "parameters.db").exists():
@@ -77,11 +67,6 @@ def _sweep_partial_builds(min_idle_seconds=120):
         shutil.rmtree(folder, ignore_errors=True)
 
 async def _run_image_gen(graph_path):
-    # Serialized owner of the per-sample tail: images -> 2d graph -> delete build.
-    # Chaining them in one coroutine (instead of via a separate image watcher) means
-    # the build is deleted only after everything that reads it has finished, which
-    # removes the extraction/deletion race. Every stage is idempotent so restarts and
-    # repeated graph events are safe.
     async with _image_gen_semaphore:
         graph_path = Path(graph_path)
         sample_id = _sample_id_from_graph(graph_path)
@@ -154,7 +139,6 @@ async def recipes_watcher():
 
 
 def _config_already_built(run_id):
-    # already extracted (3d graph exists) or built and pending (build folder on disk)
     if list(properties_graph_path.glob(f"seismic__*_{run_id}_db_extract_properties_graph.json")):
         return True
     if list(build_path.glob(f"seismic__*_{run_id}")):
@@ -166,17 +150,15 @@ async def builds_config_watcher():
     print("Watching builds configs...")
     generator = BuildGenerator()
 
-    for cfg in sorted(build_configs_path.glob("*.json")):   # phase 1: configs already on disk
+    for cfg in sorted(build_configs_path.glob("*.json")):
         if _config_already_built(cfg.stem):
             continue
-        print("Catch-up build for existing config:", cfg.name)
-        asyncio.create_task(_run_build(generator, cfg.as_posix(), cfg.stem))
+    # what failed is failed, no rebuild from config
 
     async for changes in watchfiles.awatch(build_configs_path.as_posix()):
         for change_type, file_path in changes:
             if change_type == Change.added:
                 print("Added configs:", file_path)
-                # pass to build function (serialized: synthoseis is not thread-safe)
                 asyncio.create_task(_run_build(generator, file_path, Path(file_path).stem))
             elif change_type == Change.deleted:
                 print("Deleted configs:", file_path)
@@ -206,9 +188,7 @@ async def builds_watcher():
             asyncio.create_task(on_build_delete(Path(cfg).stem, build_path))
 
     print("Watching success builds...")
-    # phase 1a: reconcile — trace any build on disk with a parameters.db but no graph
-    # yet. This recovers builds whose success.yaml entry was ever lost to a race,
-    # independent of the yaml, so nothing stays built-but-unextracted.
+
     for folder in sorted(build_path.glob("seismic__*")):
         if not (folder / "parameters.db").exists():
             continue
@@ -248,14 +228,9 @@ async def graph_properties_watcher():
             if change_type == Change.added and p in seen:
                 continue                                        # already handled in catch-up
             seen.add(p)
-            # forward to image gen; _run_image_gen owns images -> 2d graph -> delete,
-            # all serialized, so there is no separate images watcher to race it.
             asyncio.create_task(_run_image_gen(p))
 
 async def dataset_gen_pipeline(queue):
-    """Producer: enqueue each 2d-graph file for row generation.
-    Phase 1 (catch-up): enqueue files already on disk (awatch never replays them).
-    Phase 2 (live): enqueue new/modified files. `seen` keeps the two phases from double-enqueuing."""
     print("Watching 2d graphs -> enqueue dataset work...")
     seen = set()
     for g in sorted(properties_2d_graph_path.glob("*.json")):   # phase 1: existing files
@@ -343,17 +318,25 @@ async def dataset_worker(queue):
 
     while True:
         first = await queue.get()          # blocks until data is ready
-        got = 1
-        batch = {first}
-        try:                               # coalesce whatever else is queued right now
-            while True:
-                batch.add(queue.get_nowait())
-                got += 1
-        except asyncio.QueueEmpty:
-            pass
+        if first is STOP_SIGNAL:
+            queue.task_done()
+            break
+
+        batch = [first]
+        stop = False
+        while True:                        # coalesce whatever else is queued right now
+            try:
+                item = queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            if item is STOP_SIGNAL:
+                stop = True
+                queue.task_done()          # account for the STOP item itself
+                break
+            batch.append(item)
 
         try:
-            new_graphs = [g for g in batch
+            new_graphs = [g for g in dict.fromkeys(batch)
                           if g not in processed and Path(g).exists()]
             filtered_graph = [ Path(graph) for graph in new_graphs for view in ('inline','crossline') if view in Path(graph).name]
 
@@ -371,28 +354,65 @@ async def dataset_worker(queue):
             if made_rows:
                 await asyncio.to_thread(build_dataset_csv)   # rebuild CSV from full jsonl
         finally:
-            for _ in range(got):
+            for _ in batch:                # exactly one task_done per non-STOP item pulled
                 queue.task_done()
+
+        if stop:
+            break
 
 # concurrent
 async def gather():
-    for p in (build_path, properties_graph_path, images_path, properties_2d_graph_path):
+    for p in (recipes_path, build_configs_path, build_path, properties_graph_path, images_path, properties_2d_graph_path):
         Path(p).mkdir(parents=True, exist_ok=True)
     _sweep_partial_builds()                          # clear interrupted builds before starting
     dataset_queue = asyncio.Queue()
-    await asyncio.gather(
-        recipes_watcher(),
-        builds_config_watcher(),
-        builds_watcher(),
-        graph_properties_watcher(),
-        dataset_gen_pipeline(dataset_queue),
-        dataset_worker(dataset_queue),
-        return_exceptions=True
-        )
+    try:
+        await asyncio.gather(
+            recipes_watcher(),
+            builds_config_watcher(),
+            builds_watcher(),
+            graph_properties_watcher(),
+            dataset_gen_pipeline(dataset_queue),
+            dataset_worker(dataset_queue),
+            return_exceptions=False
+            )
+    except asyncio.CancelledError:
+        await dataset_queue.put(STOP_SIGNAL)
+        raise
+
+def _install_stop_handlers(loop, main_task):
+    # Low-level signal.signal handlers (not loop.add_signal_handler): the handler
+    # body runs in the main thread and can os._exit *directly*, so stopping does
+    # not depend on the event loop being free to process a cancellation -- a
+    # Synthoseis build hogging the default thread pool can delay that. First
+    # Ctrl+C tries a graceful cancel; a second one force-exits immediately.
+    stopping = {"flag": False}
+
+    def _handle(signum, frame):
+        if stopping["flag"]:
+            print("\n[Watcher] Second signal: forcing exit.", flush=True)
+            os._exit(130)
+        stopping["flag"] = True
+        print("\n[Watcher] Stop signal received. Halting (press Ctrl+C again to force)...", flush=True)
+        loop.call_soon_threadsafe(main_task.cancel)
+
+    signal.signal(signal.SIGINT, _handle)
+    signal.signal(signal.SIGTERM, _handle)
 
 
 if __name__ == "__main__":
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    main_task = loop.create_task(gather())
+    _install_stop_handlers(loop, main_task)
     try:
-        asyncio.run(gather())
-    except KeyboardInterrupt:
-        print("Interrupted!!!")
+        loop.run_until_complete(main_task)
+    except asyncio.CancelledError:
+        print("[Watcher] Watchers cancelled.")
+    finally:
+        # os._exit so we never block on shutdown_default_executor waiting for an
+        # abandoned build thread; partial builds are cleared by _sweep_partial_builds
+        # on the next start.
+        print("[Watcher] Process terminated.", flush=True)
+        sys.stdout.flush()
+        os._exit(0)

@@ -86,12 +86,11 @@ class Rag:
 
         for node in graph.get("nodes", []):
             node_id = node.get("id", "")
-            if str(node_id).startswith("category:"):
-                category_id = node_id
+            category_id = node_id
 
         for edge in graph.get("edges", []):
-            source = edge.get("source")
-            target = edge.get("target")
+            source = edge.get("source", "")
+            target = edge.get("target", "")
             if source and target:
                 parents[target] = source
 

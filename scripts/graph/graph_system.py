@@ -64,8 +64,7 @@ class GraphSystem:
         """Project stored 3D position fields into 2D image-coordinate fields."""
         for node_id, attrs in self.graph.nodes(data=True):
             attrs["view"] = view
-            if str(node_id).startswith("category:"):
-                self._add_view_asset_attrs(attrs, view, image_assets)
+            self._add_view_asset_attrs(attrs, view, image_assets)
             if view == "inline":
                 self._project_point(attrs, "y0", "z0")
                 self._project_extent(attrs, "y_min", "y_max", "z_min", "z_max")
@@ -139,11 +138,11 @@ class GraphSystem:
         model_id = model["model_id"]
         category = self._parse_model_id(model_id)
 
-        category_node = f"category:{category}"
+        sample_node = f"{category} structure"
 
-        self._add_by_filter(category_node,data,category_filter)
+        self._add_by_filter(sample_node,data,category_filter)
 
-    def _add_by_filter(self,category_node,data,category_filter):
+    def _add_by_filter(self,sample_node,data,category_filter):
         """Add category, object-system, and realized-object nodes from tables."""
         tables = category_filter.get("tables")
         model_properties = self._pick(data.get("model_parameters",[{}])[0], category_filter.get("model_keys"))
@@ -165,23 +164,25 @@ class GraphSystem:
                 model_properties.pop(key)
 
         # remove keys that state that it does not exist or visible
-        self.graph.add_node(category_node, **model_properties)  # category get its properties
+        self.graph.add_node(sample_node, **model_properties)  # category get its properties
 
         for table in tables:
             if table == "model_parameters":
                 continue
             table_name = table.split('_')[0] # fault and closure
             if data.get(table) is not None:
-                self.graph.add_edge(category_node,f"{table_name}",type=f"HAS_{table_name.upper()}")
+                self.graph.add_edge(sample_node,f"{table_name}",type=f"HAS_{table_name.upper()}")
             for idx in range(len(data.get(table,[]))): # get all rows
                 if table_name == "fault" and visible_fault_indexes is not None and idx not in visible_fault_indexes:
                     continue
                 node_index = fault_index_map.get(idx, idx) if table_name == "fault" else idx
                 node_attrs = self._pick(data.get(table,[{}])[idx],category_filter.get(f"{table_name}_keys"))
+                if table_name == "fault":
+                    self._to_display_units(node_attrs, data)
                 if table_name == "fault" and visible_fault_indexes is not None:
                     node_attrs["original_fault_index"] = idx
                 self.graph.add_node(f"{table_name}_{node_index}",**node_attrs) # get keys by table name closure_list and fault_list
-                self.graph.add_edge(f"{table_name}",f"{table_name}_{node_index}",type="REALIZED")
+                self.graph.add_edge(f"{table_name}",f"{table_name}_{node_index}",type="has_object")
 
     @staticmethod
     def _visible_fault_indexes(model_properties):
@@ -206,6 +207,23 @@ class GraphSystem:
             original_index: visible_index
             for visible_index, original_index in enumerate(sorted(visible_fault_indexes))
         }
+
+    @staticmethod
+    def _to_display_units(node_attrs, data):
+        # Synthoseis stores tilt_pct as a fraction (0.1-0.75) and throw before
+        # dividing by infill_factor; convert to the values it reports
+        # (tilt in percent, throw in samples -- see Faults.py:670).
+        try:
+            infill = float((data.get("model_parameters") or [{}])[0].get("infill_factor") or 1.0)
+        except (TypeError, ValueError):
+            infill = 1.0
+        infill = infill or 1.0
+        for key, convert in (("throw", lambda v: v / infill), ("tilt_pct", lambda v: v * 100)):
+            if key in node_attrs:
+                try:
+                    node_attrs[key] = round(convert(float(node_attrs[key])), 2)
+                except (TypeError, ValueError):
+                    pass
 
     def _parse_model_id(self, model_id):
         match = re.match(r"seismic__\d{4}_\d{4}_(.+)", model_id)

@@ -65,10 +65,10 @@ if __name__ == "__main__":
     }
 
     HIGH = {
-        "cube_shape": [300, 300, 1250],
+        "cube_shape": [300, 300, 1259],
     }
     # set cube shape
-    cube_shape = LOW['cube_shape']
+    cube_shape = HIGH['cube_shape']
 
     categorical_parameter.initialize(
         project="example",

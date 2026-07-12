@@ -121,8 +121,6 @@ def object_color(object_id):
         return "#8338ec"
     if object_id.startswith("onlap"):
         return "#ffb703"
-    if object_id.startswith("category:"):
-        return "#8ecae6"
     return "#adb5bd"
 
 

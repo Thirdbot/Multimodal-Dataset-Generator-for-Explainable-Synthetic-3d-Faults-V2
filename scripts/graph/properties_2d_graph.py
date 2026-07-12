@@ -10,12 +10,18 @@ import json
 import re
 from pathlib import Path
 
+import numpy as np
+from PIL import Image
+
 
 ROOT = Path(__file__).resolve().parents[2]
 PROPERTIES_GRAPH_DIR = ROOT / "graphs" / "properties_graph"
 IMAGE_OBJECT_DIR = ROOT / "build_objects" / "images"
 OUTPUT_DIR = ROOT / "graphs" / "properties_2d_graph"
 VIEWS = ("inline", "crossline")
+# Visual attributes read straight off each object's scene mask (not the DB), so they
+# reflect what is actually visible in the section; attached to nodes here at 2d time.
+MASK_FEATURE_KEYS = ("dip_deg", "area_pct")
 # Visual-only objects can be much noisier than DB-backed objects.
 # Recommended policy for a cleaner fault/closure dataset:
 # - fault: keep global and local objects
@@ -94,12 +100,18 @@ def _load_scene_positions(sample_id, view):
             continue
         if not object_id or "x" not in center or "y" not in center:
             continue
+        features = _mask_features(
+            IMAGE_OBJECT_DIR / sample_id / (item.get("mask_path") or ""),
+            object_id,
+            object_type,
+        )
         positions[(object_id, view)] = {
             "object_type": object_type,
             "x": center["x"],
             "y": center["y"],
             "bbox": bbox,
             "color": color,
+            **features,
         }
 
     def _root_rel(rel_path):
@@ -147,6 +159,9 @@ def _copy_graph_with_2d_positions(graph, positions, view):
         for key in ("x_min", "x_max", "y_min", "y_max"):
             if key in bbox:
                 node[key] = bbox[key]
+        for key in MASK_FEATURE_KEYS:
+            if key in position:
+                node[key] = position[key]
 
     for (object_id, position_view), position in sorted(positions.items()):
         if position_view != view or object_id in node_ids:
@@ -167,8 +182,8 @@ def _copy_graph_with_2d_positions(graph, positions, view):
 def _category_id(graph):
     for node in graph.get("nodes", []):
         node_id = node.get("id", "")
-        if str(node_id).startswith("category:"):
-            return node_id
+        node_id = str(node_id).split("_")[0]
+        return node_id
     return ""
 
 
@@ -186,7 +201,50 @@ def _visual_node(object_id, position, view):
     for key in ("x_min", "x_max", "y_min", "y_max"):
         if key in bbox:
             node[key] = bbox[key]
+    for key in MASK_FEATURE_KEYS:
+        if key in position:
+            node[key] = position[key]
     return node
+
+
+def _mask_features(mask_path, object_id, object_type):
+    # Read visual geometry off the object's scene mask: apparent dip for faults,
+    # coverage for closures/salt. Skip the merged per-type mask (object_id == type),
+    # whose combined geometry is meaningless.
+    if str(object_id) == str(object_type):
+        return {}
+    mask_path = Path(mask_path)
+    if not mask_path.is_file():
+        return {}
+    try:
+        mask = np.asarray(Image.open(mask_path).convert("L")) > 0
+    except (OSError, ValueError):
+        return {}
+    if not mask.any():
+        return {}
+
+    features = {}
+    if object_type in {"closure", "salt"}:
+        features["area_pct"] = round(100.0 * float(mask.sum()) / mask.size, 1)
+    if object_type == "fault":
+        dip = _dip_degrees(mask)
+        if dip is not None:
+            features["dip_deg"] = dip
+    return features
+
+
+def _dip_degrees(mask):
+    # Apparent dip of the fault trace = angle of its principal axis from horizontal
+    # (0 = flat, 90 = vertical). Image y runs downward, so magnitude only.
+    ys, xs = np.nonzero(mask)
+    if xs.size < 8:
+        return None
+    cov = np.cov(np.vstack([xs - xs.mean(), ys - ys.mean()]))
+    eigvals, eigvecs = np.linalg.eigh(cov)
+    if eigvals[-1] <= 0 or eigvals[0] / eigvals[-1] > 0.6:
+        return None  # too round to have a meaningful dip direction
+    major = eigvecs[:, -1]
+    return round(float(np.degrees(np.arctan2(abs(major[1]), abs(major[0])))), 1)
 
 
 if __name__ == "__main__":

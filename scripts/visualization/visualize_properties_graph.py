@@ -100,8 +100,7 @@ def draw_graph(graph, output_path):
 
 def node_color(node_id):
     node_id = str(node_id)
-    if node_id.startswith("category:"):
-        return "#8ecae6"
+
     if node_id == "fault" or node_id.startswith("fault_"):
         return "#ffb4a2"
     if node_id == "closure" or node_id.startswith("closure_"):

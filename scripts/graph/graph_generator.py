@@ -49,8 +49,8 @@ CLOSURE_KEYS = {
 FAULT_KEYS = {
             "throw",
             "tilt_pct",
-            "shear_zone_width",
-            "gouge_pctile"
+            # shear_zone_width, gouge_pctile dropped: sub-seismic fault-rock
+            # properties (<=1.5 samples wide), not legible in the section
 }
 
 # Per-category table/key filters for DB-derived graph content of what can exist
