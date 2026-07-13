@@ -32,12 +32,11 @@ AnswerBatchParser = PydanticOutputParser(pydantic_object=AnswerBatchStructure)
 ReasonParser = PydanticOutputParser(pydantic_object=ReasonStructure)
 
 MASTER_PROMPT = """
-You are a geophysicist using only the Evidences as factual ground.
-Never invent objects, values, causes, or events.
-Do not mention graph, metadata, database, generated data, synthetic data, prompt, or verification.
-Evidence tags: <object>...</object>, <nums>...</nums>, <center>...</center>, <bbox>...</bbox>.
-Questions must be natural and must not copy tags.
-Answers and reasoning MUST copy tagged spans exactly when using tagged evidence.
+You are a senior seismic interpreter (structural geologist) describing what a seismic section shows.
+Ground every statement in the Evidences only. Never invent or contradict objects, counts, values, fluids, causes, or events, and add no interpretation the Evidences do not state.
+Write in a natural, professional interpreter's voice -- plain geological language, not a data readout.
+Never mention graphs, metadata, databases, models, synthetic or generated data, prompts, retrieval, or verification.
+Copy any tagged span (<object>...</object>, <nums>...</nums>, <center>...</center>, <bbox>...</bbox>) exactly when you use it; do not unwrap, round, or reword it. Questions never contain tags.
 """
 
 answer_batch_generation_prompt = """
@@ -52,25 +51,13 @@ Output contract:
 - Do not write text before or after the JSON object.
 - Required shape: {{"ANSWERS":[{{"ANSWER":"one answer.","RETRIEVAL_QUERY":"evidence-like retrieval sentence"}}]}}
 
-Generate candidate answers to one seismic interpretation question using only the provided evidences.
+Task: answer the seismic interpretation Question using only the Evidences. Give up to {count} distinct candidate answers.
 
-Rules:
-- Generate up to {count} answers.
-- Each item has ANSWER and RETRIEVAL_QUERY.
-- ANSWER: one natural, concise sentence answering Question from Evidences, phrased the way a geologist would say it.
-- If the Evidences state only a section-level or negative fact (e.g. no faults, none), answer with that fact directly (the section is featureless / shows no such structures). Do NOT introduce any object the Evidences do not name.
-- RETRIEVAL_QUERY: one evidence-like sentence per line, each stating a single fact behind the answer and naming the object exactly as written in Evidences. Put separate facts on separate lines instead of combining them. Sentences, not a keyword bag.
-- Ground everything in the Evidences below. Use only the objects, properties, and values that appear there; never introduce an object, feature, or fluid that is not in the Evidences. These instructions name no example objects; do not invent any.
-- Every factual word in the answer must be supported by Evidences.
-- If Evidences do not answer the Question, return {{"ANSWERS":[]}}.
-- Do not guess missing objects, counts, locations, regions, properties, fluids, or interpretations.
-- Do not combine facts from different objects unless Evidences explicitly connect them.
-- If using a tagged object/value/center/box, copy the full tagged span exactly.
-- Keep the evidence format for reported facts: tagged object names stay tagged, tagged numbers stay tagged, tagged centers stay tagged, and tagged boxes stay tagged.
-- Do not unwrap, rewrite, round, or paraphrase tagged spans.
-- Do not replace a tagged value with an untagged value.
-- Do not convert <nums>...</nums>, <center>...</center>, or <bbox>...</bbox> into plain text.
-- Do not add unstated causes or interpretations.
+For each candidate:
+- ANSWER: one concise sentence, phrased the way an interpreter would actually say it at the workstation. Use only the objects, properties, fluids, and values found in the Evidences, and connect two objects only where the Evidences connect them. If the Evidences give only a negative or section-level fact (no faults, none), state that directly and name no new object.
+- RETRIEVAL_QUERY: the plain facts behind the answer, one short evidence-like sentence per line, each naming its object exactly as written in the Evidences (this is used to look the facts back up, so keep it literal, not a keyword bag).
+- Copy any tagged span (<object>, <nums>, <center>, <bbox>) exactly in the ANSWER; never turn a tagged value into plain text.
+- If the Evidences do not answer the Question, return {{"ANSWERS":[]}}.
 
 Evidences:
 {evidences}
@@ -93,21 +80,13 @@ Output contract:
 - Do not write text before or after the JSON object.
 - Required shape: {{"QUESTIONS":[{{"QUESTION":"natural visual question?","RETRIEVAL_QUERY":"evidence-like retrieval sentence"}}]}}
 
-Generate seismic interpretation questions from the provided evidences.
+Task: write up to {count} natural seismic-interpretation questions that the Evidences can answer.
 
-Rules:
-- Generate up to {count} questions.
-- Each item has QUESTION and RETRIEVAL_QUERY.
-- QUESTION: natural GroundVQA-style visual question; no tags; no exact values; no answer leakage.
-- QUESTION asks one answerable thing visible or described in Evidences.
-- If the Evidences state only a section-level or negative fact (e.g. no faults, none), ask about that fact directly (the overall condition of the section or the absence). Do NOT add any object the Evidences do not name.
-- Vary the questions across these angles wherever the Evidences support them, and never force an angle the Evidences cannot answer: {facets}.
-- Use only object/property types present in Evidences.
-- Ask about orientation only if Evidences mention tilt, dip, strike, angle, center, or bbox.
-- If QUESTION compares or asks about multiple objects, QUESTION must name those objects clearly.
-- RETRIEVAL_QUERY: one evidence-like sentence per line, each stating a single fact behind the question and naming the object exactly as written in Evidences. Split multiple facts onto separate lines instead of combining them; for a broad question keep the line general. Sentences, not a keyword bag.
-- Ground everything in the Evidences below. Only use object names, types, properties, and values that appear there; never introduce an object, feature, or fluid that is not in the Evidences.
-- These instructions name no example objects. If the Evidences describe one kind of object, every QUESTION and RETRIEVAL_QUERY must be about that same kind. Do not invent subjects.
+For each item:
+- QUESTION: a natural, GroundVQA-style question an interpreter would ask while reading the section -- no tags, no exact values, no answer given away. Ask one thing the Evidences actually support. If the Evidences give only a negative or section-level fact (no faults, none), ask about the overall condition or the absence. Spread questions across these angles only where the Evidences allow, never forcing one: {facets}.
+- Ask about orientation or geometry only if the Evidences mention dip, tilt, angle, center, or extent. If a question involves more than one object, name them clearly.
+- RETRIEVAL_QUERY: the fact(s) the question rests on, one short evidence-like sentence per line, each naming its object exactly as written in the Evidences (keep it literal, not a keyword bag).
+- Use only the object types, properties, and values present in the Evidences; introduce no new object, feature, or fluid.
 
 Evidences:
 {evidences}
@@ -127,15 +106,11 @@ Output contract:
 - Do not write text before or after the JSON object.
 - Required shape: {{"REASON":"short evidence-guided reasoning."}}
 
-Write a short chain-of-thought that justifies why the Answer follows from the Evidences. The Answer is already correct and verified; explain its support, never re-answer it and never claim the Evidences lack information.
+Task: in two or three short steps, explain like an interpreter why the Answer follows from the Evidences. The Answer is already correct and verified -- justify it, never re-answer it, and never say the Evidences are missing or empty.
 
-Rules:
-- Two to three short steps: what the Evidence states, what it implies, why the Answer follows.
-- Name the specific evidence fact the Answer rests on.
-- If the Evidences state a negative or section-level fact (e.g. no faults, none), explain that the Answer reflects that stated absence; do not say the evidence is missing or empty.
-- If using a tagged object/value/center/box, copy the full tagged span exactly.
-- Do not unwrap, rewrite, round, or paraphrase tagged spans.
-- Do not add unstated causes or interpretations.
+- Walk from what the Evidence states, to what it implies about the section, to why the Answer follows, naming the specific evidence fact it rests on.
+- If the Evidences state a negative or section-level fact (no faults, none), explain that the Answer reflects that stated absence.
+- Copy any tagged span exactly; add no cause or interpretation the Evidences do not state.
 
 Evidences:
 {evidences}

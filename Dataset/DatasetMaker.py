@@ -7,6 +7,7 @@ Output: Dataset/multimodal_multi_image_dataset.csv and .jsonl
 import csv
 import hashlib
 import json
+import re
 from pathlib import Path
 
 import numpy as np
@@ -69,16 +70,31 @@ CATEGORY_TYPES = {
     "depositional": ["closure"],  # "lithology" commented out: broad/noisy visual evidence
     "full_mixed": ["fault", "salt", "closure"],  # "onlap" commented out
 }
+# Model-level (category-node) count/presence evidence -> the object type it describes.
+# Only reached for NON-object-specific evidence, so a per-object property can never
+# bleed across siblings of the same type.
 EDGE_TYPES = {
     "number_faults": ["fault"],
     "fault_mode": ["fault"],
-    "intersects_fault":["fault"],
     "number_fault_intersections": ["fault"],
     "salt_inserted": ["salt"],
     "number_hc_closures": ["closure"],
-    "fluid": ["closure"],
+    # "fluid" removed: per-closure property (object_id=closure_N), already routed by
+    #   object_id; listing it here would bleed one closure's fluid onto every closure.
+    # "intersects_fault" moved to CROSS_REFERENCE_EDGES below (it is object-specific,
+    #   so it never actually reached this map).
     # "number_onlap_episodes": ["onlap"],
     # "number_fan_episodes": ["lithology"],
+}
+
+# A property on ONE object that implicates ANOTHER type: a closure's intersects_fault /
+# intersects_salt. We can't know WHICH fault it meets, so the whole referenced class
+# stands in. Consulted even for object-specific evidence (unlike EDGE_TYPES) -- safe
+# because the referenced type differs from the object's own, so it can't bleed onto
+# same-type siblings. The object keeps its own mask via the object_id match above.
+CROSS_REFERENCE_EDGES = {
+    "intersects_fault": ["fault"],
+    "intersects_salt": ["salt"],
 }
 
 
@@ -164,6 +180,11 @@ def build_row(item):
 
     mask_path = build_row_mask(sample_dir, item, view, retrieved)
     if not mask_path:
+        # regions matched but the composite is empty -- this is NOT a normal negative
+        # (those have no regions). It means the matched objects' scene mask PNGs are
+        # missing/stale on disk. Surface it instead of silently discarding a valid row.
+        print(f"[MASK EMPTY] {sample_id} {view}: {len(regions)} region(s) matched but "
+              f"no mask pixels on disk (stale scene_position.json?); row dropped")
         return None
 
     return {
@@ -280,7 +301,17 @@ def evidence_matches_region(evidence, region, individual_ids=frozenset()):
         return True
     if evidence_object_id == region_object_type:
         return True
-    if evidence.get("edge") == "HAS_VISUAL_OBJECT" and str(evidence.get("target")) == region_object_type:
+    if evidence.get("edge") == "HAS_VISUAL_OBJECT" and str(evidence.get("target")) in (region_object_id, region_object_type):
+        # HAS_VISUAL_OBJECT's target is the object node id (e.g. "salt_0"), not the
+        # bare type -- so it must match the region's object_id. Comparing only against
+        # object_type left presence-only visual objects (salt, visual-only nodes)
+        # unrouted, which dropped them from the mask and mislabeled "present" rows as
+        # maskless negatives. Keeping object_type too preserves any type-level target.
+        return True
+    # Cross-reference: a closure's intersects_fault also highlights the fault class
+    # (which specific fault is unknown). Checked BEFORE the object-specific branch, so
+    # the closure keeps its own mask (via object_id above) AND the faults light up.
+    if region_object_type in CROSS_REFERENCE_EDGES.get(evidence.get("edge"), []):
         return True
     if is_object_id(evidence_object_id):
         # Object-specific evidence (e.g. fault_0). Fall back to the type-global
@@ -310,8 +341,16 @@ def write_csv(rows, path):
             })
 
 
+# An object id is "<type>_<index>" (fault_0, salt_3), NOT any string that merely starts
+# with a type name. The category node is "<category> structure" (e.g. "fault_complex
+# structure"), which startswith("fault_") and was being misread as a fault object -- so
+# all model-level count/presence evidence for fault_/salt_/closure_ categories bypassed
+# the EDGE_TYPES routing (branch 5) and landed on the wrong mask (or none).
+_OBJECT_ID_RE = re.compile(r"^(?:%s)_\d+$" % "|".join(sorted(OBJECT_TYPES)))
+
+
 def is_object_id(value):
-    return any(str(value).startswith(f"{object_type}_") for object_type in OBJECT_TYPES)
+    return bool(_OBJECT_ID_RE.match(str(value)))
 
 
 def evidence_score(item):

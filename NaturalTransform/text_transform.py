@@ -6,7 +6,7 @@ import re
 # (tilt %, throw / infill_factor) happens upstream in graph_system.
 # ---------------------------------------------------------------------------
 
-OBJECT_TYPES = ("fault", "closure")
+OBJECT_TYPES = ("fault", "closure", "salt")
 
 MODEL_KEYS = {"number_faults", "fault_mode", "salt_inserted",
               "number_hc_closures", "number_fault_intersections"}
@@ -21,8 +21,8 @@ EXTENT_EDGES = {"x_min", "x_max", "y_min", "y_max"}
 SKIP_EDGES = {"view", "original_fault_index"}
 LOW_VALUE_EXCEPTIONS = {"salt_inserted"}
 
-NODE_NAMES = {"fault": "fault", "closure": "closure"}
-NUMBERED_NODE_NAMES = {"fault": "Fault {number}", "closure": "Closure {number}"}
+NODE_NAMES = {"fault": "fault", "closure": "closure", "salt": "salt"}
+NUMBERED_NODE_NAMES = {"fault": "Fault {number}", "closure": "Closure {number}", "salt": "Salt {number}"}
 
 EDGE_LABELS = {
     "throw": "throw",
