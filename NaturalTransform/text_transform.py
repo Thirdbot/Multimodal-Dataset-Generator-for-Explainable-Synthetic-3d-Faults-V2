@@ -21,6 +21,22 @@ EXTENT_EDGES = {"x_min", "x_max", "y_min", "y_max"}
 SKIP_EDGES = {"view", "original_fault_index"}
 LOW_VALUE_EXCEPTIONS = {"salt_inserted"}
 
+# Synthoseis fault_mode values that name a real geological pattern (Parameters.py:768).
+# "random" is a generation setting ("as random as it can be"), not a structure, so it
+# gets no pattern sentence -- asserting it would leak the simulator into the evidence.
+FAULT_PATTERN_NAMES = {
+    "relay_ramp": "relay ramp",
+    "horst_and_graben": "horst-and-graben",
+    "self_branching": "branching",
+    "stair_case": "staircase",
+}
+
+# Descriptive dip-magnitude scale (USGS/ODP): gentle 0-30, moderate 30-60, steep 60-90.
+# NOT the high/low-angle *fault* split (45 deg) -- and dip_deg is APPARENT dip measured
+# in a time section, so readings are scoped "in this section", never a genetic claim.
+DIP_STEEP_MIN = 60
+DIP_GENTLE_MAX = 30
+
 NODE_NAMES = {"fault": "fault", "closure": "closure", "salt": "salt"}
 NUMBERED_NODE_NAMES = {"fault": "Fault {number}", "closure": "Closure {number}", "salt": "Salt {number}"}
 
@@ -36,7 +52,7 @@ EDGE_LABELS = {
 }
 
 PROPERTY_TEMPLATES = {
-    "throw": "{source} has throw of about {value}",
+    "throw": "{source} has throw of about {value} ms",  # ms two-way time (throw/infill x digi); axis is TWT
     "dip_deg": "{source} dips at about {value} degrees",
     "area_pct": "{source} covers about {value} percent of the section",
     "fluid": "{source} contains {value}",
@@ -70,7 +86,60 @@ class TextTransform(object):
             sentence = self.relation_to_sentence(relation)
             if sentence:
                 evidence.append(self._evidence_item(relation, sentence))
+                # Tier-2: deterministic geological readings derived from this verified
+                # fact. Emitted only when the base fact was rendered (so they are always
+                # grounded), and they carry the SAME object_id, so they mask the same
+                # object and are retrievable + NLI-checkable like any evidence line.
+                for reading in self._reading_sentences(relation):
+                    evidence.append(self._reading_item(relation, reading))
         return evidence
+
+    def _reading_sentences(self, relation):
+        # Source-backed, definitional readings only (see DIP_* / trap notes). Never a
+        # genetic or process claim -- those belong in the (un-checked) reasoning tier.
+        edge = relation.get("edge")
+        target = relation.get("target")
+        source = self.node_name(relation.get("source"))
+        readings = []
+        if edge == "dip_deg":
+            try:
+                dip = float(target)
+            except (TypeError, ValueError):
+                dip = None
+            if dip is not None:
+                if dip >= DIP_STEEP_MIN:
+                    term = "steeply dipping"
+                elif dip < DIP_GENTLE_MAX:
+                    term = "gently dipping"
+                else:
+                    term = "moderately dipping"
+                readings.append(f"{source} appears {term} in this section")
+        elif edge == "fluid":
+            fluid = str(target).strip().lower()
+            if fluid in {"oil", "gas"}:
+                readings.append(f"{source} is a hydrocarbon-bearing closure")
+            elif fluid == "brine":
+                readings.append(f"{source} is a water-bearing closure")
+        elif edge == "intersects_fault" and self._is_true(target):
+            # Synthoseis uses intersects_fault to set closure TYPE (Closures.py:1562),
+            # so "fault-dependent" is grounded in the simulator's own trap logic.
+            readings.append(f"{source} is a fault-dependent closure")
+        elif edge == "intersects_onlap" and self._is_true(target):
+            readings.append(f"{source} is an onlap trap")
+        return readings
+
+    def _reading_item(self, relation, sentence):
+        return {
+            "trace_type": "reading",
+            "source": relation.get("source", ""),
+            "object_id": self._object_id(relation),
+            "edge": "reading",
+            "target": relation.get("target"),
+            "relation": [relation.get("source"), "reading", relation.get("target")],
+            "fact_name": "reading",
+            "value": relation.get("target"),
+            "sentence": sentence,
+        }
 
     def relation_to_sentence(self, relation):
         if relation.get("trace_type") == "edge":
@@ -122,12 +191,17 @@ class TextTransform(object):
         return None
 
     def _fault_mode_sentence(self, source, target):
-        # fault_mode is categorical (none/random/stairs/relay_ramps/...); "none"
-        # is a real fact meaning no faulting, so phrase it as an absence.
+        # fault_mode is categorical; "none" is a real fact (no faulting) -> absence.
+        # Only genuine geological patterns get a "pattern" sentence; "random"/unknown
+        # are generator settings, not structures, so they are dropped (fall back to the
+        # plain fault count elsewhere).
         value = str(target).strip().lower()
         if value in {"none", "", "0", "false"}:
             return self._sentence(f"{source} shows no faulting")
-        return self._sentence(f"{source} shows a {value.replace('_', ' ')} fault pattern")
+        name = FAULT_PATTERN_NAMES.get(value)
+        if not name:
+            return None
+        return self._sentence(f"{source} shows a {name} fault pattern")
 
     def _edge_sentence(self, relation):
         template = EDGE_TEMPLATES.get(relation.get("edge"))

@@ -110,6 +110,7 @@ Task: in two or three short steps, explain like an interpreter why the Answer fo
 
 - Walk from what the Evidence states, to what it implies about the section, to why the Answer follows, naming the specific evidence fact it rests on.
 - If the Evidences state a negative or section-level fact (no faults, none), explain that the Answer reflects that stated absence.
+- You may name the geological reading that follows DIRECTLY from a stated fact -- the correct term and its definitional consequence (a steep dip = a steeply-dipping fault in this section; a stated fluid = a hydrocarbon-bearing closure; a closure that meets a fault = a fault-dependent closure). Stop at what the Evidence fixes: do NOT infer tectonic or depositional history, fluid migration, seal, charge, or trap integrity, and never use "could mean/might indicate" to reach an unstated cause.
 - Copy any tagged span exactly; add no cause or interpretation the Evidences do not state.
 
 Evidences:

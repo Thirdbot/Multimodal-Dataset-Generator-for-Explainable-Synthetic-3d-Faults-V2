@@ -210,15 +210,23 @@ class GraphSystem:
 
     @staticmethod
     def _to_display_units(node_attrs, data):
-        # Synthoseis stores tilt_pct as a fraction (0.1-0.75) and throw before
-        # dividing by infill_factor; convert to the values it reports
-        # (tilt in percent, throw in samples -- see Faults.py:670).
+        # Synthoseis stores tilt_pct as a fraction (0.1-0.75) and throw as fine-grid
+        # vertical samples (base value x infill_factor). Dividing by infill_factor gives
+        # output-cube samples; multiplying by digi (the vertical sample rate in ms --
+        # the cube's axis is two-way time, see Seismic.py:464) gives throw in ms TWT,
+        # the conventional time-domain unit. tilt_pct -> percent.
+        model = (data.get("model_parameters") or [{}])[0]
         try:
-            infill = float((data.get("model_parameters") or [{}])[0].get("infill_factor") or 1.0)
+            infill = float(model.get("infill_factor") or 1.0)
         except (TypeError, ValueError):
             infill = 1.0
         infill = infill or 1.0
-        for key, convert in (("throw", lambda v: v / infill), ("tilt_pct", lambda v: v * 100)):
+        try:
+            digi = float(model.get("digi") or 4.0)   # ms per sample; project default 4
+        except (TypeError, ValueError):
+            digi = 4.0
+        digi = digi or 4.0
+        for key, convert in (("throw", lambda v: v / infill * digi), ("tilt_pct", lambda v: v * 100)):
             if key in node_attrs:
                 try:
                     node_attrs[key] = round(convert(float(node_attrs[key])), 2)
