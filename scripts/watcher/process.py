@@ -13,7 +13,6 @@ import yaml
 from watchfiles import Change
 import shutil
 
-from scripts.build.sample_generator import BuildGenerator
 from  scripts.graph.graph_generator import trace_success_tracker
 from scripts.images.images_generator import generate_images_for_graph
 from scripts.graph.properties_2d_graph import main as generate_properties_2d_graphs
@@ -36,12 +35,31 @@ _image_gen_concurrency = max(1, int(os.environ.get("IMAGE_GEN_CONCURRENCY", "2")
 _image_gen_semaphore = asyncio.Semaphore(_image_gen_concurrency)
 
 
-_build_semaphore = asyncio.Semaphore(1)
+_build_concurrency = max(1, int(os.environ.get("BUILD_CONCURRENCY", "1")))
+_build_semaphore = asyncio.Semaphore(_build_concurrency)
 STOP_SIGNAL = object()
 
-async def _run_build(generator, config_path, run_id):
+_project_root = Path(__file__).parent.parent.parent
+
+async def _run_build(config_path, run_id):
+    # Each build runs in its OWN subprocess. Synthoseis monkeypatches process-global
+    # state (fault settings + per-fault mask output) and is CPU-bound, so in-process
+    # it would leak patches into the watcher AND hold the asyncio loop's GIL, stalling
+    # image/graph/QA stages. A subprocess isolates both and the wait() is truly async.
+    # Concurrency is capped by BUILD_CONCURRENCY (default 1 == the old serial behavior).
+    # >1 is safe: sample_generator serializes success.yaml/failed.yaml writes with an
+    # fcntl.flock lock file that holds across separate build processes.
     async with _build_semaphore:
-        await asyncio.to_thread(generator.build_sample, config_path, run_id)
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, "-m", "scripts.build.sample_generator",
+            "--config", str(config_path), "--run-id", str(run_id),
+            cwd=str(_project_root),
+        )
+        returncode = await proc.wait()
+        if returncode != 0:
+            # sample_generator already recorded the failure in failed.yaml; this is
+            # just visibility. A partial build with no parameters.db is swept later.
+            print(f"[BUILD SUBPROCESS] {run_id} exited with code {returncode}")
 
 def _sample_id_from_graph(graph_path):
     return Path(graph_path).stem.removesuffix("_db_extract_properties_graph")
@@ -148,7 +166,6 @@ def _config_already_built(run_id):
 async def builds_config_watcher():
 
     print("Watching builds configs...")
-    generator = BuildGenerator()
 
     for cfg in sorted(build_configs_path.glob("*.json")):
         if _config_already_built(cfg.stem):
@@ -159,7 +176,7 @@ async def builds_config_watcher():
         for change_type, file_path in changes:
             if change_type == Change.added:
                 print("Added configs:", file_path)
-                asyncio.create_task(_run_build(generator, file_path, Path(file_path).stem))
+                asyncio.create_task(_run_build(file_path, Path(file_path).stem))
             elif change_type == Change.deleted:
                 print("Deleted configs:", file_path)
                 asyncio.create_task(on_build_delete(Path(file_path).stem,build_path))

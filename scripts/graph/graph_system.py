@@ -158,10 +158,10 @@ class GraphSystem:
                 continue
             value = literal_eval(value)
             model_properties[key] = value
-        for key in list(model_properties.keys()):
-            value = model_properties[key]
-            if value == False or value == 0 or value is  None or value == []:
-                model_properties.pop(key)
+        # for key in list(model_properties.keys()):
+        #     value = model_properties[key]
+            # if value == False or value == 0 or value is  None or value == []:
+            #     model_properties.pop(key)
 
         # remove keys that state that it does not exist or visible
         self.graph.add_node(sample_node, **model_properties)  # category get its properties

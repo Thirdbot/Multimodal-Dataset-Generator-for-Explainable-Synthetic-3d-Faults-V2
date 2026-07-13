@@ -194,7 +194,7 @@ class LLMMachine:
         self.DEFAULT_VLLM_ENDPOINT = "http://localhost:8000/v1"
         self.temp = 0.2 # lower the better logic
         self.top_p = 0.95 # higher the better fluency
-        self.max_tok = 256
+        self.max_tok = 640  # room for a ~5-item batch (ANSWER + RETRIEVAL_QUERY each) without truncating the JSON
         self.presence_penalty = 1 # -2,2 avoid repetition
         self.frequency_penalty = 0.2 # -2,2 more natural
         self.n = 1 # single response

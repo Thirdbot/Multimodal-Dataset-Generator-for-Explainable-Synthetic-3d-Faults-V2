@@ -5,10 +5,11 @@ sent through the guarded Synthoseis build wrapper,
 then success/failed YAML trackers are updated for downstream graph extraction.
 """
 
+import fcntl
 import os
-import threading
 import yaml
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -22,14 +23,27 @@ sys.path.insert(0, str(SYNTHOSEIS_ROOT))
 from main import build_model
 from scripts.build.synthoseis_config_guard import guarded_build_model
 
-# Builds run concurrently in threads; success.yaml/failed.yaml are shared state.
-# One process-wide lock serializes read-modify-write, and every write is atomic
-# (temp file + os.replace) so a reader never sees a truncated file mid-write.
-_TRACKER_LOCK = threading.Lock()
+# Builds run in separate processes (scripts/watcher/process.py launches each as its
+# own subprocess), so a threading.Lock cannot serialize success.yaml/failed.yaml
+# writes across them. fcntl.flock on a shared lock file serializes the whole
+# read-modify-write across every build process on this machine, and each write is
+# still atomic (temp file + os.replace). Together this makes BUILD_CONCURRENCY>1 safe:
+# no torn reads, no lost success/failed entries. A single lock covers both trackers.
+@contextmanager
+def _tracker_lock(directory):
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    lock_path = directory / ".tracker.lock"
+    with open(lock_path, "w") as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)   # blocks until every other process releases
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file, fcntl.LOCK_UN)
 
 
 def _merge_tracker(path, key, new_entries):
-    with _TRACKER_LOCK:
+    with _tracker_lock(path.parent):
         existing = {}
         if path.exists():
             with open(path, "r") as file:
@@ -44,7 +58,7 @@ def _merge_tracker(path, key, new_entries):
 
 def _drop_from_tracker(path, key, drop_entries):
     drop = {str(entry) for entry in drop_entries}
-    with _TRACKER_LOCK:
+    with _tracker_lock(path.parent):
         if not path.exists():
             return
         with open(path, "r") as file:
@@ -96,3 +110,25 @@ class BuildGenerator:
                 return False
         else:
             return False
+
+
+def _main():
+    """CLI entry so the watcher can run each build in its own subprocess.
+
+    Synthoseis monkeypatches process-global state and is CPU-bound; isolating each
+    build in a fresh process keeps those patches out of the watcher and stops the
+    build from holding the event loop's GIL. Exit 0 on success, 1 on failure.
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Run one guarded Synthoseis build.")
+    parser.add_argument("--config", required=True, help="Path to the build config JSON.")
+    parser.add_argument("--run-id", required=True, help="Run id (build config stem).")
+    args = parser.parse_args()
+
+    ok = BuildGenerator().build_sample(args.config, args.run_id)
+    sys.exit(0 if ok else 1)
+
+
+if __name__ == "__main__":
+    _main()

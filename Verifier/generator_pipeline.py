@@ -6,7 +6,7 @@ import hashlib
 from collections import Counter
 from pathlib import Path
 
-from longtracer import LongTracer, check
+from longtracer import LongTracer, check, check_batch
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -18,11 +18,20 @@ from Verifier.rag_verifier import serialize_docs
 
 DEFAULT_GRAPH_ROOT = ROOT / "graphs" / "properties_2d_graph"
 DEFAULT_OUTPUT = ROOT / "Dataset" / "verified_qa.jsonl"
-MIN_RETRIEVAL_SCORE = 0.9
-QUESTION_PER_GRAPH  = 100
-CANDIDATE_PER_QUESTION = 100
+# MiniLM cosine rarely clears 0.9 for related-but-not-verbatim sentences, so 0.9
+# starved the question/answer gates. Precision is still enforced downstream by the
+# NLI trust filter (>=0.7) + entity guard; retrieval only decides candidate recall.
+MIN_RETRIEVAL_SCORE = 0.7
+# A single 2D section carries only a handful of evidence facts per object, so 100
+# unique grounded questions is unreachable (MAX_ROWS_PER_EVIDENCE caps repeats) and
+# the loop always ground out to MAX_ATTEMPT. Right-sized to what a section supports.
+QUESTION_PER_GRAPH  = 12
+# Only the single best answer is kept, so 100 candidates was ~20x wasted generation +
+# retrieval + NLI. 5 gives enough spread. With count<=5 the JSON also fits max_tokens,
+# which kills the truncated-JSON -> parser-retry(5x) storm the old count=100 caused.
+CANDIDATE_PER_QUESTION = 5
 MAX_ROWS_PER_EVIDENCE = 2
-MAX_ATTEMPT = 2 * QUESTION_PER_GRAPH # max attempt for outer loop
+MAX_ATTEMPT = 3 * QUESTION_PER_GRAPH # max attempt for outer loop
 # Rotated per batch so questions spread across angles instead of clustering on one
 # phrasing. Evidence-gated in the prompt: an angle the Evidences cannot answer is skipped.
 QUESTION_FACETS = (
@@ -77,6 +86,7 @@ class RagWorkflow(object):
         seen_evidences = {} # same evidences lead to the same images and cause overfitting
         tally = Counter() # where attempts die, to decide if MAX_ATTEMPT is the bottleneck
 
+        rows = []  # local; do not accumulate on self across every graph (unbounded in the watcher)
         attempts = 0
         while number_of_passes_questions < questions_per_graph and attempts < MAX_ATTEMPT: # retry batches regenerations
             attempts += 1
@@ -164,13 +174,13 @@ class RagWorkflow(object):
                     },
                 }
                 if self.append_row(row):
-                    self.rows.append(row)
+                    rows.append(row)
                 tally["passed"] += 1
                 number_of_passes_questions += 1
         print(f"[TALLY] {sample_id} {view}: attempts={attempts}/{MAX_ATTEMPT} "
               f"passed={tally['passed']} q_reject={tally['q_reject']} "
               f"a_reject={tally['a_reject']} row_skip={tally['row_skip']}")
-        return self.rows
+        return rows
 
     @staticmethod
     def _scene_metadata(graph_path):
@@ -414,11 +424,18 @@ def filter_docs_by_retrieval_score(docs, min_score):
 
 
 def filter_docs_by_trust(answer, docs, min_trust=0.7):
+    # One entailment check per doc (kept per-doc so we know which docs support the
+    # answer), but run as a thread-pool batch instead of a serial CPU-NLI loop --
+    # this is the hottest verification path once fan-out is reduced.
+    if not docs:
+        return []
+    results = check_batch(
+        [{"response": answer, "sources": [doc.page_content]} for doc in docs],
+        max_workers=min(4, len(docs)),
+    )
     kept = []
-    for doc in docs:
-        result = check(answer, [doc.page_content])
+    for doc, result in zip(docs, results):
         trust_score = float(getattr(result, "trust_score", 0.0) or 0.0)
-
         if getattr(result, "verdict", "") == "PASS" and trust_score >= min_trust:
             doc.metadata['trust_score'] = trust_score
             kept.append(doc)
