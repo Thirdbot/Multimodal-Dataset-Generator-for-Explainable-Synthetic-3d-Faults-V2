@@ -180,8 +180,12 @@ def trace_success_tracker(successfuL_list):
     for success_tracker_path in successfuL_list:
         success_tracker_path = Path(success_tracker_path)
         if not success_tracker_path.exists():
-            logger.warning(f"file {success_tracker_path} does not exist")
-            return
+            # This build folder was already traced+imaged then deleted downstream,
+            # but success.yaml still lists it. Skip THIS entry only -- a `return`
+            # here bails the whole list, so every build after the first-deleted one
+            # (i.e. all of them) silently never gets traced.
+            logger.warning(f"[TRACE SKIP] folder no longer on disk: {success_tracker_path}")
+            continue
 
         logger.info(f"[RUN ONCE] -> Success tracker: {success_tracker_path}")
         if success_tracker_path not in set(success_cache):
