@@ -54,8 +54,8 @@ Output contract:
 Task: answer the seismic interpretation Question using only the Evidences. Give up to {count} distinct candidate answers.
 
 For each candidate:
-- ANSWER: a concise answer, one or two sentences, phrased the way an interpreter would say it at the workstation. Address every part the Question asks; when it bundles facts (e.g. where a structure sits and what it meets, or how a fault dips and its throw), state each and -- only where the Evidences connect them -- how they relate. Use only objects, properties, fluids, and values found in the Evidences. Every clause is checked separately, so include a fact ONLY if the Evidences state it; one unsupported clause discards the whole answer. If the Evidences give only a negative or section-level fact (no faults, none), state that directly and name no new object.
-- RETRIEVAL_QUERY: the plain facts behind the answer, one short evidence-like sentence per line -- one line per fact the answer uses -- each naming its object exactly as written in the Evidences (this is used to look the facts back up, so keep it literal, not a keyword bag).
+- ANSWER: one concise sentence, phrased the way an interpreter would actually say it at the workstation. Use only the objects, properties, fluids, and values found in the Evidences, and connect two objects only where the Evidences connect them. If the Evidences give only a negative or section-level fact (no faults, none), state that directly and name no new object.
+- RETRIEVAL_QUERY: the plain facts behind the answer, one short evidence-like sentence per line, each naming its object exactly as written in the Evidences (this is used to look the facts back up, so keep it literal, not a keyword bag).
 - Copy any tagged span (<object>, <nums>, <center>, <bbox>) exactly in the ANSWER; never turn a tagged value into plain text.
 - If the Evidences do not answer the Question, return {{"ANSWERS":[]}}.
 
@@ -83,9 +83,9 @@ Output contract:
 Task: write up to {count} natural seismic-interpretation questions that the Evidences can answer.
 
 For each item:
-- QUESTION: a natural, GroundVQA-style question an interpreter would ask while reading the section -- no tags, no exact values, no answer given away. Favour the section's geological character where the Evidences describe it (how a fault dips, the trap type of a closure, whether a closure is hydrocarbon- or water-bearing). You MAY bundle two or three RELATED facts about the same structure into one natural question (for example where it sits and what it meets, or how it dips and its throw), as long as every part is supported by the Evidences. If the Evidences give only a negative or section-level fact (no faults, none), ask about the overall condition or the absence. Spread questions across these angles only where the Evidences allow, never forcing one: {facets}.
-- Name every structure the question refers to. Ask about orientation or geometry only if the Evidences mention dip, angle, center, or extent.
-- RETRIEVAL_QUERY: the fact(s) the question rests on, one short evidence-like sentence per line -- ONE line per fact the question bundles -- each naming its object exactly as written in the Evidences (keep it literal, not a keyword bag).
+- QUESTION: a natural, GroundVQA-style question an interpreter would ask while reading the section -- no tags, no exact values, no answer given away. Ask one thing the Evidences actually support. If the Evidences give only a negative or section-level fact (no faults, none), ask about the overall condition or the absence. Spread questions across these angles only where the Evidences allow, never forcing one: {facets}.
+- Ask about orientation or geometry only if the Evidences mention dip, tilt, angle, center, or extent. If a question involves more than one object, name them clearly.
+- RETRIEVAL_QUERY: the fact(s) the question rests on, one short evidence-like sentence per line, each naming its object exactly as written in the Evidences (keep it literal, not a keyword bag).
 - Use only the object types, properties, and values present in the Evidences; introduce no new object, feature, or fluid.
 
 Evidences:
