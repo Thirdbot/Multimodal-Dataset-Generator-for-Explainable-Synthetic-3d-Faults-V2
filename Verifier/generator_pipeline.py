@@ -40,6 +40,8 @@ QUESTION_FACETS = (
     "where a structure sits in the section",
     "the orientation or geometry of a structure",
     "how two named structures relate",
+    "the geological character or trap type of a structure",   # uses tier-2 readings
+    "two related properties of one structure together",       # bundled/compound question
 )
 INSTRUCTION = (
     "Inspect the seismic images, use the visible regions as visual evidence, "
