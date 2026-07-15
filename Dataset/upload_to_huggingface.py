@@ -6,7 +6,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CSV = ROOT / "Dataset" / "multimodal_multi_image_dataset.csv"
 IMAGE_LIST_COLUMNS = {"images", "masks"}
-JSON_COLUMNS = {"regions", "evidence"}
+JSON_COLUMNS = {"regions", "evidence", "question_regions", "answer_regions"}
 
 
 def load_rows(csv_path, limit=None):
@@ -83,8 +83,8 @@ def build_dataset(rows):
 
     columns = [
         "images", "masks",
-        "instruction", "question", "answer",
-        "evidence","reason","regions"
+        "instruction", "question", "question_regions", "answer", "answer_regions",
+        "evidence","regions"
     ]
     rows = [
         {key: row.get(key, [] if key in IMAGE_LIST_COLUMNS else "") for key in columns}
@@ -163,7 +163,6 @@ Columns:
 - `masks`: sequence of all mask images
 - `instruction`: task instruction
 - `question`: question text
-- `reason`: optional reasoning/description text
 - `answer`: answer text
 - `evidence`: JSON string of supporting text evidence
 - `regions`: JSON string of bbox/class/color region metadata

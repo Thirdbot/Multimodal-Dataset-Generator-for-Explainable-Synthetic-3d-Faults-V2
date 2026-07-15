@@ -7,6 +7,7 @@ from collections import Counter
 from pathlib import Path
 
 from longtracer import LongTracer, check, check_batch
+from langchain_core.documents import Document
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -119,6 +120,7 @@ class RagWorkflow(object):
 
                 answer = self.best_answer(
                     question=q,
+                    question_query=retrieval_query,
                     evidence_text=seed_text,  # ground on retrieved evidence, not the whole graph (2048-tok context)
                     question_docs=question_docs,
                     retrieve_many=retrieve_many,
@@ -131,19 +133,18 @@ class RagWorkflow(object):
                     continue
                 print("[ACCEPT] answer:", answer["answer"])
 
-                answer_evidence_keys = tuple(sorted(evidence_key(doc) for doc in answer["docs"]))
+                # Row evidence = UNION of the question's grounded facts and the answer's, both
+                # per-fact -- masks/regions and stored evidence then cover every object the QA
+                # pair rests on, not just the answer's. Dedup keys on the union so overfitting
+                # control reflects the real fact set.
+                evidence_docs = dedupe_docs([*answer.get("question_docs", []), *answer["docs"]])
+                answer_evidence_keys = tuple(sorted(evidence_key(doc) for doc in evidence_docs))
                 if answer_evidence_keys and seen_evidences.get(answer_evidence_keys, 0) >= MAX_ROWS_PER_EVIDENCE:
                     print(f"[ROW SKIP] {sample_id}: evidence already used")
                     tally["row_skip"] += 1
                     continue
 
                 seen_evidences[answer_evidence_keys] = seen_evidences.get(answer_evidence_keys, 0) + 1
-                reason = self.generate_reason(
-                    question=q,
-                    answer=answer["answer"],
-                    docs=dedupe_docs(shared_or_fallback_docs(question_docs,answer['docs'])),
-                )
-
                 row = {
                     "row_id": row_id(sample_id, q, answer["answer"]),
                     "sample_id": sample_id,
@@ -152,7 +153,7 @@ class RagWorkflow(object):
                     "instruction":INSTRUCTION ,
                     "question": q,
                     "answer": answer["answer"],
-                    "evidence": serialize_docs(dedupe_docs(shared_or_fallback_docs(question_docs,answer['docs']))),
+                    "evidence": serialize_docs(evidence_docs),
                     "verification": answer["verification"],
                     "metadata": {
                         "graph_path": graph_path.as_posix(),
@@ -167,10 +168,9 @@ class RagWorkflow(object):
                         "graph_mtime": _safe_mtime(graph_path),
                     },
                     "trace": {
-                        "reason": reason,
-                        "question_evidence": serialize_docs(question_docs),
+                        "question_evidence": serialize_docs(answer.get("question_docs", [])),
                         "answer_evidence": serialize_docs(answer["docs"]),
-                        "graph_evidence": docs_to_text(dedupe_docs(shared_or_fallback_docs(question_docs,answer['docs']))).splitlines(),
+                        "graph_evidence": docs_to_text(evidence_docs).splitlines(),
                     },
                 }
                 if self.append_row(row):
@@ -191,7 +191,7 @@ class RagWorkflow(object):
             return {}
         return data.get("scene") or {}
 
-    def evidence_seeds(self, docs, packet_size=3):
+    def evidence_seeds(self, docs, packet_size=1):
         docs = list(docs)
         random.shuffle(docs)
         by_object = {}
@@ -232,8 +232,16 @@ class RagWorkflow(object):
             print(f"[QUESTION ERROR] {error}")
             return []
 
-    def best_answer(self, question, evidence_text, question_docs, retrieve_many, number_of_answer=5):
+    def best_answer(self, question, question_query, evidence_text, question_docs, retrieve_many, number_of_answer=5):
         answers = []
+        # Ground the QUESTION to per-fact evidence (same coverage machinery, lenient). This
+        # replaces the raw object-level question_docs -- which over-retrieve whole faults the
+        # question never asks about -- with exactly the facts the question's RETRIEVAL_QUERY
+        # rests on. The row's evidence is then the UNION of this and the answer's facts, so a
+        # comparison question keeps the objects it compares while a single-fact question does
+        # not drag in siblings. Uses question_docs as the pool (the question's own objects).
+        q_cover = cover_answer(question, question_query, question_docs, require_all=False)
+        question_grounding = q_cover["docs"] if q_cover else []
         try:
             response = self.llm.answer_batch_generation().invoke({
                 "evidences": evidence_text,
@@ -251,54 +259,44 @@ class RagWorkflow(object):
             if not a:
                 continue
             try:
-                # One common evidence set: the question's grounding plus what the
-                # answer's own claim pulls, kept only where it entails the answer.
-                # Verify the natural answer itself, never the retrieval proxy.
-                answer_docs = retrieve_many(a_query)
-                answer_docs = filter_docs_by_retrieval_score(answer_docs,MIN_RETRIEVAL_SCORE)
-                merge_docs = [*question_docs, *answer_docs]
-                shared = dedupe_docs(merge_docs)
-                grounding = filter_docs_by_trust(a, shared)
-                if not grounding:
-                    print("\t[REJECT] not supported by evidence:", a)
+                # Retrieve OBJECT docs (question's + the answer-claim's), then verify by
+                # COVERAGE: every fact the answer asserts must be entailed by some retrieved
+                # object's fact set. cover_answer returns per-fact evidence Documents (one
+                # per covered fact) so downstream evidence/masking stays per-fact, while the
+                # NLI check runs against coherent objects (no fan-out, no partial-match noise).
+                answer_docs = filter_docs_by_retrieval_score(retrieve_many(a_query), MIN_RETRIEVAL_SCORE)
+                object_docs = dedupe_docs([*question_docs, *answer_docs])
+                covered = cover_answer(a, a_query, object_docs)
+                if not covered:
+                    print("\t[REJECT] a fact not grounded:", a)
                     continue
+                grounding = covered["docs"]
 
                 # The object(s) the answer names must actually appear in the grounding,
-                # or it is an entity swap (asked Closure 10, answered Closure 8) that NLI
-                # would wave through on near-duplicate wording.
+                # or it is an entity swap (asked Closure 10, answered Closure 8).
                 if not answer_objects_in_docs(a, grounding):
                     print("\t[REJECT] answer names an object not in evidence:", a)
                     continue
 
-                verification = verify_answer(a, self.rag.format_docs(grounding))
+                # Question-coverage: the answer must address the question's facet.
+                if not question_answers_facet(question, a, grounding):
+                    print("\t[REJECT] off-topic (question facet not addressed):", a)
+                    continue
+
+                verification = {"verdict": "PASS", "score": covered["score"]}
             except Exception as error:
                 print(f"\t[ANSWER CHECK ERROR] {a}: {error}")
-                continue
-            if verification["verdict"] != "PASS":
-                print("\t[REJECT] answer:", a)
                 continue
 
             answers.append({
                 "answer": a,
                 "docs": grounding,
+                "question_docs": question_grounding,
                 "verification": verification,
             })
 
         answers.sort(key=lambda item: item["verification"]["score"], reverse=True)
         return answers[0] if answers else None
-
-    def generate_reason(self, question, answer, docs):
-        evidence_text = docs_to_text(docs)
-        try:
-            response = self.llm.reason_generation().invoke({
-                "evidences": evidence_text,
-                "question": question,
-                "answer": answer,
-            })
-            return response.REASON if response else ""
-        except Exception as error:
-            print(f"[REASON SKIP] {question}: {error}")
-            return ""
 
     def graph_paths(self, max_graphs=None, views=("inline", "crossline")):
         if isinstance(views, str):
@@ -442,6 +440,145 @@ def filter_docs_by_trust(answer, docs, min_trust=0.7):
     return kept
 
 
+def ground_per_fact(retrieval_query, answer, docs, min_trust=0.7):
+    # A compound answer (e.g. throw AND dip) makes several claims, and each needs its
+    # OWN supporting doc. filter_docs_by_trust checks a doc against the WHOLE answer, so
+    # a single-fact doc only partially matches a multi-fact answer and hovers at the
+    # threshold -> some facts silently lose their evidence (and its object_id, so they
+    # also lose the mask). The RETRIEVAL_QUERY already lists one fact per line (the same
+    # split retrieve_many uses), so trust-check each fact and union the docs that support
+    # it -- every fact keeps its grounding. Falls back to the whole answer if the query
+    # is a single line, so single-fact answers behave exactly as before.
+    facts = [line.strip() for line in str(retrieval_query).splitlines() if line.strip()] or [answer]
+    kept, seen = [], set()
+    for fact in facts:
+        for doc in filter_docs_by_trust(fact, docs, min_trust=min_trust):
+            key = doc.page_content
+            if key not in seen:
+                seen.add(key)
+                kept.append(doc)
+    return kept
+
+
+_NLI_TAG_RE = re.compile(r"</?(?:object|nums|center|bbox)>")
+
+
+def _untag(text):
+    # Evidence tags (<object>,<nums>,<center>,<bbox>) are copy-slots for the VLM -- pure
+    # noise to NLI. Left in, they drag a real fact's entailment under threshold (a true
+    # throw scored 0.616 tagged vs 0.823 stripped), so verification must compare tag-free
+    # text on both sides. Same reasoning as the embedder's _TagStrippingEmbeddings; the
+    # stored evidence keeps its tags untouched.
+    return _NLI_TAG_RE.sub("", str(text))
+
+
+def cover_answer(answer, retrieval_query, object_docs, min_trust=0.7, require_all=True):
+    # Coverage over the SHARED fact pool -- every fact of every retrieved object (the
+    # question's AND the answer's). The RETRIEVAL_QUERY is already one fact per line, so
+    # split it simply on "\n"; for each line keep the pool fact that best ENTAILS it by
+    # NLI trust. Using BOTH evidences (old filter_docs_by_trust strength) means a fact the
+    # QUESTION retrieved can ground the answer. Returns None if any line is uncovered;
+    # else {"docs", "score"}.
+    if not object_docs:
+        return None
+    pool = [(doc, fact)
+            for doc in object_docs
+            for fact in (doc.metadata.get("facts") or [])
+            if fact.get("text")]
+    if not pool:
+        return None
+
+    claims = [line.strip() for line in str(retrieval_query).splitlines() if line.strip()] or [str(answer)]
+    pairs, items = [], []
+    for claim in claims:
+        for doc, fact in pool:
+            pairs.append((claim, doc, fact))
+            items.append({"response": _untag(claim), "sources": [_untag(fact["text"])]})
+    results = check_batch(items, max_workers=min(4, max(1, len(items))))
+
+    best = {}  # claim -> (score, doc, fact) : the pool fact that best entails the claim
+    for (claim, doc, fact), result in zip(pairs, results):
+        score = float(getattr(result, "trust_score", 0.0) or 0.0)
+        if getattr(result, "verdict", "") == "PASS" and score >= min_trust:
+            if claim not in best or score > best[claim][0]:
+                best[claim] = (score, doc, fact)
+
+    if require_all and len(best) < len(claims):
+        return None  # a claim the answer makes is entailed by no fact -> reject
+    # require_all=False (question side): keep whatever grounded -- the question's evidence is
+    # ADDITIVE (it widens the row's fact set to the objects the question rests on), not a gate.
+
+    # --- Compound completeness (reverse NLI) ---
+    # The RETRIEVAL_QUERY can under-list a compound answer's facts (the 1.5B often copies one
+    # line for a two-fact answer), leaving real facts the answer states ungrounded. Retrieval
+    # already put every fact of the answer's objects in the pool, so instead of one-evidence-
+    # per-query-line, ask each such fact whether the ANSWER entails it (response=fact,
+    # sources=[answer]). Facts the answer actually asserts get attached; the rest are ignored.
+    # NLI decides -- no answer-splitting, no number-matching. Restricted to the object(s) the
+    # answer names to keep it cheap and block coincidental cross-object entailment.
+    named = entity_pairs(answer)
+    grounded_keys = {(doc.metadata.get("object_id"), fact.get("edge"), str(fact.get("target")))
+                     for _, (_, doc, fact) in best.items()}
+    rev_pool = [(doc, fact) for doc, fact in pool
+                if named and (entity_pairs(fact.get("text")) & named)]
+    if rev_pool:
+        rev_items = [{"response": _untag(fact["text"]), "sources": [_untag(answer)]} for _, fact in rev_pool]
+        rev_results = check_batch(rev_items, max_workers=min(4, max(1, len(rev_items))))
+        for (doc, fact), result in zip(rev_pool, rev_results):
+            score = float(getattr(result, "trust_score", 0.0) or 0.0)
+            if getattr(result, "verdict", "") == "PASS" and score >= min_trust:
+                key = (doc.metadata.get("object_id"), fact.get("edge"), str(fact.get("target")))
+                if key not in grounded_keys:
+                    grounded_keys.add(key)
+                    best[f"__ans::{fact['text']}"] = (score, doc, fact)
+
+    evidence, scores, seen = [], [], set()
+    for claim, (score, doc, fact) in best.items():
+        key = (doc.metadata.get("object_id"), fact.get("edge"), str(fact.get("target")))
+        if key in seen:
+            continue
+        seen.add(key)
+        evidence.append(Document(
+            page_content=fact.get("text"),
+            metadata={
+                "trace_type": fact.get("trace_type"),
+                "source": doc.metadata.get("object_id"),
+                "object_id": doc.metadata.get("object_id"),
+                "parent_id": doc.metadata.get("parent_id"),
+                "category_id": doc.metadata.get("category_id"),
+                "edge": fact.get("edge"),
+                "target": fact.get("target"),
+                "relation": fact.get("relation"),
+                "trust_score": score,
+            },
+        ))
+        scores.append(score)
+    if not evidence:
+        return None
+    return {"docs": evidence, "score": sum(scores) / len(scores)}
+
+
+def _match_fact_in_doc(fact_line, doc):
+    # Pick which fact of the object the covered answer-fact refers to, so evidence + mask
+    # route to the right (object_id, edge, target). Score each fact's SENTENCE against the
+    # answer line by shared numbers first (values like 80.5 or [23,133.5]), then shared
+    # words -- robust for dict-valued position/bbox facts and for value-free facts (fluid,
+    # intersects) that the raw target string can't match.
+    facts = doc.metadata.get("facts") or []
+    if not facts:
+        return None
+    line_nums = set(re.findall(r"\d+\.?\d*", str(fact_line)))
+    line_words = set(re.findall(r"[a-z]+", str(fact_line).lower()))
+    best, best_score = facts[0], (-1, -1)
+    for fact in facts:
+        text = str(fact.get("text") or "")
+        score = (len(line_nums & set(re.findall(r"\d+\.?\d*", text))),
+                 len(line_words & set(re.findall(r"[a-z]+", text.lower()))))
+        if score > best_score:
+            best_score, best = score, fact
+    return best
+
+
 def object_mentions(text):
     return {
         normalize_text(match)
@@ -478,6 +615,43 @@ def answer_objects_in_docs(answer, docs):
         if type_name in evidence_types and (type_name, obj_id) not in evidence_pairs:
             return False
     return True
+
+
+# Question-coverage gate: the answer must address what the question ASKS, not just be
+# grounded. Map each side to a facet and require overlap -- catches "where is X?" answered
+# with a dip. Mechanical (keyword/edge), not a correctness check (that's the model's job).
+_FACET_WORDS = {
+    "location":    ("where", "located", "location", "situated", "find", "part of", "region", "area from", "begins", "ends", "extends"),
+    "orientation": ("orient", "dip", "steep", "gentle", "angle", "tilt", "geometr"),
+    "throw":       ("throw", "offset", "displacement"),
+    "count":       ("how many", "number of", "count", "total", "there are", "there is"),
+    "fluid":       ("fluid", "oil", "gas", "brine", "hydrocarbon", "water-bearing"),
+    "relation":    ("intersect", "relate", "relation", "between", "meet", "adjacent", "bounded"),
+    "presence":    ("present", "visible", "featureless", "pattern", "any other", "is there"),
+}
+_EDGE_FACET = {
+    "dip_deg": "orientation", "tilt_pct": "orientation",
+    "position": "location", "extent": "location",
+    "throw": "throw", "fluid": "fluid",
+    "intersects_fault": "relation", "intersects_onlap": "relation", "intersects_salt": "relation",
+    "number_faults": "count", "number_hc_closures": "count", "number_fault_intersections": "count",
+    # "reading" omitted on purpose (ambiguous) -- classified from the answer text instead
+}
+
+
+def _facets_from_text(text):
+    lowered = str(text or "").lower()
+    return {facet for facet, words in _FACET_WORDS.items() if any(word in lowered for word in words)}
+
+
+def question_answers_facet(question, answer, docs):
+    # Pass if the question can't be classified (be lenient), else require the answer to
+    # share a facet with the question -- from the answer's own words or its covered edges.
+    q_facets = _facets_from_text(question)
+    if not q_facets:
+        return True
+    a_facets = _facets_from_text(answer) | {_EDGE_FACET.get(d.metadata.get("edge")) for d in docs}
+    return bool(q_facets & (a_facets - {None}))
 
 
 def verify_answer(answer, evidence_text):

@@ -139,8 +139,41 @@ def _skip_visual_component(object_id, object_type):
     return object_type == "onlap" and re.match(r"^onlap_\d+$", str(object_id))
 
 
+_OBJECT_INSTANCE_RE = re.compile(r"_\d+$")
+
+
+def _is_object_instance(object_id):
+    # Numbered object node (fault_0, closure_1, salt_2). The category node
+    # ("fault_complex structure") and the type-hub nodes ("fault", "closure") never end
+    # in _<digits>, so they are never treated as prunable instances.
+    return bool(_OBJECT_INSTANCE_RE.search(str(object_id)))
+
+
 def _copy_graph_with_2d_positions(graph, positions, view):
     copied_graph = copy.deepcopy(graph)
+
+    # View-filter: keep only object instances that actually appear in THIS view's scene.
+    # `positions` already holds exactly the objects rendered in this view, so an instance
+    # with no position here is off-view (a 3D fault that doesn't intersect this 2D section).
+    # Pruning it means the RAG built from this graph never serves facts for an object with
+    # no mask in this view -- which is what produced blank-mask QA rows (asking about a
+    # fault that isn't in the picture). Section/hub nodes have no per-view position and are
+    # always kept; edges touching a pruned instance are dropped so nothing dangles.
+    dropped = set()
+    kept_nodes = []
+    for node in copied_graph.get("nodes", []):
+        object_id = node.get("id")
+        if _is_object_instance(object_id) and (object_id, view) not in positions:
+            dropped.add(object_id)
+            continue
+        kept_nodes.append(node)
+    copied_graph["nodes"] = kept_nodes
+    if dropped:
+        copied_graph["edges"] = [
+            edge for edge in copied_graph.get("edges", [])
+            if edge.get("source") not in dropped and edge.get("target") not in dropped
+        ]
+
     node_ids = {node.get("id") for node in copied_graph.get("nodes", [])}
     category_id = _category_id(copied_graph)
 
@@ -175,6 +208,20 @@ def _copy_graph_with_2d_positions(graph, positions, view):
                 "target": object_id,
                 "type": "HAS_VISUAL_OBJECT",
             })
+
+    # Recount number_faults to THIS view's surviving fault instances. After pruning off-view
+    # faults, the DB total would over-count (e.g. "7 faults" on a section showing 6), so the
+    # category node's count must match what is visible. number_fault_intersections and
+    # fault_mode are 3D-structural (not per-slice counts) and stay as-is; number_hc_closures
+    # is an HC subset, not a plain instance count, so it is left untouched too.
+    fault_instances = sum(
+        1 for node in copied_graph.get("nodes", [])
+        if _is_object_instance(node.get("id"))
+        and (node.get("object_type") or str(node.get("id")).split("_")[0]) == "fault"
+    )
+    for node in copied_graph.get("nodes", []):
+        if "number_faults" in node:
+            node["number_faults"] = fault_instances
 
     return copied_graph
 

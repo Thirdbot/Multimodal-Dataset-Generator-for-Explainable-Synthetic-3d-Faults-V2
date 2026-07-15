@@ -37,9 +37,23 @@ _image_gen_semaphore = asyncio.Semaphore(_image_gen_concurrency)
 
 _build_concurrency = max(1, int(os.environ.get("BUILD_CONCURRENCY", "1")))
 _build_semaphore = asyncio.Semaphore(_build_concurrency)
+_build_timeout = float(os.environ.get("BUILD_TIMEOUT", "900"))  # seconds; kill a hung build so it can't wedge the queue
+
+# success.yaml is rewritten once per finished build, and each rewrite fired an
+# UNBOUNDED to_thread(trace_success_tracker, ...). When 10+ builds finish together
+# that floods the shared default thread pool (~cpu+4 workers) and starves the event
+# loop -> the whole pipeline stalls even though RAM is fine. Serialize tracing so it
+# can't saturate the pool (idempotent, so re-reading the whole list stays cheap).
+_trace_semaphore = asyncio.Semaphore(max(1, int(os.environ.get("TRACE_CONCURRENCY", "1"))))
+_nli_device = os.environ.get("NLI_DEVICE", "cpu").strip().lower()  # cpu | cuda | auto -- keep NLI off the training GPU
 STOP_SIGNAL = object()
 
 _project_root = Path(__file__).parent.parent.parent
+
+
+async def _run_trace(objs):
+    async with _trace_semaphore:
+        await asyncio.to_thread(trace_success_tracker, objs)
 
 async def _run_build(config_path, run_id):
     # Each build runs in its OWN subprocess. Synthoseis monkeypatches process-global
@@ -55,7 +69,15 @@ async def _run_build(config_path, run_id):
             "--config", str(config_path), "--run-id", str(run_id),
             cwd=str(_project_root),
         )
-        returncode = await proc.wait()
+        try:
+            returncode = await asyncio.wait_for(proc.wait(), timeout=_build_timeout)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            # Synthoseis occasionally hangs on a parameter combo; killing it frees the
+            # queue. The partial build (no parameters.db) is swept on the next start.
+            print(f"[BUILD TIMEOUT] {run_id} killed after {_build_timeout:.0f}s")
+            return
         if returncode != 0:
             # sample_generator already recorded the failure in failed.yaml; this is
             # just visibility. A partial build with no parameters.db is swept later.
@@ -193,7 +215,7 @@ async def builds_watcher():
         if not objs:
             return
         print("tracing success builds:", objs)
-        asyncio.create_task(asyncio.to_thread(trace_success_tracker, objs))
+        asyncio.create_task(_run_trace(objs))
 
     def read_failed(change):
         try:
@@ -212,7 +234,7 @@ async def builds_watcher():
         if (properties_graph_path / f"{folder.name}_db_extract_properties_graph.json").exists():
             continue
         print(f"[RECONCILE] tracing orphaned build: {folder.name}")
-        asyncio.create_task(asyncio.to_thread(trace_success_tracker, [folder]))
+        asyncio.create_task(_run_trace([folder]))
     if builds_success_path.exists():                            # phase 1b: trace builds from success.yaml
         asyncio.create_task(read_yaml(builds_success_path.as_posix())).add_done_callback(read_add)
     async for changes in watchfiles.awatch(build_path.as_posix()):  # phase 2: new builds
@@ -272,16 +294,23 @@ def _cuda_cleanup():
     except Exception:
         pass
 
-def _init_nli_on_cpu():
-    """Force longtracer's NLI/STS verifier onto CPU so it doesn't fight the LLM for VRAM."""
+def _init_nli_device():
+    """Pin longtracer's NLI/STS verifier to NLI_DEVICE (default cpu) before its first
+    use, so verification doesn't fight training/vLLM for the GPU. NLI_DEVICE=auto leaves
+    sentence-transformers to choose (GPU if available). Must run before the first
+    check() builds the shared model -- it early-returns once that model exists."""
+    if _nli_device == "auto":
+        print("[NLI] device=auto (sentence-transformers default, GPU if available)")
+        return
     from longtracer.guard import nli_model as nm
     if nm._shared_model is not None:
         return
     orig_st, orig_ce = nm.SentenceTransformer, nm.CrossEncoder
-    nm.SentenceTransformer = lambda *a, **k: orig_st(*a, **{**k, "device": "cpu"})
-    nm.CrossEncoder = lambda *a, **k: orig_ce(*a, **{**k, "device": "cpu"})
+    nm.SentenceTransformer = lambda *a, **k: orig_st(*a, **{**k, "device": _nli_device})
+    nm.CrossEncoder = lambda *a, **k: orig_ce(*a, **{**k, "device": _nli_device})
     try:
         nm._shared_model = nm.HybridVerificationModel(verbose=False)
+        print(f"[NLI] verifier pinned to device={_nli_device}")
     finally:
         nm.SentenceTransformer, nm.CrossEncoder = orig_st, orig_ce
 
@@ -320,6 +349,7 @@ def _seed_processed_graphs():
 async def dataset_worker(queue):
     """Single consumer: append rows per new 2d-graph, serial, never truncating."""
     print("Dataset worker starting...")
+    await asyncio.to_thread(_init_nli_device)   # pin NLI to NLI_DEVICE before the first check() (model load off-loop)
     workflow = None
     while workflow is None:                # keep retrying init so a transient OOM can't kill the worker
         try:

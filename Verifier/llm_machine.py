@@ -23,20 +23,16 @@ class QuestionQueryPair(BaseModel):
 class QuestionBatchStructure(BaseModel):
     QUESTIONS:list[QuestionQueryPair]
 
-class ReasonStructure(BaseModel):
-    REASON:str
-
 
 QuestionBatchParser = PydanticOutputParser(pydantic_object=QuestionBatchStructure)
 AnswerBatchParser = PydanticOutputParser(pydantic_object=AnswerBatchStructure)
-ReasonParser = PydanticOutputParser(pydantic_object=ReasonStructure)
 
 MASTER_PROMPT = """
 You are a senior seismic interpreter (structural geologist) describing what a seismic section shows.
 Ground every statement in the Evidences only. Never invent or contradict objects, counts, values, fluids, causes, or events, and add no interpretation the Evidences do not state.
 Write in a natural, professional interpreter's voice -- plain geological language, not a data readout.
 Never mention graphs, metadata, databases, models, synthetic or generated data, prompts, retrieval, or verification.
-Copy any tagged span (<object>...</object>, <nums>...</nums>, <center>...</center>, <bbox>...</bbox>) exactly when you use it; do not unwrap, round, or reword it. Questions never contain tags.
+When you state a value, coordinate, or object name, use it exactly as the Evidences give it -- do not round, rename, or reword it. You may write plainly and drop the <...> tags.
 """
 
 answer_batch_generation_prompt = """
@@ -54,9 +50,8 @@ Output contract:
 Task: answer the seismic interpretation Question using only the Evidences. Give up to {count} distinct candidate answers.
 
 For each candidate:
-- ANSWER: one concise sentence, phrased the way an interpreter would actually say it at the workstation. Use only the objects, properties, fluids, and values found in the Evidences, and connect two objects only where the Evidences connect them. If the Evidences give only a negative or section-level fact (no faults, none), state that directly and name no new object.
-- RETRIEVAL_QUERY: the plain facts behind the answer, one short evidence-like sentence per line, each naming its object exactly as written in the Evidences (this is used to look the facts back up, so keep it literal, not a keyword bag).
-- Copy any tagged span (<object>, <nums>, <center>, <bbox>) exactly in the ANSWER; never turn a tagged value into plain text.
+- ANSWER: phrase it the way an interpreter would actually say it at the workstation. It may combine several facts, or more than one object, in one answer when the Question calls for it -- every fact you state must come from the Evidences, and connect two objects only where the Evidences connect them. If the Evidences give only a negative or section-level fact (no faults, none), state that directly and name no new object.
+- RETRIEVAL_QUERY: copy, verbatim, the exact Evidence line(s) your ANSWER rests on -- one line per fact you used, each exactly as written in the Evidences. Do not reword, shorten, merge, or add to them; these lines are looked back up literally, so any paraphrase breaks the match. If the ANSWER leans on three facts, give the three Evidence lines behind them.
 - If the Evidences do not answer the Question, return {{"ANSWERS":[]}}.
 
 Evidences:
@@ -83,9 +78,9 @@ Output contract:
 Task: write up to {count} natural seismic-interpretation questions that the Evidences can answer.
 
 For each item:
-- QUESTION: a natural, GroundVQA-style question an interpreter would ask while reading the section -- no tags, no exact values, no answer given away. Ask one thing the Evidences actually support. If the Evidences give only a negative or section-level fact (no faults, none), ask about the overall condition or the absence. Spread questions across these angles only where the Evidences allow, never forcing one: {facets}.
-- Ask about orientation or geometry only if the Evidences mention dip, tilt, angle, center, or extent. If a question involves more than one object, name them clearly.
-- RETRIEVAL_QUERY: the fact(s) the question rests on, one short evidence-like sentence per line, each naming its object exactly as written in the Evidences (keep it literal, not a keyword bag).
+- QUESTION: a natural, GroundVQA-style question an interpreter would ask while reading the section -- no tags, no exact values, no answer given away. It may be simple (one property of one object) or compound (combine two properties, or compare or relate two named objects) whenever the Evidences support every part of it. If the Evidences give only a negative or section-level fact (no faults, none), ask about the overall condition or the absence. Spread questions across these angles only where the Evidences allow, never forcing one: {facets}.
+- Ask about orientation or geometry only if the Evidences mention dip, tilt, angle, center, or extent. In a compound or multi-object question, name each object clearly.
+- RETRIEVAL_QUERY: copy, verbatim, the exact Evidence line(s) the Question rests on -- one line per fact the Question depends on, each exactly as written in the Evidences. Do not reword, shorten, or merge them; these lines are looked back up literally. A compound question lists every Evidence line it touches.
 - Use only the object types, properties, and values present in the Evidences; introduce no new object, feature, or fluid.
 
 Evidences:
@@ -93,38 +88,6 @@ Evidences:
 
 Return only JSON now:
 """
-
-reason_generation_prompt = """
-{master_prompt}
-
-{format_instructions}
-
-Output contract:
-- Return only one valid JSON object.
-- The first character must be {{ and the last character must be }}.
-- Do not use markdown.
-- Do not write text before or after the JSON object.
-- Required shape: {{"REASON":"short evidence-guided reasoning."}}
-
-Task: in two or three short steps, explain like an interpreter why the Answer follows from the Evidences. The Answer is already correct and verified -- justify it, never re-answer it, and never say the Evidences are missing or empty.
-
-- Walk from what the Evidence states, to what it implies about the section, to why the Answer follows, naming the specific evidence fact it rests on.
-- If the Evidences state a negative or section-level fact (no faults, none), explain that the Answer reflects that stated absence.
-- You may name the geological reading that follows DIRECTLY from a stated fact -- the correct term and its definitional consequence (a steep dip = a steeply-dipping fault in this section; a stated fluid = a hydrocarbon-bearing closure; a closure that meets a fault = a fault-dependent closure). Stop at what the Evidence fixes: do NOT infer tectonic or depositional history, fluid migration, seal, charge, or trap integrity, and never use "could mean/might indicate" to reach an unstated cause.
-- Copy any tagged span exactly; add no cause or interpretation the Evidences do not state.
-
-Evidences:
-{evidences}
-
-Question:
-{question}
-
-Answer:
-{answer}
-
-Return only JSON now:
-"""
-
 
 multimodal_qa_instruction = (
     "Interpret the provided seismic images and answer the question. "
@@ -151,16 +114,6 @@ AnswerBatchPrompt = PromptTemplate(
         "master_prompt": MASTER_PROMPT,
     }
 )
-
-ReasonPrompt = PromptTemplate(
-    template=reason_generation_prompt,
-    input_variables=["evidences", "question", "answer"],
-    partial_variables={
-        "format_instructions":ReasonParser.get_format_instructions(),
-        "master_prompt": MASTER_PROMPT,
-    }
-)
-
 
 def multimodal_dataset_instruction():
     return multimodal_qa_instruction
@@ -198,13 +151,6 @@ class LLMMachine:
             frequency_penalty=0.1,
             presence_penalty=0.2,
         )
-        self.reason_client = self.client.bind(
-            temperature=0.2,
-            top_p=0.9,
-            frequency_penalty=0.2,
-            presence_penalty=0.4,
-        )
-
     def question_batch_generation(self):
         q_query_engine = (
                 {
@@ -232,20 +178,6 @@ class LLMMachine:
         )
 
         return q_answer_engine
-
-    def reason_generation(self):
-        reason_engine = (
-            {
-                "evidences":itemgetter("evidences"),
-                "question":itemgetter("question"),
-                "answer":itemgetter("answer"),
-            } | ReasonPrompt | self.reason_client | ReasonParser
-        ).with_retry(
-        stop_after_attempt=self.attempt,
-        retry_if_exception_type=(Exception,)
-        )
-
-        return reason_engine
 
     def retrieve_many(self, retrieval):
         def _retrieve(query_text):

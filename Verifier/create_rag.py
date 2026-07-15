@@ -2,6 +2,7 @@
 From the graph, we make a rag
 """
 import inspect
+import re
 import sys
 from pathlib import Path
 
@@ -19,13 +20,42 @@ from NaturalTransform import TextTransform
 from Tracer import EvidenceTracer
 
 
+_TAG_RE = re.compile(r"</?(?:object|nums|center|bbox)>")
+
+
+class _TagStrippingEmbeddings:
+    """Embed tag-free text on BOTH sides (docs + queries) while the stored
+    page_content keeps its tags for display/answer-copy fidelity.
+
+    The evidence tags (<object>, <nums>, <center>, <bbox>) mark spans that must be
+    copied verbatim in answers -- they are noise to the embedder. Embedding them
+    tanked same-fact similarity from 1.0 to ~0.62-0.75, so a tagged doc vs the LLM's
+    untagged RETRIEVAL_QUERY scored *below* MIN_RETRIEVAL_SCORE and got rejected.
+    Stripping tags before encoding makes retrieval tag-agnostic; nothing downstream
+    changes because page_content itself is untouched.
+    """
+
+    def __init__(self, base):
+        self._base = base
+
+    @staticmethod
+    def _clean(text):
+        return _TAG_RE.sub("", str(text))
+
+    def embed_documents(self, texts):
+        return self._base.embed_documents([self._clean(t) for t in texts])
+
+    def embed_query(self, text):
+        return self._base.embed_query(self._clean(text))
+
+
 class Rag:
     def __init__(self,embedding_model="all-MiniLM-L6-v2"):
         self.embedding_model = embedding_model
-        self.embedding = HuggingFaceEmbeddings(
+        self.embedding = _TagStrippingEmbeddings(HuggingFaceEmbeddings(
             model_name="all-MiniLM-L6-v2",  # GeoGPT-Research-Project/GeoEmbedding
             model_kwargs={"trust_remote_code": True},
-        )
+        ))
         self.strategy = Eager(
             k=20,
             start_k=6,
@@ -113,34 +143,45 @@ class Rag:
 
     @staticmethod
     def prepare_content(list_contents, hierarchy=None):
-        prepared_content = []
+        # OBJECT-LEVEL documents: one Document per object (all its facts together),
+        # not one per fact. Retrieval and NLI then operate on a coherent object rather
+        # than scattered fact fragments -- so a query finds the object, verification
+        # checks each answer fact against the object's whole fact set (coverage), and
+        # masking stays one-object-one-region. Model-level facts group under the
+        # category node into a "section" pseudo-object. The per-fact structure is kept
+        # in metadata["facts"] so downstream evidence/masking is still per-fact.
+        from collections import OrderedDict
+
         hierarchy = hierarchy or {"parents": {}, "category_id": ""}
+        category_id = hierarchy.get("category_id", "")
 
+        groups = OrderedDict()
         for content in list_contents:
-            text_content = content.get("sentence")
-            trace_type = content.get("trace_type")
-            source = content.get("source")
-            object_id = content.get("object_id")
-            edge = content.get("edge")
-            target = content.get("target")
-            relation = content.get("relation")
-            parent_id = hierarchy["parents"].get(object_id, "")
-            category_id = hierarchy.get("category_id", "")
+            object_id = content.get("object_id") or content.get("source") or category_id
+            group = groups.setdefault(object_id, {"sentences": [], "facts": []})
+            sentence = content.get("sentence") or ""
+            if sentence:
+                group["sentences"].append(sentence)
+            group["facts"].append({
+                "trace_type": content.get("trace_type"),
+                "edge": content.get("edge"),
+                "target": content.get("target"),
+                "relation": content.get("relation"),
+                "text": sentence,
+            })
 
-            metadata = {
-                "trace_type": trace_type,
-                "source": source,
-                "object_id": object_id,
-                "parent_id": parent_id,
-                "category_id": category_id,
-                "edge": edge,
-                "target": target,
-                "relation": relation,
-            }
+        prepared_content = []
+        for object_id, group in groups.items():
             prepared_content.append(
                 Document(
-                    page_content=text_content,
-                    metadata=metadata
+                    page_content="\n".join(group["sentences"]),
+                    metadata={
+                        "object_id": object_id,
+                        "source": object_id,
+                        "parent_id": hierarchy["parents"].get(object_id, ""),
+                        "category_id": category_id,
+                        "facts": group["facts"],   # per-fact structure kept for evidence + mask routing
+                    },
                 )
             )
         return prepared_content
