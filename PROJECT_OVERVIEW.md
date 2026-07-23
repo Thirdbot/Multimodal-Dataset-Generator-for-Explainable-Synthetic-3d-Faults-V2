@@ -12,14 +12,16 @@ Train and evaluate **vision-language models on seismic interpretation** (fault d
 
 Each dataset row is:
 
-- one or more **seismic section images** (grayscale 2D slices),
-- a **segmentation mask** highlighting exactly the object(s) the question is about,
-- a natural **question**,
-- a **verified answer** (NLI-checked against evidence),
-- a short **chain-of-thought reason**,
-- structured **regions** (bbox, center, class id, object id) for grounding.
+- a **seismic section image** (grayscale 2D slice of the shared scene),
+- **one or more segmentation masks** — one per region the question/evidence touches (object masks, plus a union mask for whole-section facts),
+- a natural **question** that references objects **by coordinate** ("the throw of the fault at [57.5,289]?"),
+- a **verified answer** in plain natural language (no tags),
+- structured **evidence** — `<evidence>` with one `<region>…<SEG></region>` block per mask, ground-truth values kept in tags,
+- structured **regions** (bbox, center, class id, object id, mask_idx) — one per mask, index-aligned.
 
-The non-negotiable design property: **truthfulness**. Answers are grounded in `parameters.db` values and mask-measured geometry, gated by NLI entailment (trust ≥ 0.7) and an entity-swap guard, so the model learns real correspondences instead of plausible-sounding fiction.
+The non-negotiable design property: **truthfulness**. Answers are grounded in `parameters.db` values and mask-measured geometry, gated by **NLI coverage** (every fact entailed, trust ≥ 0.7), a question-coverage **edge gate**, and a coordinate-based entity-swap guard, so the model learns real correspondences instead of plausible-sounding fiction.
+
+> **Removed:** an earlier `reason` (chain-of-thought) column. It was generated *after* verification, so it was the one un-checked field in a dataset whose whole premise is verifiability. It is gone from the pipeline and the schema.
 
 ---
 
@@ -70,7 +72,7 @@ Because these patches mutate process-global Synthoseis state, **each build runs 
 2. writes one JSON **build config** per sample to `build_configs/{category}_{uuid}.json`,
 3. writes a **recipe** `recipes/recipe_N.yaml` listing the sample names + the ratio plan.
 
-The current `settings.yaml` + `control_parameter.py` are set to produce `fault_complex` samples with a `[100,100,500]` (LOW) cube.
+**Current setting:** `sample_types = ["fault_complex"]` (all others commented out) with a `[100,100,500]` (LOW) cube, and **`sample_population: 2`** — i.e. **one recipe = 2 samples**, deliberately small. Scale is reached by **calling `populate()` repeatedly** (the driver in §11.1 tops the queue up), not by one huge recipe: a shallow queue keeps the disk footprint and the blast-radius of a bad config small, and lets the run stop cleanly at any point.
 
 ### 3.3 Build execution
 `BuildGenerator.build_sample()` runs one config through `guarded_build_model`. On success it appends the build folder to `builds/success.yaml`; on failure to `builds/failed.yaml`. Both trackers are written **atomically** (temp file + `os.replace`) under a **cross-process `fcntl.flock`** (`builds/.tracker.lock`), so parallel build subprocesses never lose an entry and the watchers never read a torn file. A success also drops the config from `failed.yaml` so a later failed-list rewrite can't `rmtree` a now-good build. `build_sample` is also exposed as a CLI (`python -m scripts.build.sample_generator --config … --run-id …`) so the watcher can launch each build as an isolated process.
@@ -145,13 +147,19 @@ Serialized to `graphs/properties_graph/{sample}_..._properties_graph.json` as `{
 
 For each view (inline, crossline) it **deep-copies** the properties graph (the DB graph stays pristine) and overlays scene geometry from `scene_position.json`: it attaches `x`, `y`, `bbox` extents, `color`, and `view` to matching nodes, and **adds visual-only nodes** (with `HAS_VISUAL_OBJECT` edges) for objects the DB graph didn't already have. Broad/noisy visual objects (`onlap` components, `lithology`, `age_depth`) are excluded from object-level QA. Output: `graphs/properties_2d_graph/{sample}_{view}_properties_2d_graph.json`, which also carries the shared `scene` block (image/overlay paths).
 
+**View-filter (why the per-view graph is pruned).** A 3D fault need not intersect every 2D slice: the DB knows 5 faults, but an inline section may render only 4. The per-view graph files existed, but their *contents* were identical and unfiltered — so RAG could serve `fault_2`'s facts on a view where `fault_2` isn't in the picture, generating QA about an object with **no mask** (which DatasetMaker could only log as `[NEG-NAMED]` and emit as a bogus maskless "negative"). `_copy_graph_with_2d_positions` now **prunes object instances that have no position in this view** (`positions` is exactly the view's rendered objects) and drops edges touching them. Section/hub nodes (the category node, the type hubs) never carry a per-view position and are always kept.
+
+**View-scoped recount.** Pruning instances would otherwise leave the category node claiming the DB total ("7 faults" over a section showing 6), so `number_faults` is **recomputed from the surviving instances**. `number_fault_intersections` and `fault_mode` are *not* recomputed: they describe the 3D arrangement, not a per-slice count, and there is no per-view intersection geometry to derive them from. `number_hc_closures` is also left alone — it is an HC *subset*, not a plain instance count (a gap to close before enabling closure/salt-heavy categories).
+
 ### 6.3 Mask-measured visual attributes (dip, area)
 Also in `properties_2d_graph.py` (`_mask_features` / `_dip_degrees`), computed **at 2D-graph time straight off each object's scene mask** — so the numbers reflect what's actually visible in pixels, not an opaque simulator knob:
 
-- **fault `dip_deg`** — apparent dip = the angle of the fault trace's principal axis (PCA / covariance eigenvectors), 0°=flat … 90°=vertical. Near-round masks (eigenvalue ratio > 0.6) return `None`. Magnitude only (no left/right, to avoid image-convention mistakes).
+- **fault `dip_deg`** — apparent dip = the angle of the fault trace's dominant line, 0°=flat … 90°=vertical, magnitude only. Estimation is **RANSAC + inlier gate**, not plain PCA: RANSAC finds the dominant collinear pixels and the angle is PCA-fit on those *inliers*, so a crossing structure or fragmented trace can't drag a moment-fit flat (which produced geologically absurd near-horizontal fault dips). A mask whose dominant line covers **< `_DIP_MIN_INLIER_FRAC` (0.5)** of the pixels returns `None`: on the now-individual per-object masks a low inlier fraction means the fault's *own* trace is non-planar (listric/branching) or fragmented — and a non-planar fault has no single dip (its pattern is still carried by the graph's `fault_mode`). On a clean single-fault mask every pixel is an inlier, so it reduces exactly to the old PCA angle. Deterministic (fixed RANSAC seed).
 - **closure / salt `area_pct`** — mask coverage as a percentage of the section.
 
-These are attached as node attributes, so they flow through the tracer → text transform automatically, with no extra plumbing. This replaces the DB's opaque `tilt_pct` (dropped) and fills a gap the DB simply doesn't have (closure area). Only individual objects get them; the merged per-type mask (`object_id == type`) is skipped.
+These are attached as node attributes, so they flow through the tracer → text transform automatically. This replaces the DB's opaque `tilt_pct` (dropped) and fills a gap the DB simply doesn't have (closure area). Only individual objects get them; the merged per-type mask (`object_id == type`) is skipped.
+
+> **Apparent vs. true dip — a settled decision.** `dip_deg` is *apparent* dip measured from the view's mask, and that is the **correct** target for this dataset, not a compromise. Each row is one 2D section (one view); from a single slice only apparent dip is determinable — true structural dip needs the fault's strike (a second non-parallel section / 3D), so labeling a single-view input with true dip is *ill-posed* (the label isn't a function of the pixels). Apparent dip is view-dependent, which is exactly right: inline and crossline legitimately show different apparent dips, each matching its own image. Synthoseis stores no `dip`; a true 3D dip *is* computable from `tilt_pct` + fault origin + `cube_shape` (`θ = atan2(tilt_pct·√((x0−nx/2)²+(y0−ny/2)²), nz)`, `dip = 90°−θ`), but it is view-independent (wrong as a per-view label) and needs a full rebuild (origin/cube_shape are dropped from graphs). If a true-dip *attribute* is ever wanted, the cheap route is to combine the two views the pipeline already makes: `tan(dip_true) = √(tan²δ_inline + tan²δ_crossline)` — no re-slicing. The section aspect (~5:1, 507×100) makes apparent dip a lossy, many-to-one proxy for true dip (steep faults saturate near-vertical) — fine, because true dip shouldn't be recovered from one 2D slice anyway.
 
 ---
 
@@ -168,17 +176,22 @@ Walks the 2D graph and emits a flat list of **relations**: one per node property
 Converts relations into short, inspectable English sentences — one sentence per triplet, no grammar variation. It's the **whitelist + renderer**:
 
 - **`ALLOWED_PROPERTY_EDGES`** gates which facts become evidence: model counts (`number_faults`, `number_hc_closures`, `number_fault_intersections`), `salt_inserted`, `fault_mode`; fault `throw` + `dip_deg`; closure `fluid`, `intersects_*`, `area_pct`. (Sub-seismic `shear_zone_width`/`gouge_pctile` and the opaque `tilt_pct` are intentionally excluded.) `fault_mode` is further **whitelisted** to genuine geological patterns (`relay_ramp`, `horst_and_graben`, `branching`, `staircase`); `random` is a Synthoseis generation setting, not a structure, so it emits **no pattern sentence** rather than leaking the simulator into the evidence.
-- **Templates** render each: `"<object>Fault 1</object> has throw of about <nums>124</nums> ms"` (ms TWT, §6.1), `"… dips at about <nums>58</nums> degrees"`, `"<object>Closure 1</object> covers about <nums>12</nums> percent of the section"`, count/boolean/intersection phrasings, and grouped **position** (`<center>[x,y]</center>`) / **extent** (`<bbox>[…]</bbox>`) sentences.
+- **Objects are named by COORDINATE, not "Type N".** `node_name` renders each numbered object as `"the <type> at [x,y]"` using its center (from the position relations, via a per-view coord map) — e.g. `"the fault at [57.5,289]"` — for **every** object type. The internal id (`fault_2`) is unchanged (mask routing, `object_id`, linkage all still key on it); only the *displayed* reference changes. This lets the LM reason spatially ("the closure at [22,140] is left of the fault at [57.5,289]") because the position is in the text. The coord in the name is **plain** (no `<bbox>`/`<center>` tag — the current model doesn't consume that); the tagged center still comes from the separate "sits near `<center>[x,y]</center>`" line as the grounding value. (This replaced the old `Fault N` = internal_index+1 naming.)
+- **Templates** render each: `"the fault at [57.5,289] has throw of about <nums>124</nums> ms"` (ms TWT, §6.1), `"… dips at about <nums>58</nums> degrees"`, `"the closure at [22,140] covers about <nums>12</nums> percent of the section"`, count/boolean/intersection phrasings, and grouped **position** (`<center>[x,y]</center>`) / **extent** (`<bbox>[…]</bbox>`) sentences. The whole reference is wrapped in `<object>…</object>`.
 - **Derived readings (tier-2).** Beyond the raw facts, `TextTransform` emits deterministic, **source-backed geological readings as additional grounded evidence lines** sharing the object's `object_id` (so they mask the same object and route identically): `dip_deg` → `"appears steeply / moderately / gently dipping in this section"` (30/60° descriptive scale, scoped to *apparent* dip), `fluid` oil/gas → `"hydrocarbon-bearing closure"` / brine → `"water-bearing closure"`, `intersects_fault` → `"fault-dependent closure"` (grounded in Synthoseis's own closure-type logic, `Closures.py:1562`), `intersects_onlap` → `"onlap trap"`. Because they're real evidence, they are **retrievable and NLI-checkable exactly like the raw facts** — a question/answer may use the geological term and still clear the gates. Magnitude labels (large/small throw, big closure) are deliberately *not* derived: no sourced numeric cutoff exists, so they'd be arbitrary. This gives three grounding tiers: raw measured fact → deterministic derived reading → interpretive reasoning (§8, un-checked, prompt-bounded).
-- **Special tokens** `<object>`, `<nums>`, `<center>`, `<bbox>` mark spans that must be **copied verbatim** by the LLM (enforced in the prompt) — this is how numeric/entity fidelity survives generation.
+- **Special tokens** `<object>`, `<nums>`, `<center>`, `<bbox>` mark the spans that carry entity/numeric identity. They live in the **evidence** (which keeps them as ground truth), not in the answer (which is plain text, §9.2). They serve two roles:
+  1. **the model's regression targets** — training preprocessing substitutes each tagged evidence span with a special token and takes the value as the target (§9.2, §9.4),
+  2. **stripped before embedding and before NLI** (§7.3, §8.3), because they are noise to both.
+  Fidelity is enforced by the prompt rule "keep every value/coordinate exactly as the Evidences give it" (§8.2) + the coordinate entity guard (§8.3), not by tag-copying.
 
 Each evidence item keeps its structured fields (`object_id`, `edge`, `target`, `relation`, `trace_type`) so masks can be re-associated later.
 
 ### 7.3 RAG construction & retrieval
 **Stage owner:** `Verifier/create_rag.py` (`Rag`)
 
-- **Documents:** each evidence sentence → a LangChain `Document`, `page_content` = the sentence, `metadata` = `{trace_type, source, object_id, parent_id, category_id, edge, target, relation}`. Parent/category ids come from `graph_hierarchy` so the retriever can walk the object→type→category structure.
-- **Vector store:** `InMemoryVectorStore` with HuggingFace `all-MiniLM-L6-v2` embeddings.
+- **Documents are OBJECT-LEVEL, not per-fact.** `prepare_content` groups every sentence by `object_id` into **one `Document` per object** (`page_content` = all its sentences joined), with the per-fact structure preserved in `metadata["facts"]` = `[{edge, target, text, trace_type}]`. Model-level facts group under the category node as a "section" pseudo-object. **Why:** per-fact documents fragmented one object across many docs, so a narrow query fanned out and pulled sibling objects' facts (pollution). With object-level docs, a query finds a *coherent object*, verification checks each answer fact against that object's whole fact set (§8.3), and masking stays one-object-one-region — while `metadata["facts"]` keeps evidence/mask routing per-fact.
+- **Vector store:** `InMemoryVectorStore` with HuggingFace `all-MiniLM-L6-v2` embeddings, wrapped in **`_TagStrippingEmbeddings`**.
+- **Tag-stripping embedder (both sides).** Evidence tags (`<object>`, `<nums>`, `<center>`, `<bbox>`) are copy-slots for the VLM — they are *noise* to the embedder. Embedding them dropped same-fact similarity from ~1.0 to **~0.62**, so a tagged doc vs the LLM's untagged `RETRIEVAL_QUERY` scored *below* `MIN_RETRIEVAL_SCORE` and got rejected. The wrapper strips tags before encoding **documents and queries**; stored `page_content` keeps its tags, so nothing downstream changes.
 - **Graph retrieval:** `langchain_graph_retriever.GraphRetriever` with an `Eager` strategy (`start_k=6, k=20, select_k=20, max_depth=3`) traversing metadata edges (`object_id↔object_id`, `object_id↔parent_id`, `parent_id↔category_id`, `source↔parent_id`). The `edge↔edge` link was **deliberately removed** — it used to fan a narrow seed out to every object sharing a relation (all closures with `intersects_fault`), collapsing precision. **Breadth now comes from the query, not from cross-object fan-out.**
 
 So retrieval isn't circular self-lookup: a query embeds, hits its nearest evidence docs, then walks a bounded neighborhood of the graph around them.
@@ -190,29 +203,44 @@ So retrieval isn't circular self-lookup: a query embeds, hits its nearest eviden
 **Stage owners:** `Verifier/llm_machine.py` (prompts + model), `Verifier/generator_pipeline.py` (`RagWorkflow`, the loop)
 
 ### 8.1 The model
-A **local vLLM** server (`http://localhost:8000/v1`) running `Qwen/Qwen2.5-1.5B-Instruct`, driven via `langchain_openai.ChatOpenAI`. Three tuned client bindings: **question** (higher temp/penalties for variety), **answer** (low temp for faithfulness), **reason** (middle). All outputs are Pydantic-parsed JSON (`QuestionBatchStructure`, `AnswerBatchStructure`, `ReasonStructure`) with a strict output contract and retries.
+A **local vLLM/sglang** server (`http://localhost:8000/v1`) running `Qwen/Qwen2.5-1.5B-Instruct`, driven via `langchain_openai.ChatOpenAI`. Two tuned client bindings: **question** (higher temp/penalties for variety) and **answer** (low temp for faithfulness). Outputs are Pydantic-parsed JSON (`QuestionBatchStructure`, `AnswerBatchStructure`) with a strict output contract and retries. (The `reason` client/parser/prompt were removed with the reason column.)
 
-The shared `MASTER_PROMPT` sets a **senior seismic interpreter (structural geologist) persona** — a natural interpreter's voice, not a data readout — and enforces the truthfulness contract: only use the evidence; never invent objects/values/causes; never mention graph/metadata/synthetic/prompt/verification; copy tagged spans exactly. The question, answer, and reason prompts are deliberately kept short (a handful of rules) so the 1.5B model complies.
+The shared `MASTER_PROMPT` sets a **senior seismic interpreter (structural geologist) persona** — a natural interpreter's voice, not a data readout — and enforces the truthfulness contract: only use the evidence; never invent objects/values/causes; never mention graph/metadata/synthetic/prompt/verification.
+
+**Wording is now free; only values/coords are pinned.** The model may reword sentences and choose how to present a coordinate (`[x,y]`, `(x,y)`, "near x, y") — this is deliberately relaxed for variety and to let spatial comparisons read naturally. The one hard rule kept: *keep every numeric value and coordinate exactly as the Evidences give it (never invent, round, or change a number), and refer to each object by its coordinate as the Evidences do.* Answers no longer carry grounding tags at all (see §9.2 — the answer is emitted as plain text), so there is nothing for the model to tag; `RETRIEVAL_QUERY` stays verbatim (below) because verification looks it up.
+
+**`RETRIEVAL_QUERY` is a verbatim copy, not a paraphrase.** Both prompts require the exact Evidence line(s) a question/answer rests on, one per line. A paraphrased query embeds differently *and* mis-attributes at verification; copying is also easier for a small model than rewording. Compound (multi-fact, multi-object) questions and answers are explicitly allowed, because coverage verification (§8.3) checks each fact independently.
 
 ### 8.2 The QA loop (per 2D graph, per view)
 The loop aims for `QUESTION_PER_GRAPH` (**12**) passing rows, capped at `MAX_ATTEMPT` (`3×` that) outer attempts — right-sized to how few facts one 2D section actually carries, so it terminates early instead of grinding a fixed 200. For each graph `RagWorkflow.generate_for_graph`:
 
-1. **Seed evidence.** `evidence_seeds` shuffles the docs and yields small per-object packets (so a batch is about one object's facts, reducing cross-object bleed).
-2. **Generate questions.** `question_batch_generation` produces natural GroundVQA-style questions (no tags, no leaked values), rotated across **facets** (presence, count, location, orientation, relationship) but *evidence-gated* — an angle the evidence can't support is skipped. Each question ships a `RETRIEVAL_QUERY` (evidence-like sentences, one fact per line).
-3. **Retrieve for the question.** `retrieve_many(retrieval_query)` runs each query line through the graph retriever, dedups, and keeps only docs with `_similarity_score ≥ MIN_RETRIEVAL_SCORE (0.7)`. (0.7, not 0.9: MiniLM cosine rarely clears 0.9 for related-but-not-verbatim sentences; precision is still enforced by the NLI trust filter + entity guard below, so retrieval only governs candidate recall.) No docs → reject the question.
+1. **Seed evidence.** `evidence_seeds` shuffles the docs and yields, per seed, **one object's doc + the section doc** — so a batch has that object's facts *and* the section-level counts/mode. (This attaching-the-section-doc fix cured a bug where object-level docs left each seed a single lone object with no count facts, making count answers collapse to "there is one fault".)
+2. **Generate questions.** `question_batch_generation` produces natural GroundVQA-style questions (no tags, no leaked values), rotated across five **facets** — *presence/featureless, count, location, orientation/geometry, relationship between two named structures* (`QUESTION_FACETS`, shuffled per batch) — but *evidence-gated*: an angle the evidence can't support is skipped. Questions may be **simple or compound** (two properties, or two named objects), since coverage verifies each part. Each question ships a `RETRIEVAL_QUERY` = the **verbatim** Evidence line(s) it rests on, one per line.
+3. **Retrieve for the question.** `retrieve_many(retrieval_query)` runs each query line through the graph retriever, dedups, and keeps only docs with `_similarity_score ≥ MIN_RETRIEVAL_SCORE (0.7)`. (0.7, not 0.9: MiniLM cosine rarely clears 0.9 for related-but-not-verbatim sentences; precision is still enforced by NLI coverage + coordinate entity guard + edge gate below, so retrieval only governs candidate **recall**. Tag-stripped embedding (§7.3) is what makes 0.7 reachable at all.) No docs → reject the question.
 4. **Generate answers.** `answer_batch_generation` returns up to `CANDIDATE_PER_QUESTION` (**5**) candidate answers, each with its own concise `RETRIEVAL_QUERY` (the claim, not the prose). Only the single best survives verification, so 5 (not 100) spreads phrasings without wasting generation/retrieval/NLI — and a 5-item batch fits `max_tokens`, avoiding the truncated-JSON → parser-retry storm the old count caused.
-5. **Ground + verify each answer** (`best_answer`):
-   - Retrieve on the answer's own claim, merge with the question's docs, dedup.
-   - **NLI trust filter** (`filter_docs_by_trust`, longtracer `check_batch`): one entailment check per doc, thread-pooled in a single batch call, keeping only docs that *entail* the answer with trust ≥ 0.7. Empty → reject.
-   - **Entity-swap guard** (`answer_objects_in_docs`): every object the answer names (tagged `<object>` **and** untagged "Type N") must actually appear in the grounding, so "asked Closure 10, answered Closure 8" is rejected even when NLI would wave through the near-duplicate wording.
-   - **Final verdict** (`verify_answer`): NLI `check` of the natural answer against the grounding text → PASS/score. The best-scoring surviving answer wins.
-6. **Dedup by evidence.** The same evidence set may back at most `MAX_ROWS_PER_EVIDENCE (2)` rows, so identical images don't over-repeat.
-7. **Reason.** `reason_generation` writes a 2–3 step chain-of-thought that *justifies* the (already-verified) answer from the shared evidence. The reason is **not** NLI-checked (it's generated after verification), so it's the one place interpretive bridging lives — the prompt bounds it to the *definitional* geological reading (steep dip → steeply-dipping fault; fluid → hydrocarbon-bearing; closure meeting a fault → fault-dependent) and **forbids** unstated process (tectonic/depositional history, migration, seal, charge) and "could mean" leaps. Since the tier-2 readings (§7.2) are already grounded evidence, the reason mostly restates them in interpreter's voice rather than inventing.
-8. **Append the row** to `Dataset/verified_qa.jsonl` (dedup by `row_id`, atomic append + flush). Each row records question/answer/evidence, the verification score, `trace` (reason + question/answer evidence), and `metadata` (graph path, view, scene image path, `graph_mtime`).
+5. **Ground + verify each answer** (`best_answer`) — see §8.3.
+6. **Dedup by evidence.** The same evidence set may back at most `MAX_ROWS_PER_EVIDENCE (2)` rows, so identical images don't over-repeat. The key is now the **union** fact-set signature, so a throw+dip answer and a dip-only answer count as different grounding instead of colliding.
+7. **Append the row** to `Dataset/verified_qa.jsonl` (dedup by `row_id`, atomic append + flush). Each row records question/answer/evidence, the verification score, `trace` (question/answer evidence), and `metadata` (graph path, view, scene image path, `graph_mtime`).
 
 A `[TALLY]` per graph reports where attempts die (question reject / answer reject / row skip / passed) so you can see whether `MAX_ATTEMPT` is the bottleneck.
 
-> **Why this design:** questions and answers are generated by the *same* small model but must survive **retrieval gating + NLI entailment + entity guard** against graph-derived evidence. The graph is the source of truth; the LLM only phrases and reasons. Verifying the *natural* answer (not the retrieval proxy) closes the loop.
+### 8.3 Verification: coverage, not a single entailment
+
+The old design ran `filter_docs_by_trust` (one NLI check of the *whole answer* against each doc) plus a final `verify_answer`. That breaks on compound answers: a single-fact doc only partially matches a two-fact answer, hovers at the threshold, and facts silently lose their grounding. It is replaced by **`cover_answer`**:
+
+- **Shared fact pool.** The pool is every fact of every retrieved object — the **question's docs *and* the answer's** (`object_docs = dedupe(question_docs + answer_docs)`). A fact the *question* retrieved can therefore ground the answer.
+- **Coverage (forward pass).** The answer's `RETRIEVAL_QUERY` is already one fact per line, so it is split on `\n`; **every line must be entailed** by some pool fact at trust ≥ 0.7, and is attributed to the best-entailing one. Any uncovered line → reject. (An earlier attempt to sentence-split the *answer* instead was reverted: it broke decimals — `80.5` → `80`,`5` — and stripped subjects, causing 14 false rejects.)
+- **Forward vs. reverse (order matters).** Forward runs first *and is the gate*: if any declared `RETRIEVAL_QUERY` line is uncovered, `cover_answer` returns `None` and the reverse pass never runs. Reverse only runs on an already-passing answer and can only **add** facts, never reject — forward = *truth of declared claims*, reverse = *completeness of the compound*.
+- **Compound completeness (reverse pass).** The small model often writes *one* query line for a two-fact answer, leaving the second fact real but ungrounded. So each pool fact of the object(s) the answer **cites by coordinate** is checked in reverse — `response=fact, sources=[answer]`, i.e. *"does the answer assert this fact?"* — and entailed facts are attached. Object identity is the coordinate (`coord_refs`), so only facts sharing the answer's cited coords enter the reverse pool (a different object's facts can't leak in). NLI decides; **no answer-splitting, no number-parsing**. Result: multi-evidence rows went **0 → 20/47**.
+- **The NLI score itself** is a *hybrid* verifier (`longtracer`): bi-encoder semantic similarity (`avg_score`) gates a cross-encoder 3-class NLI (contradiction/neutral/entailment). A claim is supported when `avg_score ≥ 0.40` **or** `entailment > 0.5`, **and not** `contradiction > 0.5`; the thresholded `trust_score` is the similarity, the NLI drives the PASS/contradiction gate. The pipeline requires `PASS ∧ trust ≥ 0.7`. The contradiction guard is what rejects a wrong-valued fact ("dips 40°" when the answer says 65.8°).
+- **Tag-stripped NLI.** Like the embedder, NLI compares tag-free text. A true throw fact scored **0.616 tagged vs 0.823 stripped** — i.e. tags alone pushed real facts below threshold. Stored evidence keeps its tags.
+- **Entity-swap guard** (`answer_objects_in_docs`) — now **coordinate-based**. Since objects are named by coordinate, every coordinate group the answer cites (center `[x,y]` or box `[x1,y1,x2,y2]`, any bracket style, number-normalized, matched as *whole groups* so a box is never mistaken for two centers) must appear in the evidence. A coord not in the evidence is a swap/fabrication → reject; NLI still judges the *relation* on top ("A at [..] is left of B"). (This replaced the old `<object>`-string + "Type N" match, which coord-naming and free rewording made unworkable.)
+- **Question-coverage edge gate** — the answer must address what the question *asks*, not merely be grounded. This replaced the old keyword *facet* gate: both the question and the answer are grounded to per-fact evidence carrying `metadata["edge"]`, so the gate compares **edge sets** directly — the answer's grounded edges must **cover** the question's grounded edges. A compound question grounds to ≥2 edges (e.g. `dip_deg` + `number_faults`), so an answer that drops a clause is missing that edge and is rejected — precisely the failure the keyword any-overlap facet gate let through. When the question grounds to nothing, it passes (lenient, no false-reject).
+- **Verdict:** `{"verdict": "PASS", "score": mean(covered trust)}`. Best-scoring surviving answer wins.
+
+The **question** is also grounded per-fact (`cover_answer(..., require_all=False)`, lenient — question evidence is additive, not a gate), and the row's evidence is the **union of question ∪ answer facts**. This both completes the grounding (a comparison question keeps the objects it compares) and *repairs* some answer-side mislabels: for "how many fault intersections?", the answer sometimes grounds `number_faults` while the **question** correctly grounds `number_fault_intersections` — the union carries the right fact.
+
+> **Why this design:** questions and answers come from the *same* small model but must survive **retrieval gating + NLI coverage + coordinate entity guard + edge gate** against graph-derived evidence. The graph is the source of truth; the LLM only phrases. Note the honest boundary: verification checks the answer against **the facts its own `RETRIEVAL_QUERY` fetched**, so a *self-consistent* wrong answer can pass (§12).
 
 ---
 
@@ -220,15 +248,43 @@ A `[TALLY]` per graph reports where attempts die (question reject / answer rejec
 
 **Stage owner:** `Dataset/DatasetMaker.py`
 
-Reads `verified_qa.jsonl` and emits `Dataset/multimodal_multi_image_dataset.csv` (and a jsonl). Per row (`build_row`):
+Reads `verified_qa.jsonl` and emits `Dataset/multimodal_multi_image_dataset.csv` (and a jsonl).
+
+### 9.1 Regions and the row mask
 
 1. Load the shared scene image + its objects from `scene_position.json`.
-2. **Match evidence to regions** (`evidence_matches_region`): an evidence item lights up an object region when its `object_id` matches, or its type matches a type-global region, or it's an edge-type fact for that class. The subtle rule: object-specific evidence like `fault_0` falls back to the **type-global** mask *only when that object has no individual mask* (`individual_ids` guard) — so "tilt/dip of fault 1" masks fault 1 if a per-fault mask exists, else the all-faults mask, but **never** bleeds onto `fault_1` from `fault_0` evidence.
-3. **Composite the row mask** (`build_row_mask`): union only the **retrieved** objects' scene-registered masks into one binary PNG (large objects painted first) under `Dataset/masks/`. The row's single mask therefore highlights *exactly what the question pulled*.
-4. Build `regions` (per object: `image_idx=0`, `mask_idx=0`, bbox, center, class id, object id) and an `<region>…<SEG>…</region>` evidence block.
-5. **Negatives are kept**: a featureless/"no faulting" row has no object to outline, so it's emitted with `masks: []` and empty `regions` rather than dropped — valid VQA supervision for absence.
+2. **Split section-scoped from object-scoped evidence.** `SECTION_EDGES` (= the `EDGE_TYPES` keys: `number_faults`, `fault_mode`, `number_fault_intersections`, `salt_inserted`, `number_hc_closures`) describe the **whole section**, not one object. Only object-scoped facts drive the per-object loop.
+3. **Match evidence to regions** (`evidence_matches_region`): an evidence item lights up an object region when its `object_id` matches, or its type matches a type-global region, or it's an edge-type fact for that class. The subtle rule: object-specific evidence like `fault_0` falls back to the **type-global** mask *only when that object has no individual mask* (`individual_ids` guard) — so "dip of fault 1" masks fault 1 if a per-fault mask exists, else the all-faults mask, but **never** bleeds onto `fault_1` from `fault_0` evidence.
+4. **Section facts → ONE whole-section region.** Previously a section fact matched *every* fault, so the per-object loop stamped an **identical** `<region>` block onto each one — 5 byte-identical blocks, all pointing at the same `mask_idx=0`, i.e. *one mask described five times*, teaching the VLM that each individual fault "is 17 intersections". Now section facts are emitted **once** as a single region (`object_id="section"`, union bbox over the referenced type, mask still covering all of them), so the (text → segment) pairing is 1:1 like every object row.
+5. **One mask per region** (`build_region_mask`), **not** a single composite. Each region gets its own binary PNG under `Dataset/masks/` (keyed `_r{idx}_`): an object region = that one object's mask; the whole-section region = the **union** of every object of the referenced type. A region is only emitted if its mask has real pixels. So one row is **1 image → N masks → N evidence blocks → N `regions`**, all index-aligned: `masks[i] ↔ regions[i] ↔ the i-th `<region>`/`<SEG>``. Each region's `mask_idx` points at its own mask. (Verified against real data: region `bbox`/`center` reproduce the mask pixels exactly, and evidence `<center>`/`<bbox>` values equal the region's.)
+6. **Negatives are kept**: a featureless/"no faulting" row has no object to outline, so it's emitted with `masks: []`, empty `regions`, and evidence = the slotless `<evidence>` fact list — valid VQA supervision for absence.
 
-Columns: `sample_id, images, masks, instruction, question, answer, evidence, reason, regions`. `Dataset/upload_to_huggingface.py` pushes it to the Hub.
+### 9.2 The answer is plain; the evidence carries the ground truth
+
+**The answer is emitted as plain text** inside `<answer>…</answer>` — grounding tags are *unwrapped* (values kept, markup stripped). Grounding lives entirely in the `regions` column + masks, not in the answer text. (`tag_answer` is retained but unused — a one-line re-enable if inline answer tags are ever wanted again.)
+
+**The `evidence` column is structured, multi-region, and holds real values.** It is `<evidence>` wrapping one `<region>\n{facts}\n<SEG>\n</region>` block **per mask**, index-aligned with `masks`/`regions`. Facts keep their **ground-truth values** inside tags: `<object>the fault at [57.5,289]</object>`, `<nums>65.8</nums>`, `<center>[x,y]</center>`, `<bbox>[x1,y1,x2,y2]</bbox>`. Invariant checked at build across all rows: `#<region> == #<SEG> == #</region> == len(masks) == len(regions)`, and each `<region>` holds exactly one `<SEG>`.
+
+> **Slots are a training-time transform, NOT baked into the dataset.** The dataset is the regression *target*, so it must carry the actual values; the model's *training preprocessing* is what substitutes a tagged span (`<nums>65.8</nums>`) for a special token and takes the value from the metadata as the regression target. Pre-blanking values into `<COUNT_SLOT>`/`<CENTER_SLOT>` placeholders was tried and reverted — it destroyed the ground truth there is nothing left to regress against.
+
+Columns: `sample_id, images, masks, instruction, question, answer, evidence, regions`. (The former `question_regions` / `answer_regions` columns and the `region_grounded_variant` question-twin maker were **removed** — the answer no longer carries per-span region metadata, and object references are coordinates in the text itself.) `Dataset/upload_to_huggingface.py` pushes it to the Hub.
+
+### 9.4 The grounding format & the model-side contract
+
+The format follows **GLaMM/LISA**-style *inline* grounding (not GranD's sidecar). Where grounding lives, in the current schema:
+
+- **Segmentation** → the `masks` + `regions` columns. `regions[i]` carries `{object_id, class_id, bbox, center, mask_idx, view}` for `masks[i]`, one per `<SEG>` in the evidence (§9.1–9.2).
+- **Regressable values** → the tagged spans in the **`evidence`** column (`<nums>`, `<center>`, `<bbox>` around ground-truth values). The model's training preprocessing substitutes each tagged span with a special token and takes the value from the span as the **regression target** — the dataset carries the real value; the collator never asks the model to emit coordinate digits as free text.
+- **Object reference** → a **plain coordinate in the text** (`the fault at [57.5,289]`). This is a spatial *reference* for reading/generation and comparison, **not** a regressed token — the current model does not consume a `<bbox>`-token RoIAlign input, so object references are deliberately plain (no tag).
+- **Answer** → plain natural language (no tags); it states values/coords faithfully (§8.2) and its object identities are pinned to real evidence coordinates by the swap guard (§8.3).
+
+Contract notes:
+
+- **The dataset is the annotation; the model target is derived** from the tagged evidence spans, not by parsing free-text digits.
+- **Alignment is index-positional** end-to-end: `masks[i] ↔ regions[i] ↔ the i-th `<region>`/`<SEG>`` in evidence (invariant checked at build, §9.2).
+- **Inference UX this buys:** the user can ask **by coordinate** ("what is the fault at [x,y]?") or by plain description — no need to know fault names — because the position is the reference, and it's the same form the training data uses.
+- **Fault ids stay Synthoseis's internal enumeration** (`fault_2`) as the *internal* handle for mask routing and `object_id`. The numbering reflects **insertion/construction order** (structurally real), *not* spatial order — which is exactly why the **displayed** reference is now the coordinate, not a "Fault N" name. The old `Fault N` = internal_index + 1 display name was removed; the id is never surfaced to the model.
+- **Possible extension** (not current): promote the question's object reference from a plain coordinate to a `<bbox>` RoIAlign-token input, restoring the box→features path — the `regions` metadata already carries the box needed to feed it.
 
 ---
 
@@ -252,12 +308,14 @@ builds/seismic__..._{category}_{uuid}/   (parameters.db + zarr cubes + faults/fa
         │   build_objects/images/{sample}/scene_position.json + PNGs   (shared scene, per-object masks)
         │        │  properties_2d_graph.main  (+ dip/area from masks)
         │        ▼
-        │   graphs/properties_2d_graph/{sample}_{view}_..._2d_graph.json
-        │        │  EvidenceTracer → TextTransform → Rag (embed + graph retrieval)
-        │        │  RagWorkflow: question → retrieve → answer → NLI trust → entity guard → verify → reason
+        │   graphs/properties_2d_graph/{sample}_{view}_..._2d_graph.json   (VIEW-FILTERED + recounted)
+        │        │  EvidenceTracer → TextTransform → Rag (object-level docs, tag-stripped embed + graph retrieval)
+        │        │  RagWorkflow: question → retrieve → answer → cover_answer (coverage + reverse-NLI,
+        │        │               question∪answer union) → coord entity guard → edge gate
         │        ▼
         │   Dataset/verified_qa.jsonl
-        │        │  DatasetMaker: match evidence→regions, composite row mask, keep negatives
+        │        │  DatasetMaker: evidence→regions (section facts → ONE region), ONE mask per region,
+        │        │               plain answer + <evidence>/<region>/<SEG> (ground-truth values), keep negatives
         │        ▼
         └─► Dataset/multimodal_multi_image_dataset.csv  +  Dataset/masks/*.png
 ```
@@ -284,6 +342,21 @@ Six `asyncio` coroutines run concurrently via `watchfiles.awatch`, each doing a 
 - **Idempotent / resumable.** Graphs traced once (lock + on-disk check); the dataset worker seeds "already processed" graphs by comparing stored `graph_mtime` (a rebuilt graph is reprocessed). `DATASET_REGEN=1` forces a full rebuild after a prompt change.
 - **Clean Ctrl+C.** Low-level `signal.signal` handlers cancel the main task, and the process `os._exit`s rather than blocking on Python 3.11's `shutdown_default_executor()` waiting on an in-flight build thread. Partial builds (no `parameters.db`) are swept on the next start (`_sweep_partial_builds`).
 
+### 11.1 Populating at scale (`scripts/run_generation.sh`)
+
+**A build only starts if its config is `Change.added` *while the watcher is running*.** `builds_config_watcher`'s startup loop only *skips* already-built configs — it never builds pre-existing ones (`# what failed is failed, no rebuild from config`). So the order is non-negotiable: **start the watcher first, then populate.** Populating first and starting the watcher after silently builds nothing.
+
+`run_generation.sh` is the detached driver for long runs:
+
+- `setsid`-launches the watcher (survives shell/session exit) and **restarts it if it dies**,
+- keeps a **shallow queue** (`QUEUE_AHEAD=6`) by calling `control_parameter` repeatedly — one recipe = **2 `fault_complex` samples** (`sample_population: 2`), rather than one huge recipe,
+- stops at `TARGET_SCENES` or if free disk falls below `MIN_FREE_GB` (12 G),
+- logs progress to `gen_driver.log`, build detail to `gen_run.log`.
+
+**Measured cost:** ~**4.5 min/scene** (build + image gen + CPU QA) and only ~**13–33 MB/scene** retained. Disk is *not* the constraint (~250 scenes ≈ 6 GB); **wall-clock is** (250 scenes ≈ 19 h).
+
+> **Restart caveat:** a watcher restart re-QAs already-built graphs and **appends**, over-sampling those scenes. During a long build the QA is therefore provisional — finish with **one clean QA pass** (reset `verified_qa.jsonl`, regenerate over all graphs) so every scene is sampled exactly once.
+
 ---
 
 ## 12. Design rationale & known limitations
@@ -296,9 +369,35 @@ Six `asyncio` coroutines run concurrently via `watchfiles.awatch`, each doing a 
 
 - **Single simulator ceiling.** Synthoseis defines the visual domain; expect a domain gap to field seismic. This is pretraining/augmentation data, not a replacement for real-data fine-tuning.
 - **Text-mediated verification of a visual task.** QA is generated and NLI-checked against *text* evidence derived from ground truth; it asserts the answer is *true of the scene*, not that it's *visually inferable* from that particular 2D section. Mask-measured dip/area narrow this gap; it doesn't fully close it.
-- **Small generator model.** Qwen2.5-1.5B is fast and cheap but a weak writer; the gates catch errors but also throttle yield (watch the `[TALLY]`).
+- **Verification follows the model's own query, so a self-consistent wrong answer can pass** — *largely mitigated now by the edge gate (§8.3), but not fully closed.* `RETRIEVAL_QUERY` is written by the 1.5B; retrieval faithfully returns whatever it asks for. The old failure: on a count question the model wrote a query about *one object* and answered "there is one fault present," grounded on that object's dip fact — self-consistent, passed at trust 1.0 even when the evidence said `number_faults=7`. The **edge gate** now catches this: the question grounds the `number_faults` edge, so an answer whose grounded edges don't *cover* `number_faults` is rejected — a count answer can no longer sail through on a dip fact. What remains: if the answer grounds the *right* edge with a self-consistently wrong value that NLI's contradiction check doesn't catch, it can still pass. Remaining lever: a **bigger LLM**, or a narrow **count guard** (for `number_*` questions require the answer's integer to equal the count edge's target — hook ready, unimplemented).
+- **Small generator model.** Qwen2.5-1.5B is fast and cheap but a weak writer: it emits **0 tags**, under-lists `RETRIEVAL_QUERY` on compound answers (hence the reverse-NLI pass), and confuses presence with count. The gates catch most of it but also throttle yield (watch the `[TALLY]`).
 - **Per-fault masks depend on the wrapper.** If `faults/fault_XX.zarr` isn't emitted (guard off / older builds), faults fall back to a single merged mask and lose per-fault dip/localization.
-- **Combinatorial masks ≠ visual diversity.** Subset-masks from one complex scene are correlated; effective visual N ≈ **number of distinct builds**. Split train/val **by build** to avoid leakage, and scale the *build* count for generalization.
+- **Combinatorial masks ≠ visual diversity.** Subset-masks from one complex scene are correlated; effective visual N ≈ **number of distinct builds**. Split train/val **by build** to avoid leakage. The QA:image ratio is *not* the overfitting driver (the ~12 QA/image land on **different facts**, deduped by evidence); **scene count is**. For a fixed row budget prefer **more scenes × fewer QA** over the reverse.
+- **Only `fault_complex` / `fault_only` are proven.** Closure/salt categories are *structurally* supported (class ids, `EDGE_TYPES`, `CROSS_REFERENCE_EDGES`, `Closure N`/`Salt N` naming) but **untested**, and the per-view recount currently fixes **only `number_faults`** — so closure/salt-heavy categories will hit the same off-view count mismatch that was just fixed for faults. `onlap`/`lithology` are excluded by design (`EXCLUDED_VISUAL_OBJECTS`) and would yield only section-level/negative rows.
+- **Excluded-object intermediates dominate build_objects.** `onlap/` renders can be ~62 MB of a ~65 MB sample even though onlap is excluded from the dataset — the retained cost per scene is otherwise only ~2.5 MB (scene images + fault masks). Not pruned (deliberately, no delete function); worth knowing if disk gets tight at large scene counts.
+
+---
+
+## 13. Scale & the current run
+
+**Target:** **500 distinct images**. Each scene renders **2 views** (inline + crossline), so that is **250 scenes** — and scenes, not rows, are the unit that matters (§12: effective visual N ≈ distinct builds).
+
+```
+250 scenes × 2 views          = 500 distinct images
+500 images × 12 QA (QUESTION_PER_GRAPH)   ≈ 6,000 verified rows
+```
+
+**Why 12 QA/image is the "optimal" pick:** it sits in the healthy VQA band (5–15 Q/image, cf. GQA/VQAv2) and well inside a `fault_complex` scene's fact budget (~5–7 faults × ~5 facts + section facts ≈ 30+), so the 12 questions land on **distinct facts** rather than rephrasing one — and `MAX_ROWS_PER_EVIDENCE=2` caps repeats on top. Pushing to ~45 QA/scene (what 20K rows over 250 scenes would need) would force over-sampling and is exactly the overfitting failure mode in §12.
+
+**Measured envelope:**
+
+| | value |
+|---|---|
+| build+QA per scene | ~4.5 min → 250 scenes ≈ **~19 h** |
+| retained disk per scene | ~13–33 MB → 250 scenes ≈ **~6 GB** (of 52 GB free) |
+| binding constraint | **wall-clock**, not disk |
+
+Driven by `scripts/run_generation.sh` (§11.1), detached, with a hard stop at target or `<12 GB` free. Finish with **one clean QA pass** over all graphs (§11.1 caveat) to produce the final `verified_qa.jsonl` → CSV.
 
 ---
 

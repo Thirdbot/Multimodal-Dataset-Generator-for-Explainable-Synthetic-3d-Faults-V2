@@ -106,10 +106,30 @@ def _sweep_partial_builds(min_idle_seconds=120):
         print(f"[SWEEP] removing interrupted build (no parameters.db): {folder.name}")
         shutil.rmtree(folder, ignore_errors=True)
 
+def _sample_fully_processed(graph_path, sample_id):
+    # A sample is done when it has BOTH a scene (images/masks) and its per-view 2d graphs.
+    if not (images_path / sample_id / "scene_position.json").exists():
+        return False
+    return any(properties_2d_graph_path.glob(f"{Path(graph_path).stem}_*_properties_2d_graph.json"))
+
+
 async def _run_image_gen(graph_path):
     async with _image_gen_semaphore:
         graph_path = Path(graph_path)
         sample_id = _sample_id_from_graph(graph_path)
+
+        # Bail out early for samples that are already fully processed. graph_properties_watcher's
+        # startup catch-up fires this for EVERY existing graph, and this function used to re-run
+        # generate_properties_2d_graphs unconditionally -- so each restart re-processed the whole
+        # corpus (read every mask, recompute every dip). At ~200 graphs that ballooned the watcher
+        # to ~8GB, which OOM-killed it, which restarted it, which re-processed everything again:
+        # 93 deaths / 67 recycles, throughput collapsing 1.8 -> 12 min per scene. Worse, each death
+        # left raw builds unextracted (they are only deleted after this succeeds), so 1.2GB builds
+        # piled up until the disk floor stopped the run. Skipping done work makes restarts cheap.
+        if _sample_fully_processed(graph_path, sample_id):
+            _delete_build_for_sample(sample_id)   # raw build is redundant once extracted
+            return
+
         scene_position = images_path / sample_id / "scene_position.json"
         if not scene_position.exists():  # skip re-imaging a sample already done
             try:
@@ -117,6 +137,7 @@ async def _run_image_gen(graph_path):
             except Exception as exc:
                 print(f"[IMAGE GEN FAILED] {sample_id}: {exc}")
                 return
+
         try:
             await asyncio.to_thread(generate_properties_2d_graphs, {sample_id})
         except Exception as exc:
@@ -413,16 +434,27 @@ async def gather():
         Path(p).mkdir(parents=True, exist_ok=True)
     _sweep_partial_builds()                          # clear interrupted builds before starting
     dataset_queue = asyncio.Queue()
+    # SKIP_QA=1 -> build/image/graph stages only, no QA.
+    #
+    # The QA stage builds a RAG vector store + runs NLI per graph, and on startup it catches up
+    # over EVERY existing 2d graph. That cost grows with the corpus: at ~334 graphs the watcher
+    # ballooned 2GB -> 8.7GB in ~2min and got OOM-killed, restarted, re-caught-up, and OOMed
+    # again -- a loop that can never finish. For a BULK BUILD the QA is also pure waste, since
+    # every scene's QA is regenerated in one clean pass at the end anyway (a restart re-QAs and
+    # appends, so mid-build QA is provisional by construction). Skipping it keeps the watcher
+    # flat and leaves the CPU to synthoseis.
+    stages = [
+        recipes_watcher(),
+        builds_config_watcher(),
+        builds_watcher(),
+        graph_properties_watcher(),
+    ]
+    if os.environ.get("SKIP_QA", "").strip() not in ("1", "true", "yes"):
+        stages += [dataset_gen_pipeline(dataset_queue), dataset_worker(dataset_queue)]
+    else:
+        print("[SKIP_QA] build/image/graph only -- QA is regenerated later in one clean pass")
     try:
-        await asyncio.gather(
-            recipes_watcher(),
-            builds_config_watcher(),
-            builds_watcher(),
-            graph_properties_watcher(),
-            dataset_gen_pipeline(dataset_queue),
-            dataset_worker(dataset_queue),
-            return_exceptions=False
-            )
+        await asyncio.gather(*stages, return_exceptions=False)
     except asyncio.CancelledError:
         await dataset_queue.put(STOP_SIGNAL)
         raise

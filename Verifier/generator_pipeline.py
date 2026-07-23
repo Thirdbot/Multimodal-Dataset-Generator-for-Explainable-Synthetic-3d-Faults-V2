@@ -22,6 +22,7 @@ DEFAULT_OUTPUT = ROOT / "Dataset" / "verified_qa.jsonl"
 # MiniLM cosine rarely clears 0.9 for related-but-not-verbatim sentences, so 0.9
 # starved the question/answer gates. Precision is still enforced downstream by the
 # NLI trust filter (>=0.7) + entity guard; retrieval only decides candidate recall.
+_INSTANCE_ID_RE = re.compile(r"_\d+$")   # "fault_0" is an object; "fault_complex structure" is the section
 MIN_RETRIEVAL_SCORE = 0.7
 # A single 2D section carries only a handful of evidence facts per object, so 100
 # unique grounded questions is unreachable (MAX_ROWS_PER_EVIDENCE caps repeats) and
@@ -191,24 +192,38 @@ class RagWorkflow(object):
             return {}
         return data.get("scene") or {}
 
-    def evidence_seeds(self, docs, packet_size=1):
+    def evidence_seeds(self, docs):
+        # A seed = ONE object's doc + the SECTION doc.
+        #
+        # Docs are object-level (create_rag.prepare_content), i.e. exactly one doc per object_id
+        # and one "<category> structure" doc holding the model-level facts (number_faults,
+        # fault_mode, number_fault_intersections).
+        #
+        # History worth keeping: this used to take a `packet_size` and gather "related" docs of
+        # the same object. That made sense when docs were PER-FACT. Once docs went object-level
+        # each object_id had exactly one doc, so that loop could never add anything (dead code)
+        # and a seed silently became A SINGLE LONE OBJECT with no section facts in it. The
+        # question generator still asked "how many faults?" and the answer generator, shown
+        # exactly one fault, consistently answered "There is one fault present" -- then grounded
+        # it on that same fault's own dip/position, so it was self-consistent and passed
+        # verification. Counts were only ever correct when the section doc happened to be the
+        # seed. Attaching the section doc to every seed makes counts answerable from real
+        # evidence; it is 2 facts, so the 2048-token context is unaffected.
+        #
+        # Note: a seed still carries only ONE object, so the "how two named structures relate"
+        # facet cannot be grounded from it (fine for fault_complex, which has no relation facts;
+        # revisit for closure/salt categories, where intersects_* facts do exist).
         docs = list(docs)
         random.shuffle(docs)
-        by_object = {}
-        for doc in docs:
-            object_id = doc.metadata.get("object_id") or doc.metadata.get("source") or ""
-            by_object.setdefault(object_id, []).append(doc)
+
+        # object ids are "<type>_<n>" (fault_0); the section doc is "<category> structure".
+        section_docs = [
+            doc for doc in docs
+            if not _INSTANCE_ID_RE.search(str(doc.metadata.get("object_id") or ""))
+        ]
 
         for doc in docs:
-            object_id = doc.metadata.get("object_id") or doc.metadata.get("source") or ""
-            packet = [doc]
-            for related in by_object.get(object_id, []):
-                if related is doc:
-                    continue
-                packet.append(related)
-                if len(packet) >= packet_size:
-                    break
-            yield packet
+            yield [doc] + [s for s in section_docs if s is not doc]
 
     def generate_question(self, evidence_text, number_of_questions):
         facets = ", ".join(random.sample(QUESTION_FACETS, len(QUESTION_FACETS)))
@@ -278,9 +293,18 @@ class RagWorkflow(object):
                     print("\t[REJECT] answer names an object not in evidence:", a)
                     continue
 
-                # Question-coverage: the answer must address the question's facet.
-                if not question_answers_facet(question, a, grounding):
-                    print("\t[REJECT] off-topic (question facet not addressed):", a)
+                # Question-coverage (edge gate): the answer's grounded facts must cover every
+                # fact the QUESTION grounds to. Both sides are grounded to per-fact Documents
+                # carrying metadata["edge"], so compare edge sets directly instead of the old
+                # keyword-facet proxy. A compound question grounds to >1 edge (e.g. dip_deg +
+                # number_faults); an answer that drops a clause is missing that edge -> reject.
+                # When the question grounds to nothing (q_edges empty) this passes rather than
+                # false-rejecting -- strictly no worse than before for un-grounded questions.
+                q_edges = {d.metadata.get("edge") for d in question_grounding} - {None}
+                a_edges = {d.metadata.get("edge") for d in grounding} - {None}
+                if q_edges and not q_edges <= a_edges:
+                    print("\t[REJECT] off-topic (question edges not covered):",
+                          sorted(q_edges - a_edges), "|", a)
                     continue
 
                 verification = {"verdict": "PASS", "score": covered["score"]}
@@ -515,12 +539,14 @@ def cover_answer(answer, retrieval_query, object_docs, min_trust=0.7, require_al
     # per-query-line, ask each such fact whether the ANSWER entails it (response=fact,
     # sources=[answer]). Facts the answer actually asserts get attached; the rest are ignored.
     # NLI decides -- no answer-splitting, no number-matching. Restricted to the object(s) the
-    # answer names to keep it cheap and block coincidental cross-object entailment.
-    named = entity_pairs(answer)
+    # answer names to keep it cheap and block coincidental cross-object entailment. Objects are
+    # named by COORDINATE now ("the fault at [x,y]"), so identity = the coord the fact/answer
+    # cites, not a "Type N" token.
+    named = coord_refs(answer)
     grounded_keys = {(doc.metadata.get("object_id"), fact.get("edge"), str(fact.get("target")))
                      for _, (_, doc, fact) in best.items()}
     rev_pool = [(doc, fact) for doc, fact in pool
-                if named and (entity_pairs(fact.get("text")) & named)]
+                if named and (coord_refs(fact.get("text")) & named)]
     if rev_pool:
         rev_items = [{"response": _untag(fact["text"]), "sources": [_untag(answer)]} for _, fact in rev_pool]
         rev_results = check_batch(rev_items, max_workers=min(4, max(1, len(rev_items))))
@@ -579,79 +605,47 @@ def _match_fact_in_doc(fact_line, doc):
     return best
 
 
-def object_mentions(text):
-    return {
-        normalize_text(match)
-        for match in re.findall(r"<object>(.*?)</object>", str(text or ""), flags=re.DOTALL)
-    }
+_COORD_GROUP_RE = re.compile(r"[\[\(]\s*(-?\d+(?:\.\d+)?(?:\s*,\s*-?\d+(?:\.\d+)?)+)\s*[\]\)]")
 
 
-def entity_pairs(text):
-    # A named object reference like "Fault 1" / "Closure 8" -> (type, id). Capitalised
-    # leading word so it targets proper object names, not values ("about 62", "of 2").
-    _ENTITY_RE = re.compile(r"\b([A-Z][A-Za-z_-]*)\s*#?\s*(\d+)")
-    return {(match.group(1).lower(), match.group(2)) for match in _ENTITY_RE.finditer(str(text or ""))}
+def _norm_coord_num(token):
+    token = token.strip()
+    try:
+        value = float(token)
+    except ValueError:
+        return token
+    return str(int(value)) if value.is_integer() else str(round(value, 4))
+
+
+def coord_refs(text):
+    # Every coordinate GROUP a text cites, as a normalized number tuple -- a center [x,y]
+    # or a box [x1,y1,x2,y2], in any bracket style ([..] or (..)), number-normalized so
+    # "289" and "289.0" match. Whole groups only, so a 4-number box is never mistaken for
+    # two centers. This is the object's identity now that objects are named by coordinate.
+    refs = set()
+    for match in _COORD_GROUP_RE.finditer(str(text or "")):
+        refs.add(tuple(_norm_coord_num(part) for part in match.group(1).split(",")))
+    return refs
 
 
 def answer_objects_in_docs(answer, docs):
-    # The object(s) the answer names must actually appear in the grounding
-    # evidence. Blocks entity swaps (asked Closure 10, answered Closure 8) that NLI
-    # would wave through on near-duplicate wording -- and, unlike the tag-only
-    # check, still bites when the natural answer drops the <object> tag.
-    evidence_text = docs_to_text(docs)
-    evidence_objects = object_mentions(evidence_text)
-    evidence_pairs = entity_pairs(evidence_text)
-    evidence_types = {type_name for type_name, _ in evidence_pairs}
-
-    # Tagged objects in the answer must be present verbatim in the evidence.
-    tagged = object_mentions(answer)
-    if tagged and not tagged <= evidence_objects:
+    # Objects are named by COORDINATE ("the fault at [x,y]"), so an answer that refers to an
+    # object must cite a coordinate that actually appears in the evidence. Every coordinate
+    # group the answer states must be present in the docs -- a coordinate not in evidence is a
+    # swap or a fabrication. NLI still judges the RELATION itself (e.g. "the fault at [..] is
+    # left of the closure at [..]"); this only pins the object identities to real evidence.
+    evidence_coords = coord_refs(docs_to_text(docs))
+    answer_coords = coord_refs(answer)
+    if answer_coords and not answer_coords <= evidence_coords:
         return False
-
-    # Untagged "Type N": only judge a type the evidence actually enumerates (an
-    # unknown type is left to NLI). A known type with an id the evidence never
-    # names is a swap -- "Closure 8" when the grounding only holds "Closure 10".
-    for type_name, obj_id in entity_pairs(answer):
-        if type_name in evidence_types and (type_name, obj_id) not in evidence_pairs:
-            return False
     return True
 
 
-# Question-coverage gate: the answer must address what the question ASKS, not just be
-# grounded. Map each side to a facet and require overlap -- catches "where is X?" answered
-# with a dip. Mechanical (keyword/edge), not a correctness check (that's the model's job).
-_FACET_WORDS = {
-    "location":    ("where", "located", "location", "situated", "find", "part of", "region", "area from", "begins", "ends", "extends"),
-    "orientation": ("orient", "dip", "steep", "gentle", "angle", "tilt", "geometr"),
-    "throw":       ("throw", "offset", "displacement"),
-    "count":       ("how many", "number of", "count", "total", "there are", "there is"),
-    "fluid":       ("fluid", "oil", "gas", "brine", "hydrocarbon", "water-bearing"),
-    "relation":    ("intersect", "relate", "relation", "between", "meet", "adjacent", "bounded"),
-    "presence":    ("present", "visible", "featureless", "pattern", "any other", "is there"),
-}
-_EDGE_FACET = {
-    "dip_deg": "orientation", "tilt_pct": "orientation",
-    "position": "location", "extent": "location",
-    "throw": "throw", "fluid": "fluid",
-    "intersects_fault": "relation", "intersects_onlap": "relation", "intersects_salt": "relation",
-    "number_faults": "count", "number_hc_closures": "count", "number_fault_intersections": "count",
-    # "reading" omitted on purpose (ambiguous) -- classified from the answer text instead
-}
-
-
-def _facets_from_text(text):
-    lowered = str(text or "").lower()
-    return {facet for facet, words in _FACET_WORDS.items() if any(word in lowered for word in words)}
-
-
-def question_answers_facet(question, answer, docs):
-    # Pass if the question can't be classified (be lenient), else require the answer to
-    # share a facet with the question -- from the answer's own words or its covered edges.
-    q_facets = _facets_from_text(question)
-    if not q_facets:
-        return True
-    a_facets = _facets_from_text(answer) | {_EDGE_FACET.get(d.metadata.get("edge")) for d in docs}
-    return bool(q_facets & (a_facets - {None}))
+# Question-coverage gate: the answer must address what the question ASKS, not just be grounded
+# (catches "where is X?" answered with a dip). Enforced in best_answer by comparing the
+# question's grounded edges to the answer's grounded edges (the edge gate), which replaced the
+# old keyword-facet proxy. Mechanical, not a correctness check (that's the model's job).
+# Question GENERATION still spreads across QUESTION_FACETS for variety -- separate, untouched.
 
 
 def verify_answer(answer, evidence_text):

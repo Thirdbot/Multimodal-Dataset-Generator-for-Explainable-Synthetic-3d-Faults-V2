@@ -24,7 +24,7 @@ INSTRUCTION = (
     "Answer the question with concise geological evidence. "
         "Reference specific objects using object tags. "
         "Insert one segmentation marker at the end of each region-specific evidence line. "
-        "Use slot placeholders where numeric values, bounding boxes, or centers belong. "
+        "State the measured values directly. "
         "Do not add facts unsupported by the image."
 )
 
@@ -104,33 +104,6 @@ CROSS_REFERENCE_EDGES = {
 SECTION_EDGES = frozenset(EDGE_TYPES)
 
 
-def region_grounded_variant(row):
-    # Phase-2 region-grounded question: from a single-object name-based row, replace the named
-    # object in the QUESTION with a referring phrase + <bbox> and populate question_regions, so
-    # the model is asked by REGION (box -> RoIAlign at train) instead of by name. The box comes
-    # from the row's masked region (regions[]), so it works even when the answer states no
-    # coordinates. Deterministic; same answer. Returns None if not applicable.
-    regions = [r for r in (row.get("regions") or []) if is_object_id(str(r.get("object_id", "")))]
-    if len(regions) != 1:
-        return None                      # single, unambiguous object only for now
-    region = regions[0]
-    bbox = region.get("bbox")
-    if not bbox or any(c is None for c in bbox):
-        return None
-    question = row.get("question", "")
-    names = set(re.findall(r"(?:Fault|Closure|Salt)\s+\d+", question))
-    if len(names) != 1:
-        return None                      # question must name exactly one object
-    name = names.pop()
-    object_type = region.get("object_type") or "structure"
-    bbox_str = "[" + ",".join(str(c) for c in bbox) + "]"
-    referring = f"the {object_type} at <bbox>{bbox_str}</bbox>"
-    variant = dict(row)
-    variant["question"] = re.sub(r"\b" + re.escape(name) + r"\b", referring, question)
-    variant["question_regions"] = [{"object_id": region.get("object_id"), "class": object_type, "bbox": bbox}]
-    return variant
-
-
 def main():
     rows = []
     for item in read_jsonl(INPUT):
@@ -139,9 +112,6 @@ def main():
         if not (row and row["images"]):
             continue
         rows.append(row)
-        variant = region_grounded_variant(row)   # region-grounded counterpart (if applicable)
-        if variant:
-            rows.append(variant)
     write_csv(rows, CSV_OUTPUT)
 
 
@@ -154,6 +124,26 @@ def _named_objects(text):
 
 
 _OBJECT_TAG_RE = re.compile(r"<object>(.*?)</object>")
+
+# Grounding tags are UNWRAPPED inside the answer: the answer text stays plain (values kept,
+# tags removed). Grounding lives in the `regions` column + masks, not in the answer markup.
+_ANSWER_TAG_RE = re.compile(r"</?(?:object|nums|center|bbox)>")
+
+
+def _untag_answer(text):
+    return _ANSWER_TAG_RE.sub("", str(text or ""))
+
+
+def _assemble_evidence(region_texts):
+    # <evidence> wrapping one <region>..<SEG>..</region> block per aligned mask/region.
+    # Evidence keeps GROUND-TRUTH values inside their tags (<nums>65.8</nums>,
+    # <center>[..]</center>, <bbox>[..]</bbox>). The model's TRAINING preprocessing -- not the
+    # dataset -- is what swaps those spans for special/slot tokens to regress; the dataset must
+    # carry the real values as the regression target.
+    if not region_texts:
+        return ""
+    body = "".join(f"<region>\n{t}\n<SEG>\n</region>\n" for t in region_texts)
+    return f"<evidence>\n{body}</evidence>"
 
 
 def _object_class(object_id, scene_object):
@@ -180,15 +170,37 @@ def _fmt_num(value):
 
 _TAGGED_VALUE_RE = re.compile(r"<(nums|center|bbox)>(.*?)</\1>")
 
+# A clean right boundary for a wrapped value: whitespace, string end, or trailing punctuation
+# (never '<', which would mean the value is already followed by a closing tag).
+_WRAP_TRAIL = set(" \t\n\r.,;:)]}?!")
+
+
+def _wrap_first(text, value, tag):
+    # Wrap the FIRST *clean standalone* occurrence of `value` in <tag>...</tag>. Clean = the char
+    # just BEFORE it is whitespace or the string start, and the char AFTER is whitespace / end /
+    # trailing punctuation. This is what prevents double-nesting: when the LLM already emitted the
+    # tag (e.g. "<nums>80.5</nums>"), the char before the value is the tag's '>' -- not whitespace
+    # -- so we skip it and substitute nothing rather than wrapping again. The whitespace-before
+    # rule also stops a scalar from being wrapped inside a coordinate list (preceded by '[' or ',').
+    open_t, close_t = f"<{tag}>", f"</{tag}>"
+    search, n = 0, len(text)
+    while True:
+        pos = text.find(value, search)
+        if pos == -1:
+            return text
+        end = pos + len(value)
+        before_ok = pos == 0 or text[pos - 1].isspace()
+        after_ok = end == n or text[end] in _WRAP_TRAIL
+        if before_ok and after_ok:
+            return text[:pos] + open_t + value + close_t + text[end:]
+        search = end
+
 
 def tag_answer(answer, evidences, scene_objects):
     # Deterministically wrap the plain-text answer with grounding tags, sourced from the
     # grounded facts (the model emits none). EVERY value the evidence carries inside a tag is
     # wrapped where it appears in the answer, with the SAME tag: scalars -> <nums>, 2-lists ->
-    # <center>, 4-lists -> <bbox>. Object names -> plain <object> (class/id/box live in
-    # answer_regions, mapped positionally). To guarantee localization, a named object whose
-    # box isn't already stated inline gets a synthetic <bbox> attached after its name. Returns
-    # (tagged_answer, answer_regions) with the i-th <bbox> span mapped to answer_regions[i].
+    # <center>, 4-lists -> <bbox>. Object names -> plain <object>. Returns the tagged answer.
     answer = str(answer or "")
 
     named = {}            # display name -> (object_id, class, bbox_list, bbox_str)
@@ -211,42 +223,23 @@ def tag_answer(answer, evidences, scene_objects):
     boxes |= {meta[3] for meta in named.values()}
 
     tagged = answer
-    # Scalars: standalone only (lookarounds keep digits inside a [..] list or a longer number
-    # from being wrapped).
+    # Every value/name is wrapped via _wrap_first, which only wraps a clean standalone occurrence
+    # -- so a tag the LLM already wrote is left alone (substituted, not double-nested), and a
+    # scalar inside a [..] list is never wrapped (its neighbour is ',' or '[', not whitespace).
+    # Longest-first within each group avoids a short value grabbing part of a longer one.
     for value in sorted(scalars, key=len, reverse=True):
-        tagged = re.compile(r"(?<![\d.\[,])" + re.escape(value) + r"(?![\d.])").sub(
-            f"<nums>{value}</nums>", tagged, count=1)
-    # Coordinate lists the answer states -> <center>/<bbox> in place (exact list string).
+        tagged = _wrap_first(tagged, value, "nums")
     for value in sorted(centers, key=len, reverse=True):
-        if value in tagged and f">{value}<" not in tagged:
-            tagged = tagged.replace(value, f"<center>{value}</center>", 1)
+        tagged = _wrap_first(tagged, value, "center")
     for value in sorted(boxes, key=len, reverse=True):
-        if value in tagged and f">{value}<" not in tagged:
-            tagged = tagged.replace(value, f"<bbox>{value}</bbox>", 1)
+        tagged = _wrap_first(tagged, value, "bbox")
 
     # Objects: plain <object> marker only. No synthetic <bbox> is attached -- a box is tagged
-    # solely where the answer itself states those coords (handled above), so nothing the model
-    # did not say is added to the answer.
-    box_by_str = {}
-    for name, (object_id, object_class, bbox, bbox_str) in named.items():
-        box_by_str[bbox_str] = (object_id, object_class, bbox, name)
+    # solely where the answer itself states those coords.
     for name in sorted(named, key=lambda n: answer.find(n) if n in answer else len(answer)):
-        pattern = re.compile(r"\b" + re.escape(name) + r"\b")
-        if pattern.search(tagged):
-            tagged = pattern.sub(f"<object>{name}</object>", tagged, count=1)
+        tagged = _wrap_first(tagged, name, "object")
 
-    # answer_regions: one entry per <bbox> span in text order, mapped to its object by box value.
-    answer_regions = []
-    for match in re.finditer(r"<bbox>(\[[^\]]*\])</bbox>", tagged):
-        bbox_str = match.group(1)
-        if bbox_str in box_by_str:
-            object_id, object_class, bbox, name = box_by_str[bbox_str]
-            answer_regions.append({"object_id": object_id, "class": object_class, "bbox": bbox, "name": name})
-        else:
-            coords = [float(v) if "." in v else int(v) for v in bbox_str.strip("[]").split(",") if v.strip()]
-            answer_regions.append({"object_id": None, "class": None, "bbox": coords, "name": None})
-
-    return tagged, answer_regions
+    return tagged
 
 
 def build_row(item):
@@ -264,9 +257,12 @@ def build_row(item):
     q_objs, a_objs = _named_objects(item.get("question", "")), _named_objects(item.get("answer", ""))
     if q_objs and a_objs and q_objs.isdisjoint(a_objs):
         print(f"[QA-MISMATCH] {sample_id}: question {sorted(q_objs)} vs answer {sorted(a_objs)}")
+    # One image, MANY masks: each region gets its own mask + its own evidence entry, all
+    # index-aligned (regions[i] <-> masks[i] <-> region_evidence[i]). Replaces the old single
+    # composited mask + one concatenated <region>..<SEG>.. evidence string.
     regions = []
-    retrieved = []
-    regions_box = ""
+    masks = []
+    region_evidence = []
 
     # Split section-scoped facts (counts, fault mode) from object-scoped ones. Only the
     # object-scoped facts drive the per-object loop; the section facts are rendered once
@@ -290,20 +286,20 @@ def build_row(item):
         if not matching_evidences:
             continue
 
+        # This object's OWN mask (not composited with siblings). If it has no mask pixels on
+        # disk we cannot ground the region, so skip it -- every emitted region has a real mask.
+        mask_path = build_region_mask(sample_dir, item, view, [scene_object], len(masks))
+        if not mask_path:
+            continue
+
         bbox = scene_object.get("bbox") or {}
         center = scene_object.get("center") or {}
         evidence_texts = "".join(
             f"{evidence.get('text', '')}.\n" for evidence in matching_evidences
-        )
-        regions_box += (
-            "<region>\n"
-            f"{evidence_texts}"
-            "<SEG>\n"
-            "</region>\n"
-        )
+        ).strip()
         regions.append({
             "image_idx": 0,                          # single shared scene image
-            "mask_idx": 0,                           # single composited row mask
+            "mask_idx": len(masks),                  # this region's own mask (aligned)
             "region_idx": len(regions),
             "object_type": object_type,
             "view": view,
@@ -312,7 +308,8 @@ def build_row(item):
             "bbox": [bbox.get("x_min"), bbox.get("y_min"), bbox.get("x_max"), bbox.get("y_max")],
             "center": [center.get("x"), center.get("y")],
         })
-        retrieved.append(scene_object)
+        masks.append(mask_path)
+        region_evidence.append(evidence_texts)
 
     # Section-scoped facts -> ONE whole-section region (one <SEG>, one text), over the
     # composite of every object of the referenced type. This replaces the old behaviour of
@@ -332,13 +329,11 @@ def build_row(item):
             scene_object for scene_object in scene_objects.values()
             if scene_object.get("object_type") in section_types
         ]
-        if section_texts and section_objects:
-            regions_box += (
-                "<region>\n"
-                + "".join(f"{text}.\n" for text in section_texts)
-                + "<SEG>\n"
-                "</region>\n"
-            )
+        # The whole-section fact gets ONE region whose mask is the union of every object of
+        # the referenced type (so a count/pattern question highlights them all), with its own
+        # aligned evidence entry -- just like an object region.
+        section_mask = build_region_mask(sample_dir, item, view, section_objects, len(masks))
+        if section_texts and section_mask:
             boxes = [scene_object.get("bbox") or {} for scene_object in section_objects]
             xmin = [b.get("x_min") for b in boxes if b.get("x_min") is not None]
             ymin = [b.get("y_min") for b in boxes if b.get("y_min") is not None]
@@ -351,7 +346,7 @@ def build_row(item):
             section_type = sorted(section_types)[0] if section_types else ""
             regions.append({
                 "image_idx": 0,
-                "mask_idx": 0,
+                "mask_idx": len(masks),
                 "region_idx": len(regions),
                 "object_type": section_type,
                 "view": view,
@@ -363,9 +358,10 @@ def build_row(item):
                     (union_bbox[1] + union_bbox[3]) / 2 if union_bbox[1] is not None and union_bbox[3] is not None else None,
                 ],
             })
-            for scene_object in section_objects:
-                if scene_object not in retrieved:
-                    retrieved.append(scene_object)
+            masks.append(section_mask)
+            region_evidence.append(
+                "".join(f"{text}.\n" for text in section_texts).strip()
+            )
 
     if not regions:
         # instrument (Hypothesis A / not-in-scene): a negative that names a specific
@@ -376,54 +372,45 @@ def build_row(item):
         if named:
             print(f"[NEG-NAMED] {sample_id} {view}: named {named} but no region matched "
                   f"(scene has {sorted(scene_objects)[:8]}) q={item.get('question','')[:55]}")
-        # Featureless / negative example (e.g. "the section shows no faulting"): there
-        # is no object to outline, but the scene image plus the section-level evidence
-        # is still a valid VQA row. Emit it with no mask and no regions instead of
-        # dropping it, so negatives reach the dataset.
-        evidence_text = "".join(f"{evidence.get('text', '')}.\n" for evidence in evidences)
-        tagged_answer, answer_regions = tag_answer(item.get("answer", ""), evidences, scene_objects)
+        # Featureless / negative example (e.g. "the section shows no faulting"): no object to
+        # outline, but the scene image plus the section-level evidence is still a valid VQA row.
+        # No masks, no regions, no <SEG> -- just the slotted facts inside <evidence>.
+        neg_texts = [
+            f"{evidence.get('text', '')}."
+            for evidence in evidences if evidence.get("text")
+        ]
+        evidence_str = f"<evidence>\n{''.join(t + chr(10) for t in neg_texts)}</evidence>" if neg_texts else ""
+        answer_text = _untag_answer(item.get("answer", ""))
         return {
             "sample_id": sample_id,
             "images": [image_path],
             "masks": [],
             "instruction": INSTRUCTION,
             "question": f"{item.get('question', '')}",
-            "question_regions": [],
-            "answer": f"<answer>{tagged_answer}</answer>",
-            "answer_regions": answer_regions,
-            "evidence": evidence_text,
+            "answer": f"<answer>{answer_text}</answer>",
+            "evidence": evidence_str,
             "regions": [],
         }
 
-    mask_path = build_row_mask(sample_dir, item, view, retrieved)
-    if not mask_path:
-        # regions matched but the composite is empty -- this is NOT a normal negative
-        # (those have no regions). It means the matched objects' scene mask PNGs are
-        # missing/stale on disk. Surface it instead of silently discarding a valid row.
-        print(f"[MASK EMPTY] {sample_id} {view}: {len(regions)} region(s) matched but "
-              f"no mask pixels on disk (stale scene_position.json?); row dropped")
-        return None
-
-    tagged_answer, answer_regions = tag_answer(item.get("answer", ""), evidences, scene_objects)
+    answer_text = _untag_answer(item.get("answer", ""))
     return {
         "sample_id":sample_id,
         "images": [image_path],
-        "masks": [mask_path],
+        "masks": masks,                               # one mask per region, aligned to <SEG> order
         "instruction": INSTRUCTION,
         "question": f"{item.get('question', '')}",
-        "question_regions": [],
-        "answer": f"<answer>{tagged_answer}</answer>",
-        "answer_regions": answer_regions,
-        "evidence": regions_box,
+        "answer": f"<answer>{answer_text}</answer>",
+        "evidence": _assemble_evidence(region_evidence),   # <evidence> with one <region>..<SEG> per mask
         "regions": regions,
     }
 
 
-def build_row_mask(sample_dir, item, view, retrieved_objects):
-    # Composite only the retrieved objects' scene-registered masks into one binary
-    # white mask, so the row's single mask highlights exactly what the question pulled.
+def build_region_mask(sample_dir, item, view, objects, region_idx):
+    # Composite the given objects' scene-registered masks into ONE binary white mask for a
+    # single region. Pass [one object] for an object region, or the whole type list for the
+    # section region (a union). region_idx keys the filename so a row's N masks stay distinct.
     combined = None
-    for scene_object in sorted(retrieved_objects, key=_object_mask_area, reverse=True):
+    for scene_object in sorted(objects, key=_object_mask_area, reverse=True):
         mask = _read_object_mask(sample_dir, scene_object.get("mask_path"))
         if mask is None:
             continue
@@ -441,7 +428,7 @@ def build_row_mask(sample_dir, item, view, retrieved_objects):
     row_id = item.get("row_id") or hashlib.sha1(
         f"{item.get('sample_id','')}|{item.get('question','')}|{item.get('answer','')}".encode()
     ).hexdigest()
-    output_path = MASK_OUTPUT_DIR / f"{row_id}_{view}_mask.png"
+    output_path = MASK_OUTPUT_DIR / f"{row_id}_{view}_r{region_idx}_mask.png"
     Image.fromarray(combined, mode="L").save(output_path)
     return output_path.as_posix()
 
@@ -548,7 +535,7 @@ def evidence_matches_region(evidence, region, individual_ids=frozenset()):
 
 
 def write_csv(rows, path):
-    columns = ["sample_id","images", "masks", "instruction", "question", "question_regions", "answer", "answer_regions", "evidence","regions"]
+    columns = ["sample_id","images", "masks", "instruction", "question", "answer", "evidence","regions"]
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", newline="") as file:
         writer = csv.DictWriter(file, fieldnames=columns)

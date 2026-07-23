@@ -22,6 +22,16 @@ VIEWS = ("inline", "crossline")
 # Visual attributes read straight off each object's scene mask (not the DB), so they
 # reflect what is actually visible in the section; attached to nodes here at 2d time.
 MASK_FEATURE_KEYS = ("dip_deg", "area_pct")
+# Dip estimation (RANSAC + inlier gate). PCA alone is a moment fit, so a contaminated fault
+# mask (a crossing structure, a stray blob) drags the major axis flat and produces a
+# geologically absurd near-horizontal dip. RANSAC finds the dominant collinear pixel set and
+# the dip is fit on THOSE inliers; masks whose dominant line covers less than
+# _DIP_MIN_INLIER_FRAC of the pixels are too contaminated to trust and get no dip at all.
+_DIP_MIN_PIXELS = 8
+_DIP_MIN_INLIER_FRAC = 0.5      # dominant line must contain the majority of the mask's pixels
+_DIP_RANSAC_THRESHOLD = 1.5     # px perpendicular distance for a pixel to count as on-line
+_DIP_RANSAC_ITERS = 300
+_DIP_RANSAC_SEED = 0            # fixed -> graph generation stays reproducible
 # Visual-only objects can be much noisier than DB-backed objects.
 # Recommended policy for a cleaner fault/closure dataset:
 # - fault: keep global and local objects
@@ -280,16 +290,52 @@ def _mask_features(mask_path, object_id, object_type):
     return features
 
 
+def _ransac_inliers(pts):
+    # Largest set of pixels collinear within _DIP_RANSAC_THRESHOLD px of a line through two
+    # sampled points. Deterministic (fixed seed) so graph generation stays reproducible.
+    n = len(pts)
+    rng = np.random.default_rng(_DIP_RANSAC_SEED)
+    best_inliers, best_count = None, -1
+    for _ in range(_DIP_RANSAC_ITERS):
+        i, j = rng.choice(n, 2, replace=False)
+        d = pts[j] - pts[i]
+        norm = float(np.hypot(d[0], d[1]))
+        if norm < 1e-6:
+            continue
+        d = d / norm
+        rel = pts - pts[i]
+        perp = np.abs(rel[:, 0] * (-d[1]) + rel[:, 1] * d[0])   # perpendicular distance to line
+        inliers = perp < _DIP_RANSAC_THRESHOLD
+        count = int(inliers.sum())
+        if count > best_count:
+            best_count, best_inliers = count, inliers
+    return best_inliers
+
+
 def _dip_degrees(mask):
-    # Apparent dip of the fault trace = angle of its principal axis from horizontal
+    # Apparent dip of the fault trace = angle of its dominant line from horizontal
     # (0 = flat, 90 = vertical). Image y runs downward, so magnitude only.
+    #
+    # RANSAC-then-PCA: RANSAC isolates the dominant collinear pixels (rejecting a crossing
+    # structure or stray blob that would flatten a plain PCA fit), then the angle is fit by
+    # PCA on those inliers. A mask whose dominant line covers less than _DIP_MIN_INLIER_FRAC
+    # of the pixels is too contaminated to assign a dip and returns None. On a clean single-
+    # fault mask every pixel is an inlier, so this reduces exactly to the old PCA angle.
     ys, xs = np.nonzero(mask)
-    if xs.size < 8:
+    if xs.size < _DIP_MIN_PIXELS:
         return None
-    cov = np.cov(np.vstack([xs - xs.mean(), ys - ys.mean()]))
+    pts = np.column_stack([xs, ys]).astype(float)
+    inliers = _ransac_inliers(pts)
+    if inliers is None:
+        return None
+    n_in = int(inliers.sum())
+    if n_in < _DIP_MIN_PIXELS or n_in / len(pts) < _DIP_MIN_INLIER_FRAC:
+        return None  # too contaminated to trust any single line
+    p = pts[inliers]
+    cov = np.cov(np.vstack([p[:, 0] - p[:, 0].mean(), p[:, 1] - p[:, 1].mean()]))
     eigvals, eigvecs = np.linalg.eigh(cov)
     if eigvals[-1] <= 0 or eigvals[0] / eigvals[-1] > 0.6:
-        return None  # too round to have a meaningful dip direction
+        return None  # inliers too round to have a meaningful dip direction
     major = eigvecs[:, -1]
     return round(float(np.degrees(np.arctan2(abs(major[1]), abs(major[0])))), 1)
 

@@ -78,6 +78,7 @@ class TextTransform(object):
 
     def relations_to_evidence(self, relations):
         relations = list(relations)
+        self._coords = self._build_coords(relations)   # object_id -> [x, y], for coord naming
         grouped, grouped_ids = self._grouped_evidence(relations)
         evidence = list(grouped)
         for relation in relations:
@@ -159,9 +160,30 @@ class TextTransform(object):
             return self._tag("object", NODE_NAMES[node_id])
         match = re.match(r"^([a-z_]+)_(\d+)$", node_id)
         if match and match.group(1) in NUMBERED_NODE_NAMES:
-            name = NUMBERED_NODE_NAMES[match.group(1)].format(number=int(match.group(2)) + 1)
+            # Reference an object by POSITION, not a "Type N" index: fault_2 stays the
+            # internal id (mask routing, object_id), but what the LM reads/writes is
+            # "the <type> at [x,y]" so it can reason spatially (left/right, near). Applies
+            # to every numbered object type. Plain coord -- no <bbox>/<center> tag here (the
+            # current model does not consume that); the tagged centre still comes from the
+            # separate "sits near <center>..." line as the grounding value.
+            object_type = NODE_NAMES.get(match.group(1), match.group(1))
+            coord = getattr(self, "_coords", {}).get(node_id)
+            name = f"the {object_type} at {self._coord_text(coord)}" if coord else f"the {object_type}"
             return self._tag("object", name)
         return node_id.replace("_", " ")
+
+    def _build_coords(self, relations):
+        # object_id -> its [x, y] centre, read from the position relations for this view,
+        # so node_name can name an object by coordinate instead of a running index.
+        coords = {}
+        for source_id, group in self._groups_for(relations, POSITION_EDGES).items():
+            if POSITION_EDGES.issubset(group):
+                coords[str(source_id)] = [group["x"].get("target"), group["y"].get("target")]
+        return coords
+
+    @classmethod
+    def _coord_text(cls, coord):
+        return "[" + ",".join(cls._value_text(v) for v in coord) + "]"
 
     def edge_label(self, edge):
         edge = str(edge)

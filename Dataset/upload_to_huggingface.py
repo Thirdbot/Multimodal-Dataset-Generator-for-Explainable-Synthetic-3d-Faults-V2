@@ -6,7 +6,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CSV = ROOT / "Dataset" / "multimodal_multi_image_dataset.csv"
 IMAGE_LIST_COLUMNS = {"images", "masks"}
-JSON_COLUMNS = {"regions", "evidence", "question_regions", "answer_regions"}
+JSON_COLUMNS = {"regions", "evidence"}
 
 
 def load_rows(csv_path, limit=None):
@@ -83,7 +83,7 @@ def build_dataset(rows):
 
     columns = [
         "images", "masks",
-        "instruction", "question", "question_regions", "answer", "answer_regions",
+        "instruction", "question", "answer",
         "evidence","regions"
     ]
     rows = [
