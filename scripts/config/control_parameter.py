@@ -71,12 +71,17 @@ trap_controls = {
     'min_closure_voxels_onlap': None, # minimum onlap closure size
 }
 
-# seismic signal controls
+# seismic signal controls (realism vs. legibility)
 seismic_signal_controls = {
-    'signal_to_noise_ratio_db': None, # Noise level
-    'bandwidth_low': None, # low-cut frequency range
-    'bandwidth_high': None, # high-cut frequency range
-    'broadband_qc_volume': False, # false is for speed
+    # Signal:Noise in dB as a triangular distribution [min, mode, max] -> per-scene VARIETY
+    # (noisy .. clean), realistic centre. Higher dB = cleaner. ~6 dB is a realistically hard
+    # section, ~18 dB is clean; mode 12 keeps most sections legible while training on a spread.
+    # (Masks/attributes come from the geometry, so noise only varies the IMAGE, not the labels.)
+    'signal_to_noise_ratio_db': [6.0, 12.0, 18.0],
+    'bandwidth_low':  [3.0, 6.0],    # Hz, low-cut range (per-scene uniform pick)
+    'bandwidth_high': [20.0, 35.0],  # Hz, high-cut range -> vertical resolution / wavelet
+    'bandwidth_ord':  4,             # Butterworth filter order
+    'broadband_qc_volume': False,    # false is for speed
 }
 
 # Quality check output such as images, logs , in-memory storage
@@ -424,24 +429,28 @@ high_level_controls = {
     # each sample that is randomly created or mixed category will be ratio
     # all-faulted has different fault-line that it will be ratio, salt-fault will be ratio
     'sample_types': [
-                     # "boring",
-                     # "fault_only",
+                     "boring",
+                     "fault_only",
                      "fault_complex",
-                     # "salt_only",
-                     # "salt_fault_mixed",
-                     # "onlap",
-                     # "depositional",
-                     # "full_mixed"
+                     "salt_only",
+                     "salt_fault_mixed",
+                     "onlap",
+                     "depositional",
+                     "full_mixed"
     ], # for dataset generations each generation will be ratio in same amount
+    # Balanced-yet-realistic mix (sums to 1.0). Faults + closures are the most common
+    # structural/trap features so they dominate; salt and onlap are present for coverage
+    # but rarer, as in real basins. Resulting type presence: fault ~0.60, closure ~0.87,
+    # salt ~0.35, onlap ~0.32 -- every type well represented, none forced to parity.
     'ratio_per_types':{
-        # "boring":0.0,
-        # "fault_only":0.2,
-        # "fault_complex":0.2,
-        # "salt_only":0.0,
-        # "salt_fault_mixed":0.0,
-        # "onlap":0.0,
-        # "depositional":0.0,
-        # "full_mixed":0.0
+        "fault_complex":    0.22,   # faults + closures (intersecting/branching)
+        "fault_only":       0.13,   # faults alone
+        "salt_fault_mixed": 0.15,   # faults + salt + closures
+        "salt_only":        0.10,   # salt + closures
+        "onlap":            0.12,   # onlap + closures (depositional trap)
+        "depositional":     0.10,   # closures + onlap
+        "full_mixed":       0.10,   # everything (rarer)
+        "boring":           0.08,   # closures only / featureless -> negatives
     }
 }
 
