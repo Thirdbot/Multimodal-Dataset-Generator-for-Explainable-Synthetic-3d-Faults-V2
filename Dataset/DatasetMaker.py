@@ -172,16 +172,28 @@ def _default_scene_mask(sample_dir, item, view, scene_objects, image_path):
     return out.as_posix(), [0, 0, w, h]
 
 
+# Split the per-object values by VALUE TYPE (clean, deterministic):
+#   "measure" = a continuous scalar magnitude with a unit -- dip (deg), throw (ms), area (%).
+#              These are the REGRESSION targets.
+#   "derive"  = a discrete structural fact -- count / category / boolean: number_* (counts),
+#              fault_mode (category), fluid (category), salt_inserted & intersects_* (boolean).
+#              These are the CLASSIFICATION / count targets.
+# Magnitude vs count/category, not where we fetched it -- so throw sits with dip even though it
+# comes from the DB.
+_MEASURE_EDGES = {"dip_deg", "throw", "area_pct"}
+
+
 def _region_values(evidences):
-    # Structured per-object values (the grounding the model regresses), keyed by edge:
-    # {"dip_deg": 65.8, "throw": 120, ...}. The value words also stay in the evidence text
-    # (B1, retrievable); this is the machine-readable copy in the regions column.
-    values = {}
+    # Structured per-object values (the grounding the model regresses), keyed by edge and
+    # grouped by provenance: {"measure": {...mask-computed...}, "derive": {...from the DB...}}.
+    # The value words also stay in the evidence text (B1, retrievable); this is the machine copy.
+    measure, derive = {}, {}
     for ev in evidences:
         edge, target = ev.get("edge"), ev.get("target")
-        if edge and edge != "reading" and target not in (None, ""):   # "reading" echoes a base value
-            values[edge] = target
-    return values
+        if not edge or edge == "reading" or target in (None, ""):     # "reading" echoes a base value
+            continue
+        (measure if edge in _MEASURE_EDGES else derive)[edge] = target
+    return {"measure": measure, "derive": derive}
 
 
 def _assemble_evidence(region_texts):
@@ -405,7 +417,7 @@ def build_row(item):
                 "seg_idx": len(masks),               # ties to the i-th <SEG>
                 "region_idx": len(regions),
                 "object_type": section_type,
-                "object_name": section_type,         # global region: name = type (classification field)
+                "object_name": "the section",        # global region: whole-section reference (type is in object_type/class_id)
                 "view": view,
                 "class_id": CLASS_IDS.get(section_type, 0),
                 "bbox": union_bbox,
@@ -457,7 +469,7 @@ def build_row(item):
                 "evidence": _assemble_evidence([region_text]) if region_text else "",
                 "regions": [{
                     "image_idx": 0, "mask_idx": 0, "seg_idx": 0, "region_idx": 0,
-                    "object_type": global_type, "object_name": global_type, "view": view,
+                    "object_type": global_type, "object_name": "the section", "view": view,
                     "class_id": CLASS_IDS.get(global_type, 0), "bbox": default_bbox, "center": center,
                     "values": _region_values(evidences),
                 }],
