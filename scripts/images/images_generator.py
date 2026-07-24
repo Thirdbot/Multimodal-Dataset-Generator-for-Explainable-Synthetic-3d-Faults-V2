@@ -336,7 +336,13 @@ class GraphImageExtractor:
             slices.update(individual)
             return slices
 
-        if object_type in {"salt", "onlap"}:
+        if object_type == "onlap":
+            # Onlap is a pervasive depositional SURFACE pattern, not discrete objects. Connected-
+            # component splitting shattered it into dozens of meaningless fragments ("built too
+            # much"). Keep only the aggregate global mask already in `slices` -- one "onlap" object.
+            return slices
+
+        if object_type == "salt":
             individual = self._component_individual_slices(base_array, property_array, object_type)
             slices.update(individual)
             return slices

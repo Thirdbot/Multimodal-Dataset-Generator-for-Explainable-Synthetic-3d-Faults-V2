@@ -42,7 +42,8 @@ _DIP_RANSAC_SEED = 0            # fixed -> graph generation stays reproducible
 # - age_depth: exclude because it is broad background context, not an object
 EXCLUDED_VISUAL_OBJECTS = {
     "age_depth",
-    "onlap",  # broad aggregate visual evidence; comment this line back in if needed
+    # "onlap" removed: it is now an AGGREGATE object (one union mask). The aggregate "onlap"
+    # is kept; any stray numbered onlap_N is still dropped by _skip_visual_component below.
     "lithology",  # broad facies volume; too noisy for current object-level QA
 }
 
@@ -219,19 +220,29 @@ def _copy_graph_with_2d_positions(graph, positions, view):
                 "type": "HAS_VISUAL_OBJECT",
             })
 
-    # Recount number_faults to THIS view's surviving fault instances. After pruning off-view
-    # faults, the DB total would over-count (e.g. "7 faults" on a section showing 6), so the
-    # category node's count must match what is visible. number_fault_intersections and
-    # fault_mode are 3D-structural (not per-slice counts) and stay as-is; number_hc_closures
-    # is an HC subset, not a plain instance count, so it is left untouched too.
-    fault_instances = sum(
-        1 for node in copied_graph.get("nodes", [])
-        if _is_object_instance(node.get("id"))
-        and (node.get("object_type") or str(node.get("id")).split("_")[0]) == "fault"
-    )
+    # Recount per view: every count must match what is actually VISIBLE in this section
+    # ("accept reality"), the same rule for all types, not just faults. number_fault_intersections,
+    # fault_mode and number_onlap_episodes are 3D-structural counts (no per-slice instances) and
+    # stay as-is.
+    def _instances(otype, pred=None):
+        return [
+            node for node in copied_graph.get("nodes", [])
+            if _is_object_instance(node.get("id"))
+            and (node.get("object_type") or str(node.get("id")).split("_")[0]) == otype
+            and (pred is None or pred(node))
+        ]
+
+    fault_instances = len(_instances("fault"))
+    # number_hc_closures is the HYDROCARBON subset -> count visible closures whose fluid is oil/gas.
+    hc_closures = len(_instances("closure", lambda n: str(n.get("fluid", "")).lower() in {"oil", "gas"}))
+    salt_present = len(_instances("salt")) > 0
     for node in copied_graph.get("nodes", []):
         if "number_faults" in node:
             node["number_faults"] = fault_instances
+        if "number_hc_closures" in node:
+            node["number_hc_closures"] = hc_closures
+        if "salt_inserted" in node:                      # DB says inserted but none visible here -> false
+            node["salt_inserted"] = bool(node.get("salt_inserted")) and salt_present
 
     return copied_graph
 

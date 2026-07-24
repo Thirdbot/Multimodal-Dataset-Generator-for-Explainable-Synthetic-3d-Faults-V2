@@ -9,7 +9,7 @@ import re
 OBJECT_TYPES = ("fault", "closure", "salt")
 
 MODEL_KEYS = {"number_faults", "fault_mode", "salt_inserted",
-              "number_hc_closures", "number_fault_intersections"}
+              "number_hc_closures", "number_fault_intersections", "number_onlap_episodes"}
 CLOSURE_KEYS = {"fluid", "intersects_fault", "intersects_onlap", "intersects_salt",
                 "area_pct"}  # area_pct read from the closure mask (not in the DB)
 # throw from the DB; dip_deg from the fault mask (replaces the opaque tilt_pct fraction).
@@ -37,7 +37,7 @@ FAULT_PATTERN_NAMES = {
 DIP_STEEP_MIN = 60
 DIP_GENTLE_MAX = 30
 
-NODE_NAMES = {"fault": "fault", "closure": "closure", "salt": "salt"}
+NODE_NAMES = {"fault": "fault", "closure": "closure", "salt": "salt", "onlap": "onlap"}
 NUMBERED_NODE_NAMES = {"fault": "Fault {number}", "closure": "Closure {number}", "salt": "Salt {number}"}
 
 EDGE_LABELS = {
@@ -49,6 +49,7 @@ EDGE_LABELS = {
     "number_faults": "faults",
     "number_hc_closures": "hydrocarbon closures",
     "number_fault_intersections": "fault intersections",
+    "number_onlap_episodes": "onlap episodes",
 }
 
 PROPERTY_TEMPLATES = {
@@ -61,6 +62,7 @@ COUNT_TEMPLATES = {
     "number_faults": "The section shows {count} {noun}",
     "number_hc_closures": "The section contains {count} {noun}",
     "number_fault_intersections": "Faults intersect {count} {noun}",
+    "number_onlap_episodes": "The section shows {count} {noun}",
 }
 BOOLEAN_TEMPLATES = {"salt_inserted": "Salt is present"}
 EDGE_TEMPLATES = {"HAS_VISUAL_OBJECT": "{source} includes a visible {target} feature"}

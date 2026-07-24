@@ -38,7 +38,7 @@ OBJECT_TYPES = {
     "fault",
     "closure",
     "salt",
-    # "onlap",  # broad visual context; keep out of object-level dataset rows for now
+    "onlap",   # now AGGREGATE (one union mask, not per-component fragments) -> usable
     # "lithology",  # broad volume; too noisy for current region-grounded rows
 }
 
@@ -46,7 +46,7 @@ CLASS_IDS = {
     "fault": 1,
     "closure": 2,
     "salt": 3,
-    # "onlap": 4,
+    "onlap": 4,
     # "lithology": 5,
 }
 
@@ -66,9 +66,9 @@ CATEGORY_TYPES = {
     "fault_complex": ["fault", "closure"],
     "salt_only": ["salt", "closure"],
     "salt_fault_mixed": ["fault", "salt", "closure"],
-    # "onlap": ["onlap"],  # "onlap" commented out: aggregate/count evidence only for now
-    "depositional": ["closure"],  # "lithology" commented out: broad/noisy visual evidence
-    "full_mixed": ["fault", "salt", "closure"],  # "onlap" commented out
+    "onlap": ["onlap", "closure"],
+    "depositional": ["closure", "onlap"],  # "lithology" commented out: broad/noisy visual evidence
+    "full_mixed": ["fault", "salt", "closure", "onlap"]
 }
 # Model-level (category-node) count/presence evidence -> the object type it describes.
 # Only reached for NON-object-specific evidence, so a per-object property can never
@@ -79,11 +79,11 @@ EDGE_TYPES = {
     "number_fault_intersections": ["fault"],
     "salt_inserted": ["salt"],
     "number_hc_closures": ["closure"],
+    "number_onlap_episodes": ["onlap"],
     # "fluid" removed: per-closure property (object_id=closure_N), already routed by
     #   object_id; listing it here would bleed one closure's fluid onto every closure.
     # "intersects_fault" moved to CROSS_REFERENCE_EDGES below (it is object-specific,
     #   so it never actually reached this map).
-    # "number_onlap_episodes": ["onlap"],
     # "number_fan_episodes": ["lithology"],
 }
 
@@ -95,6 +95,7 @@ EDGE_TYPES = {
 CROSS_REFERENCE_EDGES = {
     "intersects_fault": ["fault"],
     "intersects_salt": ["salt"],
+    "intersects_onlap": ["onlap"],
 }
 
 # Section-scoped edges: the model/category-level facts in EDGE_TYPES describe the WHOLE
@@ -186,16 +187,19 @@ def _default_scene_mask(sample_dir, item, view, scene_objects, image_path):
 # Magnitude vs count/category, not where we fetched it -- so throw sits with dip even though it
 # comes from the DB.
 _MEASURE_EDGES = {"dip_deg", "throw", "area_pct"}
+# Not property values: "reading" echoes a base value; "position"/"extent" ARE the coordinates
+# already carried by the region's center/bbox -- they must not leak into values as dicts.
+_VALUE_SKIP_EDGES = {"reading", "position", "extent"}
 
 
 def _region_values(evidences):
     # Structured per-object values (the grounding the model regresses), keyed by edge and
-    # grouped by provenance: {"measure": {...mask-computed...}, "derive": {...from the DB...}}.
+    # grouped by value TYPE: {"measure": {scalar magnitudes}, "derive": {counts/categories}}.
     # The value words also stay in the evidence text (B1, retrievable); this is the machine copy.
     measure, derive = {}, {}
     for ev in evidences:
         edge, target = ev.get("edge"), ev.get("target")
-        if not edge or edge == "reading" or target in (None, ""):     # "reading" echoes a base value
+        if not edge or edge in _VALUE_SKIP_EDGES or target in (None, ""):
             continue
         (measure if edge in _MEASURE_EDGES else derive)[edge] = target
     return {"measure": measure, "derive": derive}
