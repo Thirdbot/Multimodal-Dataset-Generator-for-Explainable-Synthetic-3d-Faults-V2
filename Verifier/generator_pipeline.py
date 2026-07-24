@@ -1,4 +1,5 @@
 import json
+import os
 import random
 import re
 import sys
@@ -34,6 +35,12 @@ QUESTION_PER_GRAPH  = 12
 CANDIDATE_PER_QUESTION = 5
 MAX_ROWS_PER_EVIDENCE = 2
 MAX_ATTEMPT = 3 * QUESTION_PER_GRAPH # max attempt for outer loop
+# How many individual objects each seed carries -> multi-object questions by default. Set 1 for
+# single-object seeds (old behaviour). >1 lets the generator see several coordinate-named objects
+# in one batch, so it can ask spatial/relational questions ("the fault at [x,y] vs the closure at
+# [a,b]"); retrieval, the coord swap guard, union evidence, and masks/regions are all already
+# multi-object. The section doc is always attached on top (counts/mode), same as before.
+OBJECTS_PER_SEED = max(1, int(os.environ.get("OBJECTS_PER_SEED", "2")))
 # Rotated per batch so questions spread across angles instead of clustering on one
 # phrasing. Evidence-gated in the prompt: an angle the Evidences cannot answer is skipped.
 QUESTION_FACETS = (
@@ -210,20 +217,31 @@ class RagWorkflow(object):
         # seed. Attaching the section doc to every seed makes counts answerable from real
         # evidence; it is 2 facts, so the 2048-token context is unaffected.
         #
-        # Note: a seed still carries only ONE object, so the "how two named structures relate"
-        # facet cannot be grounded from it (fine for fault_complex, which has no relation facts;
-        # revisit for closure/salt categories, where intersects_* facts do exist).
+        # A seed now carries OBJECTS_PER_SEED objects (default 2) + the section doc, so the
+        # generator can relate/compare several coordinate-named objects in one batch. Objects
+        # are shuffled and chunked; the section doc(s) ride on every seed (counts/mode). The
+        # loop in generate_for_graph re-creates this generator on StopIteration, so each cycle
+        # re-shuffles into fresh object groupings.
         docs = list(docs)
-        random.shuffle(docs)
 
         # object ids are "<type>_<n>" (fault_0); the section doc is "<category> structure".
         section_docs = [
             doc for doc in docs
             if not _INSTANCE_ID_RE.search(str(doc.metadata.get("object_id") or ""))
         ]
+        objects = [
+            doc for doc in docs
+            if _INSTANCE_ID_RE.search(str(doc.metadata.get("object_id") or ""))
+        ]
+        random.shuffle(objects)
 
-        for doc in docs:
-            yield [doc] + [s for s in section_docs if s is not doc]
+        if not objects:                       # section-only graph (negatives) -> one section seed
+            if section_docs:
+                yield list(section_docs)
+            return
+
+        for i in range(0, len(objects), OBJECTS_PER_SEED):
+            yield objects[i:i + OBJECTS_PER_SEED] + section_docs
 
     def generate_question(self, evidence_text, number_of_questions):
         facets = ", ".join(random.sample(QUESTION_FACETS, len(QUESTION_FACETS)))

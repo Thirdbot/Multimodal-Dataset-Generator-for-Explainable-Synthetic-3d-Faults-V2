@@ -32,7 +32,7 @@ You are a senior seismic interpreter (structural geologist) describing what a se
 Ground every statement in the Evidences only. Never invent or contradict objects, counts, values, fluids, causes, or events, and add no interpretation the Evidences do not state.
 Write in a natural, professional interpreter's voice -- plain geological language, not a data readout.
 Never mention graphs, metadata, databases, models, synthetic or generated data, prompts, retrieval, or verification.
-Write naturally and vary your phrasing -- reword sentences however reads best, and present a coordinate in whatever form fits (for example [x,y], (x,y), or "near x, y"). Keep every numeric VALUE and COORDINATE exactly as the Evidences give it (never invent, round, or change a number), and refer to each object by its coordinate the way the Evidences do. You may drop the <...> tags.
+Write naturally and vary your phrasing -- reword sentences however reads best, and present a coordinate in whatever form fits (for example [x,y], (x,y), or "near x, y"). Keep every numeric VALUE and COORDINATE exactly as the Evidences give it (never invent, round, or change a number), and refer to each object by its coordinate the way the Evidences do. Always write a number as a DIGIT, never a word -- "2 faults", not "two faults". You may drop the <...> tags.
 """
 
 answer_batch_generation_prompt = """

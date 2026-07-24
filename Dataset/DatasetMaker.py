@@ -134,6 +134,56 @@ def _untag_answer(text):
     return _ANSWER_TAG_RE.sub("", str(text or ""))
 
 
+def _region_object_name(evidences):
+    # The object's coordinate NAME as it appears in the evidence (`the fault at [x,y]`),
+    # read from the first <object> span so `regions` carries the exact same reference the
+    # text uses. This replaces object_id in the regions column (ids are never surfaced).
+    for ev in evidences:
+        match = _OBJECT_TAG_RE.search(str(ev.get("text", "")))
+        if match:
+            return match.group(1)
+    return ""
+
+
+def _default_scene_mask(sample_dir, item, view, scene_objects, image_path):
+    # Whole-scene fallback for a no-evidence row: the union of every object's mask, or a
+    # full-frame mask if the section has nothing to outline. Returns (mask_path, bbox).
+    objs = list(scene_objects.values())
+    path = build_region_mask(sample_dir, item, view, objs, "scene")
+    boxes = [o.get("bbox") or {} for o in objs]
+    xs0 = [b.get("x_min") for b in boxes if b.get("x_min") is not None]
+    ys0 = [b.get("y_min") for b in boxes if b.get("y_min") is not None]
+    xs1 = [b.get("x_max") for b in boxes if b.get("x_max") is not None]
+    ys1 = [b.get("y_max") for b in boxes if b.get("y_max") is not None]
+    if path and xs0:
+        return path, [min(xs0), min(ys0), max(xs1), max(ys1)]
+    # nothing to outline -> full-frame mask (= "the whole section")
+    try:
+        arr = np.asarray(Image.open(image_path).convert("L"))
+        h, w = arr.shape[:2]
+    except (OSError, ValueError):
+        return "", None
+    MASK_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    row_id = item.get("row_id") or hashlib.sha1(
+        f"{item.get('sample_id','')}|{item.get('question','')}|{item.get('answer','')}".encode()
+    ).hexdigest()
+    out = MASK_OUTPUT_DIR / f"{row_id}_{view}_scene_mask.png"
+    Image.fromarray(np.full((h, w), 255, dtype=np.uint8), mode="L").save(out)
+    return out.as_posix(), [0, 0, w, h]
+
+
+def _region_values(evidences):
+    # Structured per-object values (the grounding the model regresses), keyed by edge:
+    # {"dip_deg": 65.8, "throw": 120, ...}. The value words also stay in the evidence text
+    # (B1, retrievable); this is the machine-readable copy in the regions column.
+    values = {}
+    for ev in evidences:
+        edge, target = ev.get("edge"), ev.get("target")
+        if edge and edge != "reading" and target not in (None, ""):   # "reading" echoes a base value
+            values[edge] = target
+    return values
+
+
 def _assemble_evidence(region_texts):
     # <evidence> wrapping one <region>..<SEG>..</region> block per aligned mask/region.
     # Evidence keeps GROUND-TRUTH values inside their tags (<nums>65.8</nums>,
@@ -294,19 +344,24 @@ def build_row(item):
 
         bbox = scene_object.get("bbox") or {}
         center = scene_object.get("center") or {}
-        evidence_texts = "".join(
+        # object_name + values are read from the TAGGED facts; the evidence TEXT is then
+        # unwrapped (B1: tags removed, value words kept so it stays retrievable/readable).
+        object_name = _region_object_name(matching_evidences)
+        evidence_texts = _untag_answer("".join(
             f"{evidence.get('text', '')}.\n" for evidence in matching_evidences
-        ).strip()
+        ).strip())
         regions.append({
             "image_idx": 0,                          # single shared scene image
             "mask_idx": len(masks),                  # this region's own mask (aligned)
+            "seg_idx": len(masks),                   # ties to the i-th <SEG> in the answer/evidence
             "region_idx": len(regions),
             "object_type": object_type,
+            "object_name": object_name,              # coord reference (replaces object_id)
             "view": view,
-            "object_id": object_id,
             "class_id": scene_object.get("class_id", CLASS_IDS.get(object_type, 0)),
             "bbox": [bbox.get("x_min"), bbox.get("y_min"), bbox.get("x_max"), bbox.get("y_max")],
             "center": [center.get("x"), center.get("y")],
+            "values": _region_values(matching_evidences),   # {edge: target} the model regresses
         })
         masks.append(mask_path)
         region_evidence.append(evidence_texts)
@@ -347,21 +402,23 @@ def build_row(item):
             regions.append({
                 "image_idx": 0,
                 "mask_idx": len(masks),
+                "seg_idx": len(masks),               # ties to the i-th <SEG>
                 "region_idx": len(regions),
                 "object_type": section_type,
+                "object_name": section_type,         # global region: name = type (classification field)
                 "view": view,
-                "object_id": "section",              # whole-section fact, not an individual object
                 "class_id": CLASS_IDS.get(section_type, 0),
                 "bbox": union_bbox,
                 "center": [
                     (union_bbox[0] + union_bbox[2]) / 2 if union_bbox[0] is not None and union_bbox[2] is not None else None,
                     (union_bbox[1] + union_bbox[3]) / 2 if union_bbox[1] is not None and union_bbox[3] is not None else None,
                 ],
+                "values": _region_values(section_evidences),
             })
             masks.append(section_mask)
-            region_evidence.append(
+            region_evidence.append(_untag_answer(
                 "".join(f"{text}.\n" for text in section_texts).strip()
-            )
+            ))
 
     if not regions:
         # instrument (Hypothesis A / not-in-scene): a negative that names a specific
@@ -372,15 +429,41 @@ def build_row(item):
         if named:
             print(f"[NEG-NAMED] {sample_id} {view}: named {named} but no region matched "
                   f"(scene has {sorted(scene_objects)[:8]}) q={item.get('question','')[:55]}")
-        # Featureless / negative example (e.g. "the section shows no faulting"): no object to
-        # outline, but the scene image plus the section-level evidence is still a valid VQA row.
-        # No masks, no regions, no <SEG> -- just the slotted facts inside <evidence>.
-        neg_texts = [
-            f"{evidence.get('text', '')}."
-            for evidence in evidences if evidence.get("text")
-        ]
-        evidence_str = f"<evidence>\n{''.join(t + chr(10) for t in neg_texts)}</evidence>" if neg_texts else ""
+        # Featureless / no-region row (e.g. "the section shows no faulting", or a section-level
+        # fact whose objects didn't mask): fall back to the DEFAULT SHARED SCENE -- the scene
+        # image + a whole-scene mask (union of all objects, else full frame) as ONE "the section"
+        # region with its own <SEG>. So even no-evidence rows carry image + mask + region + SEG.
+        default_mask, default_bbox = _default_scene_mask(sample_dir, item, view, scene_objects, image_path)
+        neg_texts = [_untag_answer(evidence.get("text", "")) for evidence in evidences if evidence.get("text")]
         answer_text = _untag_answer(item.get("answer", ""))
+        if default_mask:
+            # global region: object_name = its seismic TYPE (classification field). Derive the
+            # type from the section-level evidences, else the dominant scene object class.
+            gtypes = set()
+            for evidence in evidences:
+                gtypes.update(EDGE_TYPES.get(evidence.get("edge"), []))
+            global_type = (sorted(gtypes)[0] if gtypes else next(
+                (o.get("object_type") for o in scene_objects.values() if o.get("object_type") in CLASS_IDS), ""))
+            center = ([(default_bbox[0] + default_bbox[2]) / 2, (default_bbox[1] + default_bbox[3]) / 2]
+                      if default_bbox else [None, None])
+            region_text = "".join(f"{t}.\n" for t in neg_texts).strip()
+            return {
+                "sample_id": sample_id,
+                "images": [image_path],
+                "masks": [default_mask],
+                "instruction": INSTRUCTION,
+                "question": f"{item.get('question', '')}",
+                "answer": f"<answer>{answer_text}</answer>",
+                "evidence": _assemble_evidence([region_text]) if region_text else "",
+                "regions": [{
+                    "image_idx": 0, "mask_idx": 0, "seg_idx": 0, "region_idx": 0,
+                    "object_type": global_type, "object_name": global_type, "view": view,
+                    "class_id": CLASS_IDS.get(global_type, 0), "bbox": default_bbox, "center": center,
+                    "values": _region_values(evidences),
+                }],
+            }
+        # truly nothing to show (no objects, no readable image) -> keep the old maskless form
+        evidence_str = f"<evidence>\n{''.join(t + chr(10) for t in neg_texts)}</evidence>" if neg_texts else ""
         return {
             "sample_id": sample_id,
             "images": [image_path],
