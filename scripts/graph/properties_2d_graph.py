@@ -276,10 +276,11 @@ def _visual_node(object_id, position, view):
 
 
 def _mask_features(mask_path, object_id, object_type):
-    # Read visual geometry off the object's scene mask: apparent dip for faults,
-    # coverage for closures/salt. Skip the merged per-type mask (object_id == type),
-    # whose combined geometry is meaningless.
-    if str(object_id) == str(object_type):
+    # Read visual geometry off the object's scene mask: apparent dip for faults, coverage for
+    # closures/salt/onlap. Skip the merged per-type mask (object_id == type), whose combined
+    # geometry is meaningless -- EXCEPT onlap, whose only object IS the aggregate (its coverage
+    # is the meaningful measure).
+    if str(object_id) == str(object_type) and object_type != "onlap":
         return {}
     mask_path = Path(mask_path)
     if not mask_path.is_file():
@@ -292,7 +293,7 @@ def _mask_features(mask_path, object_id, object_type):
         return {}
 
     features = {}
-    if object_type in {"closure", "salt"}:
+    if object_type in {"closure", "salt", "onlap"}:
         features["area_pct"] = round(100.0 * float(mask.sum()) / mask.size, 1)
     if object_type == "fault":
         dip = _dip_degrees(mask)
