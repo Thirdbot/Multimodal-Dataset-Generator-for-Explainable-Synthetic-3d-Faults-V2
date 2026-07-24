@@ -502,7 +502,7 @@ def ground_per_fact(retrieval_query, answer, docs, min_trust=0.7):
     return kept
 
 
-_NLI_TAG_RE = re.compile(r"</?(?:object|nums|center|bbox)>")
+_NLI_TAG_RE = re.compile(r"</?(?:object|nums|center|bbox|SEG)>")
 
 
 def _untag(text):

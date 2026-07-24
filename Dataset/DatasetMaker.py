@@ -111,6 +111,11 @@ def main():
         # mask is optional now: object rows carry a mask, negative/featureless rows don't.
         if not (row and row["images"]):
             continue
+        # Each <SEG> the answer emits must have a target mask/region. Surface mismatches so we
+        # can tell whether the LM segmented objects it wasn't grounded on (post-regen check).
+        seg_n = row["answer"].count("<SEG>")
+        if seg_n and seg_n != len(row["regions"]):
+            print(f"[SEG MISMATCH] {row.get('sample_id')}: {seg_n} <SEG> in answer vs {len(row['regions'])} regions")
         rows.append(row)
     write_csv(rows, CSV_OUTPUT)
 

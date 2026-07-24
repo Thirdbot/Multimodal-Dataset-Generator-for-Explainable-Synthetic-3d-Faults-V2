@@ -20,7 +20,7 @@ from NaturalTransform import TextTransform
 from Tracer import EvidenceTracer
 
 
-_TAG_RE = re.compile(r"</?(?:object|nums|center|bbox)>")
+_TAG_RE = re.compile(r"</?(?:object|nums|center|bbox|SEG)>")
 
 
 class _TagStrippingEmbeddings:
