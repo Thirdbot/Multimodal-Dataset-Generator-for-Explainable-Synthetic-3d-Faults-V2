@@ -325,6 +325,23 @@ class RagWorkflow(object):
                           sorted(q_edges - a_edges), "|", a)
                     continue
 
+                # Topic guard: the object TYPE(s) the question asks about and the answer's
+                # object type(s) must not be disjoint -- "how many faults?" -> "salt is
+                # present" is a cross-type swap the edge gate misses (empty q_edges).
+                q_types, a_types = object_types_in(question), object_types_in(a)
+                if q_types and a_types and q_types.isdisjoint(a_types):
+                    print("\t[REJECT] topic mismatch (asked", sorted(q_types),
+                          "answered", sorted(a_types), "):", a)
+                    continue
+
+                # Count guard: a "how many X" question must be answered FROM the matching
+                # count edge (number_faults / number_hc_closures / ...); otherwise a count
+                # question that grounds to no edge lets any grounded fact through.
+                q_count_edge = count_edge_for_question(question)
+                if q_count_edge and q_count_edge not in a_edges:
+                    print("\t[REJECT] count question not answered with", q_count_edge, ":", a)
+                    continue
+
                 verification = {"verdict": "PASS", "score": covered["score"]}
             except Exception as error:
                 print(f"\t[ANSWER CHECK ERROR] {a}: {error}")
@@ -657,6 +674,39 @@ def answer_objects_in_docs(answer, docs):
     if answer_coords and not answer_coords <= evidence_coords:
         return False
     return True
+
+
+# Topic guards (close the cross-type / count cross-wiring the edge gate misses: on a multi-type
+# seed the 1.5B answers "how many faults?" with "salt is present", and since a count question
+# often grounds to NO edge, q_edges is empty and the edge gate is skipped). Conservative --
+# they only reject a CLEARLY off-topic answer, so legit compound/comparative answers pass.
+_OBJECT_TYPE_WORDS = {"fault": "fault", "faults": "fault",
+                      "closure": "closure", "closures": "closure",
+                      "salt": "salt", "onlap": "onlap"}
+_COUNT_Q_RE = re.compile(r"\b(how many|number of|how much)\b", re.I)
+
+
+def object_types_in(text):
+    """The set of object TYPES (fault/closure/salt/onlap) a text names."""
+    t = str(text or "").lower()
+    return {canon for word, canon in _OBJECT_TYPE_WORDS.items()
+            if re.search(rf"\b{word}\b", t)}
+
+
+def count_edge_for_question(question):
+    """If the question is a count question, the number_* edge it asks for, else None."""
+    q = str(question or "").lower()
+    if not _COUNT_Q_RE.search(q):
+        return None
+    if "intersection" in q:
+        return "number_fault_intersections"
+    if re.search(r"\bonlap\b", q):
+        return "number_onlap_episodes"
+    if re.search(r"\bclosures?\b", q):
+        return "number_hc_closures"
+    if re.search(r"\bfaults?\b", q):
+        return "number_faults"
+    return None
 
 
 # Question-coverage gate: the answer must address what the question ASKS, not just be grounded
