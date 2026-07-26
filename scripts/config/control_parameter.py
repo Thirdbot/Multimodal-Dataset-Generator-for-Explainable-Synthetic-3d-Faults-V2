@@ -5,6 +5,7 @@ settings.yaml -> category controls -> build_configs/*.json + recipes/*.yaml.
 """
 
 from pathlib import Path
+import random
 import uuid
 import sys
 
@@ -370,19 +371,16 @@ class SampleControl:
 
         run_number = len(list(recipes_path.iterdir()))
 
-        counts = {}
-
-        for category, ratio in self.ratio_configs.items():
-            counts[category] = int(self.population_amount * ratio)
-
-        remaining = self.population_amount - sum(counts.values())
-
-        # Add leftover samples caused by rounding
-        for category in self.ratio_configs:
-            if remaining <= 0:
-                break
-            counts[category] += 1
-            remaining -= 1
+        # Weighted-random category per sample. The old `int(population * ratio)` floored every
+        # ratio to 0 for a small population (0.22*4 -> 0), so the ratios were ignored and the
+        # leftover loop just filled the first N categories in dict order -- only 4 ever appeared.
+        # Sampling each sample's category by its ratio converges to the target mix across the
+        # many small recipes the driver populates, and every category can appear.
+        categories = list(self.ratio_configs.keys())
+        weights = list(self.ratio_configs.values())
+        counts = {category: 0 for category in categories}
+        for _ in range(self.population_amount):
+            counts[random.choices(categories, weights=weights, k=1)[0]] += 1
         # saved recipe config
         recipe_name = f"recipe_{run_number}"
         recipe_config = {

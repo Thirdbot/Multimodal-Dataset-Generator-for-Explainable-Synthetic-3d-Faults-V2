@@ -68,7 +68,7 @@ Because these patches mutate process-global Synthoseis state, **each build runs 
 ### 3.2 Population → recipe + build configs
 `high_level_controls` declares `sample_population` (how many samples) and `sample_types` / `ratio_per_types` (the category mix; unspecified types split the remaining ratio evenly). `SampleControl.populate()`:
 
-1. computes per-category counts from the ratios (leftover rounding assigned round-robin),
+1. draws each sample's category by **weighted-random** (`random.choices(categories, weights=ratio_per_types)` per sample), which converges to the target ratios across many small recipes — replacing the earlier per-category integer counting that **floored small-population ratios to 0** and over-filled the first categories (the bug that made an early balanced run come out all-`fault_complex`),
 2. writes one JSON **build config** per sample to `build_configs/{category}_{uuid}.json`,
 3. writes a **recipe** `recipes/recipe_N.yaml` listing the sample names + the ratio plan.
 
@@ -356,13 +356,17 @@ Six `asyncio` coroutines run concurrently via `watchfiles.awatch`, each doing a 
 `run_generation.sh` is the detached driver for long runs:
 
 - `setsid`-launches the watcher (survives shell/session exit) and **restarts it if it dies**,
-- keeps a **shallow queue** (`QUEUE_AHEAD=6`) by calling `control_parameter` repeatedly — one recipe = **2 `fault_complex` samples** (`sample_population: 2`), rather than one huge recipe,
-- stops at `TARGET_SCENES` or if free disk falls below `MIN_FREE_GB` (12 G),
+- keeps a **shallow queue** (`QUEUE_AHEAD`, **3** in the balanced run) by calling `control_parameter` repeatedly — each call now emits a **weighted-random mix across all 8 sample types** (`control_parameter.populate()` draws each recipe from `ratio_per_types` via `random.choices`, converging to the target balance over many small recipes) instead of the old fixed *2 `fault_complex`*,
+- stops at `TARGET_SCENES` or if free disk falls below `MIN_FREE_GB`,
 - logs progress to `gen_driver.log`, build detail to `gen_run.log`.
 
-**Measured cost:** ~**4.5 min/scene** (build + image gen + CPU QA) and only ~**13–33 MB/scene** retained. Disk is *not* the constraint (~250 scenes ≈ 6 GB); **wall-clock is** (250 scenes ≈ 19 h).
+**Measured cost (SKIP_QA build run):** ~**2 min/scene** (build + image gen, no inline QA) and ~**20 MB/scene** retained (`build_objects` = 8.9 GB / 446 scenes). Disk is *not* the long-term constraint; **wall-clock is**, plus **transient raw-build peaks** (the heavy zarr build folder before `_run_image_gen` deletes it) — those peaks, not retained output, are what pressure free space during a run.
 
 > **Restart caveat:** a watcher restart re-QAs already-built graphs and **appends**, over-sampling those scenes. During a long build the QA is therefore provisional — finish with **one clean QA pass** (reset `verified_qa.jsonl`, regenerate over all graphs) so every scene is sampled exactly once.
+
+> **Orphan-stall (long-run failure mode, observed).** Because a build only fires on `Change.added` *while watching* (§11.1) and the startup loop never rebuilds pre-existing configs, **any unit/watcher recycle orphans the configs that were in flight**: their add-events are already consumed, so they sit unbuilt, and once `pending ≥ QUEUE_AHEAD` the driver stops populating — a silent deadlock (no crash, no log, scenes frozen). Mitigated **externally, without touching `process.py`**, by `scripts/gen_monitor.sh` (the overnight watchdog): when it sees `pending ≥ 3` with **no build running** (`raw==0`) for two consecutive checks, it moves the settled unbuilt configs to `build_configs_orphaned/`, which drops `pending`, re-triggers the driver, and logs `STALL_HEAL`. It fired ~6× over a 7 h run and self-recovered each time.
+
+> **Memory containment.** On a 15 GB box with training resident, `systemd-oomd` pressure-kills the whole unit during a multi-GB build peak → recycle → orphan-stall. Fixed by running the unit under a cgroup cap (`MemoryMax=8G`, `MemoryHigh=6500M`): builds throttle instead of triggering a system-wide OOM kill. With the cap, 0 unit-crashing OOMs across the run. NLI stays on CPU (`NLI_DEVICE=cpu`) so it never competes with training for VRAM.
 
 ---
 
@@ -380,31 +384,40 @@ Six `asyncio` coroutines run concurrently via `watchfiles.awatch`, each doing a 
 - **Small generator model.** Qwen2.5-1.5B is fast and cheap but a weak writer: it emits **0 tags**, under-lists `RETRIEVAL_QUERY` on compound answers (hence the reverse-NLI pass), and confuses presence with count. The gates catch most of it but also throttle yield (watch the `[TALLY]`).
 - **Per-fault masks depend on the wrapper.** If `faults/fault_XX.zarr` isn't emitted (guard off / older builds), faults fall back to a single merged mask and lose per-fault dip/localization.
 - **Combinatorial masks ≠ visual diversity.** Subset-masks from one complex scene are correlated; effective visual N ≈ **number of distinct builds**. Split train/val **by build** to avoid leakage. The QA:image ratio is *not* the overfitting driver (the ~12 QA/image land on **different facts**, deduped by evidence); **scene count is**. For a fixed row budget prefer **more scenes × fewer QA** over the reverse.
-- **All four types now enabled (fault, closure, salt, onlap), recount extended to all** — but **unproven until a rebuild.** Onlap is aggregate (one mask), the per-view recount now fixes `number_faults`, `number_hc_closures` (HC subset) and `salt_inserted`, and `area_pct` covers closure/salt/onlap. All of it is staged code that has only run for `fault_complex` so far; the closure/salt/onlap paths and the balanced category mix take effect on the **next Synthoseis rebuild** (the onlap fix is in *extraction*, and the source zarrs were deleted with the builds). `lithology` stays excluded by design.
+- **All four types now enabled (fault, closure, salt, onlap), recount extended to all — now proven by the balanced rebuild.** Onlap is aggregate (one mask), the per-view recount fixes `number_faults`, `number_hc_closures` (HC subset) and `salt_inserted`, and `area_pct` covers closure/salt/onlap. Previously staged code that had only run for `fault_complex`; the **overnight balanced run (2026-07-26) built 204 new scenes across all 8 categories** — `salt_fault_mixed` 32, `fault_only` 30, `depositional` 26, `onlap` 22, `salt_only` 18, `boring` 15, `full_mixed` 14 (+ `fault_complex`) — so the closure/salt/onlap extraction + recount paths all executed without error. What is *not* yet verified is the **numeric correctness of the new-type attributes**, which is a QA-pass check (pending, §13). `lithology` stays excluded by design.
 - **`number_onlap_episodes` is a 3D DB count, not per-view recounted** — onlap is aggregate, so there are no per-surface instances to count per section; if onlap isn't visible in a view the count can slightly overstate. The one count that isn't visible-recounted.
 
 ---
 
 ## 13. Scale & the current run
 
-**Target:** **500 distinct images**. Each scene renders **2 views** (inline + crossline), so that is **250 scenes** — and scenes, not rows, are the unit that matters (§12: effective visual N ≈ distinct builds).
+**Corpus after the 2026-07-26 balanced run: 446 scenes** (~908 2D graphs, ×2 views ≈ **892 distinct images**) — scenes, not rows, are the unit that matters (§12: effective visual N ≈ distinct builds). The run targeted 450 and was **stopped 4 short at 446** to hold disk headroom for QA (free space had fallen to the ~18–20 GB floor). Composition:
 
-```
-250 scenes × 2 views          = 500 distinct images
-500 images × 12 QA (QUESTION_PER_GRAPH)   ≈ 6,000 verified rows
-```
+- **242 older scenes** — the pre-balance corpus, essentially all `fault_complex`.
+- **204 new scenes** — the balanced mix across all 8 types (breakdown in §12).
 
-**Why 12 QA/image is the "optimal" pick:** it sits in the healthy VQA band (5–15 Q/image, cf. GQA/VQAv2) and well inside a `fault_complex` scene's fact budget (~5–7 faults × ~5 facts + section facts ≈ 30+), so the 12 questions land on **distinct facts** rather than rephrasing one — and `MAX_ROWS_PER_EVIDENCE=2` caps repeats on top. Pushing to ~45 QA/scene (what 20K rows over 250 scenes would need) would force over-sampling and is exactly the overfitting failure mode in §12.
+The **full 446-scene corpus therefore skews `fault_complex` (289 / 446 ≈ 65%)** because it carries the old fault-only scenes; the **new 204 alone are balanced**. Which of these to QA is the open **scope decision** below.
 
-**Measured envelope:**
+**Why 12 QA/image is the "optimal" pick:** it sits in the healthy VQA band (5–15 Q/image, cf. GQA/VQAv2) and well inside a scene's fact budget (~5–7 faults × ~5 facts + section facts ≈ 30+), so the 12 questions land on **distinct facts** rather than rephrasing one — and `MAX_ROWS_PER_EVIDENCE=2` caps repeats on top. Over-sampling to hit a big row target is exactly the overfitting failure mode in §12.
+
+**Measured envelope (observed):**
 
 | | value |
 |---|---|
-| build+QA per scene | ~4.5 min → 250 scenes ≈ **~19 h** |
-| retained disk per scene | ~13–33 MB → 250 scenes ≈ **~6 GB** (of 52 GB free) |
-| binding constraint | **wall-clock**, not disk |
+| build+image per scene (`SKIP_QA=1`) | ~2 min → 204 scenes ≈ **~7 h** |
+| retained disk per scene | ~20 MB (`build_objects` 8.9 GB / 446) |
+| binding constraint | **wall-clock**; transient raw-build peaks pressure free disk |
 
-Driven by `scripts/run_generation.sh` (§11.1), detached, with a hard stop at target or `<12 GB` free. Finish with **one clean QA pass** over all graphs (§11.1 caveat) to produce the final `verified_qa.jsonl` → CSV.
+Driven by the `seismic-gen` systemd unit (env: `SKIP_QA=1 BUILD_CONCURRENCY=1 IMAGE_GEN_CONCURRENCY=1 NLI_DEVICE=cpu MemoryMax=8G TARGET_SCENES=450 QUEUE_AHEAD=3`), monitored by `scripts/gen_monitor.sh` (§11.1). Generation ran with QA skipped; **QA is the remaining step.**
+
+### 13.1 QA pass — pending scope decision
+
+The final `verified_qa.jsonl` → CSV comes from **one clean QA pass** over all graphs (§11.1 caveat). Two facts gate the scope choice:
+
+1. **`Dataset/verified_qa.jsonl` is stale (Jul 18, old schema)** — plain answers, **no `<SEG>`, no regions / coordinate naming**. `scripts/resume_qa.sh` *appends and skips already-processed graphs*, which would **mix old-schema and new-schema rows**. A consistent dataset needs a **clean regen** (`DATASET_REGEN=1`, which truncates those 3635 rows).
+2. **Balance vs coverage** — QA *all 446* → a `fault_complex`-heavy set; QA the *204 new diverse* scenes → balanced across 8 types.
+
+**To run QA** (GPU must be free — training reclaims it per fold, so check `nvidia-smi` first): `bash scripts/resume_qa.sh` starts the sglang Qwen server + the QA unit. Pick scope/regen mode before launching.
 
 ---
 
