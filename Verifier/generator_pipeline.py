@@ -16,6 +16,12 @@ sys.path.insert(0, str(ROOT))
 from Verifier.create_rag import Rag
 from Verifier.llm_machine import LLMMachine
 from Verifier.rag_verifier import serialize_docs
+from Verifier.nli_patch import apply_nli_label_fix
+
+# longtracer reads the NLI model's [contradiction, entailment, neutral] output as
+# [contradiction, neutral, entailment] -- swapping entailment<->neutral. Correct it before any
+# check() so the entailment signal is trustworthy (see Verifier/nli_patch.py).
+apply_nli_label_fix()
 
 
 DEFAULT_GRAPH_ROOT = ROOT / "graphs" / "properties_2d_graph"
@@ -23,7 +29,11 @@ DEFAULT_OUTPUT = ROOT / "Dataset" / "verified_qa.jsonl"
 # MiniLM cosine rarely clears 0.9 for related-but-not-verbatim sentences, so 0.9
 # starved the question/answer gates. Precision is still enforced downstream by the
 # NLI trust filter (>=0.7) + entity guard; retrieval only decides candidate recall.
-_INSTANCE_ID_RE = re.compile(r"_\d+$")   # "fault_0" is an object; "fault_complex structure" is the section
+_INSTANCE_ID_RE = re.compile(r"_\d+$")   # "fault_0" is an object; used to strip the index off an id
+# The section/model node is "<category> structure" (it carries the counts + fault_mode). EVERYTHING
+# else is a real object -- crucially the aggregate "onlap" (object_id "onlap", no _N suffix), which
+# a `_\d+$` test misfiled as a section doc so it rode EVERY seed and ended up ~44% of all regions.
+_SECTION_ID_RE = re.compile(r" structure$")
 MIN_RETRIEVAL_SCORE = 0.7
 # Answer-coverage gate. Raised 0.7 -> 0.80: good answers ground verbatim-ish and score ~0.98
 # (median), so a 0.80 floor trims only the low-confidence tail (~1% of good rows) where loosely
@@ -53,7 +63,7 @@ OBJECTS_PER_SEED = max(1, int(os.environ.get("OBJECTS_PER_SEED", "2")))
 # Rotated per batch so questions spread across angles instead of clustering on one
 # phrasing. Evidence-gated in the prompt: an angle the Evidences cannot answer is skipped.
 QUESTION_FACETS = (
-    "whether a structure is present or the section is featureless",
+    "whether a structure is present or structure is not present",
     "how many of a structure there are",
     "where a structure sits in the section",
     "the orientation or geometry of a structure",
@@ -240,21 +250,37 @@ class RagWorkflow(object):
         # re-shuffles into fresh object groupings.
         docs = list(docs)
 
-        # object ids are "<type>_<n>" (fault_0); the section doc is "<category> structure".
-        section_docs = [
-            doc for doc in docs
-            if not _INSTANCE_ID_RE.search(str(doc.metadata.get("object_id") or ""))
-        ]
-        objects = [
-            doc for doc in docs
-            if _INSTANCE_ID_RE.search(str(doc.metadata.get("object_id") or ""))
-        ]
-        random.shuffle(objects)
+        # section/model doc = "<category> structure" (counts/mode); everything else is an OBJECT,
+        # including the aggregate "onlap" (which no longer rides every seed).
+        def _is_section(doc):
+            oid = str(doc.metadata.get("object_id") or "")
+            return (not oid) or bool(_SECTION_ID_RE.search(oid))
+        section_docs = [doc for doc in docs if _is_section(doc)]
+        objects = [doc for doc in docs if not _is_section(doc)]
 
         if not objects:                       # section-only graph (negatives) -> one section seed
             if section_docs:
                 yield list(section_docs)
             return
+
+        # Pair SAME-TYPE objects into a seed where possible, so a multi-object seed can support a
+        # MAGNITUDE comparison (two faults by dip/throw, two closures by area), not just a spatial
+        # relation. Group by type, shuffle within/across groups, then chunk -- a chunk crosses a
+        # type boundary only where a type has an odd count.
+        def _otype(doc):
+            oid = str(doc.metadata.get("object_id") or "")
+            m = _INSTANCE_ID_RE.search(oid)
+            return oid[:m.start()] if m else oid   # "fault_0" -> "fault"
+        by_type = {}
+        for doc in objects:
+            by_type.setdefault(_otype(doc), []).append(doc)
+        type_keys = list(by_type.keys())
+        random.shuffle(type_keys)               # vary which type leads across graphs/cycles
+        objects = []
+        for t in type_keys:
+            grp = by_type[t]
+            random.shuffle(grp)                 # vary which pair within a type
+            objects.extend(grp)
 
         for i in range(0, len(objects), OBJECTS_PER_SEED):
             yield objects[i:i + OBJECTS_PER_SEED] + section_docs
@@ -571,6 +597,21 @@ def _untag(text):
     return _NLI_TAG_RE.sub("", str(text))
 
 
+_MIN_ENTAILMENT = 0.5   # a claim line is only "covered" if a fact actually ENTAILS it (label fix
+                        # makes this signal correct); this is what lets a *similar-but-neutral*
+                        # claim -- "onlap is dipping" vs an area fact (entail ~0) -- be rejected
+                        # without a keyword guard.
+
+
+def _entailment_of(result):
+    """Corrected entailment prob of a single-claim check result (needs apply_nli_label_fix)."""
+    claims = getattr(result, "claims", None) or [None]
+    c0 = claims[0]
+    if isinstance(c0, dict):
+        return float(c0.get("entailment_score", 0.0) or 0.0)
+    return float(getattr(c0, "entailment_score", 0.0) or 0.0) if c0 is not None else 0.0
+
+
 def cover_answer(answer, retrieval_query, object_docs, min_trust=0.7, require_all=True):
     # Coverage over the SHARED fact pool -- every fact of every retrieved object (the
     # question's AND the answer's). The RETRIEVAL_QUERY is already one fact per line, so
@@ -598,7 +639,7 @@ def cover_answer(answer, retrieval_query, object_docs, min_trust=0.7, require_al
     best = {}  # claim -> (score, doc, fact) : the pool fact that best entails the claim
     for (claim, doc, fact), result in zip(pairs, results):
         score = float(getattr(result, "trust_score", 0.0) or 0.0)
-        if getattr(result, "verdict", "") == "PASS" and score >= min_trust:
+        if getattr(result, "verdict", "") == "PASS" and score >= min_trust and _entailment_of(result) > _MIN_ENTAILMENT:
             if claim not in best or score > best[claim][0]:
                 best[claim] = (score, doc, fact)
 
@@ -627,7 +668,7 @@ def cover_answer(answer, retrieval_query, object_docs, min_trust=0.7, require_al
         rev_results = check_batch(rev_items, max_workers=min(4, max(1, len(rev_items))))
         for (doc, fact), result in zip(rev_pool, rev_results):
             score = float(getattr(result, "trust_score", 0.0) or 0.0)
-            if getattr(result, "verdict", "") == "PASS" and score >= min_trust:
+            if getattr(result, "verdict", "") == "PASS" and score >= min_trust and _entailment_of(result) > _MIN_ENTAILMENT:
                 key = (doc.metadata.get("object_id"), fact.get("edge"), str(fact.get("target")))
                 if key not in grounded_keys:
                     grounded_keys.add(key)
