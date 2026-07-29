@@ -334,10 +334,12 @@ class TextTransform(object):
 
     @staticmethod
     def _tag(token_name, value):
-        open_tag, close_tag = SPECIAL_TOKENS[token_name]
+        # Value tags (<object>/<nums>/<center>/<bbox>) are no longer emitted -- evidence is
+        # plain text; only DatasetMaker's structural tags (<region>/<SEG>) remain. Coordinate
+        # bracket formatting is kept so "the fault at [x,y]" and "[x1,y1,x2,y2]" still render.
         if isinstance(value, (list, tuple)):
-            return f"{open_tag}[{','.join(str(item) for item in value)}]{close_tag}"
-        return f"{open_tag}{value}{close_tag}"
+            return f"[{','.join(str(item) for item in value)}]"
+        return f"{value}"
 
     @staticmethod
     def _is_number(value):

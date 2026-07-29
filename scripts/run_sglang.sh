@@ -10,6 +10,6 @@ source .venv/bin/activate
 exec python3 -m sglang.launch_server \
   --model-path Qwen/Qwen2.5-1.5B-Instruct \
   --host 0.0.0.0 \
-  --context-length 2048 \
+  --context-length 4096 \
   --mem-fraction-static 0.7 \
   --port 8000

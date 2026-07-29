@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 from scripts.common.yaml_helper import YAMLHelper
+from scripts.graph.compute_attribute import bbox_from_mask
 import re
 import xarray
 import numpy as np
@@ -873,18 +874,8 @@ class GraphImageExtractor:
 
     @staticmethod
     def _mask_bbox(mask_slice):
-        coords = np.argwhere(mask_slice)
-        if coords.size == 0:
-            return None
-
-        y_min, x_min = coords.min(axis=0)
-        y_max, x_max = coords.max(axis=0)
-        return {
-            "x_min": int(x_min),
-            "y_min": int(y_min),
-            "x_max": int(x_max),
-            "y_max": int(y_max),
-        }
+        # bbox computation lives in compute_attribute.bbox_from_mask -- one home for mask geometry.
+        return bbox_from_mask(mask_slice)
 
     @staticmethod
     def _normalize_image(image):

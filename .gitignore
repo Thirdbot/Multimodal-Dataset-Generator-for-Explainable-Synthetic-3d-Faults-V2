@@ -25,3 +25,5 @@ Dataset/*.jsonl
 Dataset/multimodal_images
 Dataset/masks
 docs/
+gen_*.log
+qa_*.log

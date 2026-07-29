@@ -25,14 +25,23 @@ DEFAULT_OUTPUT = ROOT / "Dataset" / "verified_qa.jsonl"
 # NLI trust filter (>=0.7) + entity guard; retrieval only decides candidate recall.
 _INSTANCE_ID_RE = re.compile(r"_\d+$")   # "fault_0" is an object; "fault_complex structure" is the section
 MIN_RETRIEVAL_SCORE = 0.7
+# Answer-coverage gate. Raised 0.7 -> 0.80: good answers ground verbatim-ish and score ~0.98
+# (median), so a 0.80 floor trims only the low-confidence tail (~1% of good rows) where loosely
+# grounded junk lives -- e.g. an attribute swap that scored 0.79 on shared-subject similarity.
+# It is a blunt confidence floor, complementary to the structural attribute/count/topic guards;
+# do not push past ~0.82 (yield falls off a cliff: ~15% of good rows gone at 0.85).
+MIN_ANSWER_TRUST = 0.80
 # A single 2D section carries only a handful of evidence facts per object, so 100
 # unique grounded questions is unreachable (MAX_ROWS_PER_EVIDENCE caps repeats) and
 # the loop always ground out to MAX_ATTEMPT. Right-sized to what a section supports.
-QUESTION_PER_GRAPH  = 12
+QUESTION_PER_GRAPH  = 5   # sized to the plain-evidence rate (~350 rows/hr, 2.2x the tagged ~157):
+                          # at that rate Q=5 covers ALL 408 graphs (204 scenes) in ~5.8h -> full
+                          # diversity + max rows (~2040) using the whole 6h window. Q=3 would finish
+                          # in ~3.5h (only ~1224 rows); Q=6 overruns 6h and drops to ~175 scenes.
 # Only the single best answer is kept, so 100 candidates was ~20x wasted generation +
 # retrieval + NLI. 5 gives enough spread. With count<=5 the JSON also fits max_tokens,
 # which kills the truncated-JSON -> parser-retry(5x) storm the old count=100 caused.
-CANDIDATE_PER_QUESTION = 5
+CANDIDATE_PER_QUESTION = 3   # trimmed 5->3: fewer answer candidates to generate + NLI-verify per question
 MAX_ROWS_PER_EVIDENCE = 2
 MAX_ATTEMPT = 3 * QUESTION_PER_GRAPH # max attempt for outer loop
 # How many individual objects each seed carries -> multi-object questions by default. Set 1 for
@@ -66,10 +75,17 @@ class RagWorkflow(object):
         self.rows = []
         self._seen_row_ids = set()  # dedup so a reprocess/regen never appends duplicates
 
-    def generate_dataset(self, max_graphs=None, graph_views=("inline", "crossline"), questions_per_graph=5, candidates_per_question=5):
-        self.start_output(truncate=True)
+    def generate_dataset(self, max_graphs=None, graph_views=("inline", "crossline"), questions_per_graph=5, candidates_per_question=5, resume=False):
+        # resume=True -> append to the existing output and SKIP graphs already turned into rows,
+        # so a run can be stopped and continued later without redoing work (or truncating).
+        self.start_output(truncate=not resume)
+        done = _processed_graphs(self.output_path) if resume else set()
+        if done:
+            print(f"[RESUME] skipping {len(done)} already-processed graphs")
 
         for graph_path in self.graph_paths(max_graphs=max_graphs, views=graph_views):
+            if graph_path.as_posix() in done:
+                continue
             self.rows.extend(self.generate_for_graph(
                 graph_path,
                 questions_per_graph=questions_per_graph,
@@ -299,7 +315,7 @@ class RagWorkflow(object):
                 # NLI check runs against coherent objects (no fan-out, no partial-match noise).
                 answer_docs = filter_docs_by_retrieval_score(retrieve_many(a_query), MIN_RETRIEVAL_SCORE)
                 object_docs = dedupe_docs([*question_docs, *answer_docs])
-                covered = cover_answer(a, a_query, object_docs)
+                covered = cover_answer(a, a_query, object_docs, min_trust=MIN_ANSWER_TRUST)
                 if not covered:
                     print("\t[REJECT] a fact not grounded:", a)
                     continue
@@ -340,6 +356,13 @@ class RagWorkflow(object):
                 q_count_edge = count_edge_for_question(question)
                 if q_count_edge and q_count_edge not in a_edges:
                     print("\t[REJECT] count question not answered with", q_count_edge, ":", a)
+                    continue
+
+                # Attribute-consistency guard: a dip / throw / coverage-% the answer asserts must
+                # be grounded on the matching edge, else it claims a magnitude the object lacks.
+                attr_missing = attr_edges_required(a) - a_edges
+                if attr_missing:
+                    print("\t[REJECT] attribute not grounded:", sorted(attr_missing), ":", a)
                     continue
 
                 verification = {"verdict": "PASS", "score": covered["score"]}
@@ -422,6 +445,23 @@ def _existing_row_ids(output_path):
             if rid:
                 ids.add(rid)
     return ids
+
+
+def _processed_graphs(output_path):
+    # Graphs already turned into at least one row (by metadata.graph_path). Used by resume mode
+    # to skip them. Graphs here are static symlinks, so presence is enough (no mtime check).
+    done = set()
+    if Path(output_path).exists():
+        for line in Path(output_path).read_text().splitlines():
+            if not line.strip():
+                continue
+            try:
+                gp = json.loads(line).get("metadata", {}).get("graph_path")
+            except json.JSONDecodeError:
+                continue
+            if gp:
+                done.add(gp)
+    return done
 
 
 def dedupe_docs(docs):
@@ -709,6 +749,26 @@ def count_edge_for_question(question):
     return None
 
 
+# Attribute-consistency guard: a MAGNITUDE the answer's wording asserts (a dip, a throw, a
+# coverage %) must be grounded on the matching edge -- else the answer claims a property the
+# object doesn't actually have in evidence ("onlap appears steeply dipping" grounded only on
+# area_pct; "onlap covers 20%" grounded only on extent). Patterns require a real value/keyword,
+# not the ambiguous bare word "area" (which "occupies the area from [bbox]" -- an extent claim --
+# would otherwise trip). Mirrors count_edge_for_question but for continuous measures.
+_ATTR_CLAIM_EDGE = (
+    (re.compile(r"\bdips?\b|\bdipping\b|\d\s*degrees?", re.I), "dip_deg"),
+    (re.compile(r"throw of about|throw of \d|throw is|displacement of \d", re.I), "throw"),
+    (re.compile(r"covers about \d|covers approximately \d|\d+\.?\d*\s*percent", re.I), "area_pct"),
+)
+
+
+def attr_edges_required(answer):
+    """The measure edges the answer's wording claims -- each must be grounded, or it is asserting
+    an attribute the evidence does not carry for that object."""
+    a = str(answer or "")
+    return {edge for pat, edge in _ATTR_CLAIM_EDGE if pat.search(a)}
+
+
 # Question-coverage gate: the answer must address what the question ASKS, not just be grounded
 # (catches "where is X?" answered with a dip). Enforced in best_answer by comparing the
 # question's grounded edges to the answer's grounded edges (the edge gate), which replaced the
@@ -776,10 +836,11 @@ def row_id(sample_id, question, answer):
     return hashlib.sha1(payload.encode()).hexdigest()
 
 
-def generate_multimodal_dataset(graph_root=DEFAULT_GRAPH_ROOT, output_path=DEFAULT_OUTPUT, max_graphs=None):
+def generate_multimodal_dataset(graph_root=DEFAULT_GRAPH_ROOT, output_path=DEFAULT_OUTPUT, max_graphs=None, resume=False):
     workflow = RagWorkflow(graph_root=graph_root, output_path=output_path)
     return workflow.generate_dataset(max_graphs=max_graphs, graph_views=("inline", "crossline"),
-                                     candidates_per_question=CANDIDATE_PER_QUESTION, questions_per_graph=QUESTION_PER_GRAPH)
+                                     candidates_per_question=CANDIDATE_PER_QUESTION, questions_per_graph=QUESTION_PER_GRAPH,
+                                     resume=resume)
 
 if __name__ == "__main__":
     rows = generate_multimodal_dataset()

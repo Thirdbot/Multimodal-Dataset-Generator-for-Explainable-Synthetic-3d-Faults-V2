@@ -7,6 +7,7 @@ Output: Dataset/multimodal_multi_image_dataset.csv and .jsonl
 import csv
 import hashlib
 import json
+import os
 import re
 from pathlib import Path
 
@@ -15,7 +16,8 @@ from PIL import Image
 
 
 ROOT = Path(__file__).resolve().parent.parent
-INPUT = ROOT / "Dataset" / "verified_qa.jsonl"
+# QA_INPUT lets the CSV be built from an alternate jsonl (e.g. the class-balanced one).
+INPUT = Path(os.environ.get("QA_INPUT") or (ROOT / "Dataset" / "verified_qa.jsonl"))
 IMAGE_ROOT = ROOT / "build_objects" / "images"
 CSV_OUTPUT = ROOT / "Dataset" / "multimodal_multi_image_dataset.csv"
 MASK_OUTPUT_DIR = ROOT / "Dataset" / "masks"
@@ -129,11 +131,15 @@ def _named_objects(text):
     return {(m.group(1).lower(), m.group(2)) for m in _OBJ_RE.finditer(str(text or ""))}
 
 
-_OBJECT_TAG_RE = re.compile(r"<object>(.*?)</object>")
+# Value tags are gone (evidence is plain text), so the object's coordinate NAME is read
+# straight from the prose: "the fault at [x,y]" (numbered objects) or a bare type word
+# ("onlap"/"salt", the aggregates). group(1) = the name, as before.
+_OBJECT_TAG_RE = re.compile(
+    r"(the (?:fault|closure|salt|onlap) at \[[^\]]+\]|\b(?:onlap|salt|fault|closure)\b)", re.I)
 
 # Grounding tags are UNWRAPPED inside the answer: the answer text stays plain (values kept,
 # tags removed). Grounding lives in the `regions` column + masks, not in the answer markup.
-_ANSWER_TAG_RE = re.compile(r"</?(?:object|nums|center|bbox)>")
+_ANSWER_TAG_RE = re.compile(r"</?(?:object|nums|center|bbox|SEG)>")
 
 
 def _untag_answer(text):
@@ -141,9 +147,9 @@ def _untag_answer(text):
 
 
 def _region_object_name(evidences):
-    # The object's coordinate NAME as it appears in the evidence (`the fault at [x,y]`),
-    # read from the first <object> span so `regions` carries the exact same reference the
-    # text uses. This replaces object_id in the regions column (ids are never surfaced).
+    # The object's coordinate NAME as it appears in the (now plain-text) evidence
+    # (`the fault at [x,y]`, or a bare `onlap`/`salt`), so `regions` carries the exact same
+    # reference the text uses. This replaces object_id in the regions column (ids never surfaced).
     for ev in evidences:
         match = _OBJECT_TAG_RE.search(str(ev.get("text", "")))
         if match:
