@@ -2,6 +2,7 @@
 From the graph, we make a rag
 """
 import inspect
+import os
 import re
 import sys
 from pathlib import Path
@@ -54,7 +55,9 @@ class Rag:
         self.embedding_model = embedding_model
         self.embedding = _TagStrippingEmbeddings(HuggingFaceEmbeddings(
             model_name="all-MiniLM-L6-v2",  # GeoGPT-Research-Project/GeoEmbedding
-            model_kwargs={"trust_remote_code": True},
+            # EMBED_DEVICE=cuda moves retrieval/RAG embedding off the CPU (it is rebuilt per graph);
+            # default cpu keeps the small/shared-GPU behaviour unchanged.
+            model_kwargs={"trust_remote_code": True, "device": os.environ.get("EMBED_DEVICE", "cpu")},
         ))
         self.strategy = Eager(
             k=20,

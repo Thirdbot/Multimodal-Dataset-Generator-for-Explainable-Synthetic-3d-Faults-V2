@@ -89,7 +89,7 @@ qa_pass(){
   log "QA pass: $N_SHARDS workers, NLI on $NLI_DEVICE"
   local pids=() s
   for s in $(seq 0 $((N_SHARDS-1))); do
-    NLI_DEVICE="$NLI_DEVICE" MPLBACKEND=Agg PYTHONPATH="$ROOT" \
+    NLI_DEVICE="$NLI_DEVICE" EMBED_DEVICE="$NLI_DEVICE" MPLBACKEND=Agg PYTHONPATH="$ROOT" \
       QA_GRAPH_ROOT="graphs/_shard_$s" QA_OUTPUT="Dataset/verified_qa_shard_$s.jsonl" QA_RESUME=1 \
       nohup "$ROOT/.venv/bin/python" scripts/qa_new_only.py >>"qa_shard_$s.log" 2>&1 &
     pids+=($!); sleep 3

@@ -30,8 +30,11 @@ PY="$SERVE_VENV/bin/python"
 MODEL="${LLM_MODEL:-Qwen/Qwen2.5-1.5B-Instruct}"
 PORT="${LLM_PORT:-8000}"
 CONTEXT="${LLM_CONTEXT:-4096}"                  # ctx 4096: richer evidence overflowed 2048
-MEM_FRAC="${LLM_MEM_FRAC:-0.6}"                 # 0.6 of 25 GB ~15 GB for sglang (bigger batch = faster);
-                                               # ~10 GB left for the GPU NLI workers. Lower it if VRAM is tight.
+MEM_FRAC="${LLM_MEM_FRAC:-0.5}"                 # sglang SHARES the card with the QA workers' NLI+embeddings
+                                               # (NLI_DEVICE=cuda) -- ~0.9 GB each, so ~7 GB for 8 workers.
+                                               # 0.5 of 25 GB = ~12.5 GB sglang leaves ~12 GB headroom.
+                                               # Raise toward 0.65 ONLY if nvidia-smi shows spare VRAM;
+                                               # >0.7 with 8 GPU workers will OOM.
 
 setup(){
   local backend="${1:-}"
