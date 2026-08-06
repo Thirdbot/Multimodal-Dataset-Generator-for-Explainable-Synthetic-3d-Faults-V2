@@ -207,7 +207,7 @@ So retrieval isn't circular self-lookup: a query embeds, hits its nearest eviden
 **Stage owners:** `Verifier/llm_machine.py` (prompts + model), `Verifier/generator_pipeline.py` (`RagWorkflow`, the loop)
 
 ### 8.1 The model
-A **local sglang** server (`http://localhost:8000/v1`, launched by `scripts/run_sglang.sh`) running `Qwen/Qwen2.5-1.5B-Instruct` at **`--context-length 4096`** (raised from 2048: the richer new-schema evidence — a closure now carries ~9 lines — pushed the question prompt to a median ~1.5k / max ~3.3k tokens, and `input + max_tokens(640) > 2048` returned HTTP 400 on ~⅔ of graphs, a silent retry-storm that produced 0 rows; 4096 gives a 3.4k input budget). Driven via `langchain_openai.ChatOpenAI`. Two tuned client bindings: **question** (higher temp/penalties for variety) and **answer** (low temp for faithfulness). Outputs are Pydantic-parsed JSON (`QuestionBatchStructure`, `AnswerBatchStructure`) with a strict output contract and retries. (The `reason` client/parser/prompt were removed with the reason column.)
+A **local sglang** server (`http://localhost:8000/v1`, launched by `scripts/llm_server.sh` — sglang **or** vllm, and the model is now configurable via `LLM_MODEL`, §14) running `Qwen/Qwen2.5-1.5B-Instruct` (the default; a 7B-AWQ is the recommended upgrade on a ≥16 GB GPU) at **`--context-length 4096`** (raised from 2048: the richer new-schema evidence — a closure now carries ~9 lines — pushed the question prompt to a median ~1.5k / max ~3.3k tokens, and `input + max_tokens(640) > 2048` returned HTTP 400 on ~⅔ of graphs, a silent retry-storm that produced 0 rows; 4096 gives a 3.4k input budget). Driven via `langchain_openai.ChatOpenAI`. Two tuned client bindings: **question** (higher temp/penalties for variety) and **answer** (low temp for faithfulness). Outputs are Pydantic-parsed JSON (`QuestionBatchStructure`, `AnswerBatchStructure`) with a strict output contract and retries. (The `reason` client/parser/prompt were removed with the reason column.)
 
 The shared `MASTER_PROMPT` sets a **senior seismic interpreter (structural geologist) persona** — a natural interpreter's voice, not a data readout — and enforces the truthfulness contract: only use the evidence; never invent objects/values/causes; never mention graph/metadata/synthetic/prompt/verification.
 
@@ -264,7 +264,7 @@ The **question** is also grounded per-fact (`cover_answer(..., require_all=False
 - **Clean** (`truncate=True`, the default): wipes `verified_qa.jsonl` once at start, then loops all graphs. Use after any prompt/schema change — the pre-existing rows were old-schema (plain answers, no coordinate naming, no `<SEG>`), so appending would mix schemas. The stale file is backed up first (`verified_qa.PRE_REGEN_0726.jsonl`).
 - **Resume** (`resume=True` via `QA_RESUME=1`): `start_output(truncate=False)` appends and re-seeds `_seen_row_ids` for row dedup, and `_processed_graphs(output)` returns every `metadata.graph_path` already written so the loop **skips done graphs**. A run can be stopped and continued later with **no work redone** — the way a multi-thousand-row target is reached across several sessions.
 
-**Sharded parallelism.** The pipeline is serial and **NLI-on-CPU-bound**, while the sglang server sits ~99% idle — so throughput scales by running **N workers over disjoint graph shards** (`graphs/_shard_0..4`, ~82 graphs each), each writing its own `verified_qa_shard_i.jsonl`. On the **12-core / 15 GB** box, **5 workers** is the sweet spot: each is ~1.7 GB RAM (→ ~6 max before RAM is gone) and pinned to `OMP_NUM_THREADS=2` so they don't oversubscribe the cores; sglang batches their concurrent requests. Result: **~30 rows/hr (1 worker) → ~330–380 rows/hr (5 workers, plain evidence)**, an ~11–12× lift (tagged evidence ran ~157 rows/hr — value-tag removal was a 2.2× throughput win, §13.1). NLI cannot move to GPU (sglang fills the 6 GB card), so CPU cores are the hard throughput wall.
+**Sharded parallelism.** The pipeline is serial and **NLI-on-CPU-bound**, while the sglang server sits ~99% idle — so throughput scales by running **N workers over disjoint graph shards** (`graphs/_shard_0..4`, ~82 graphs each), each writing its own `verified_qa_shard_i.jsonl`. On the **12-core / 15 GB** box, **5 workers** is the sweet spot: each is ~1.7 GB RAM (→ ~6 max before RAM is gone) and pinned to `OMP_NUM_THREADS=2` so they don't oversubscribe the cores; sglang batches their concurrent requests. Result: **~30 rows/hr (1 worker) → ~330–380 rows/hr (5 workers, plain evidence)**, an ~11–12× lift (tagged evidence ran ~157 rows/hr — value-tag removal was a 2.2× throughput win, §13.1). NLI cannot move to GPU **on the 6 GB card** (sglang fills it), so CPU cores are the hard throughput wall **on that box** — on a 25 GB GPU NLI runs on the GPU (`NLI_DEVICE=cuda`) and this wall is gone (§14).
 
 **Ops.** `scripts/qa_shards.sh {start|resume|stop|status}` manages the workers (systemd `--user` transient units `seismic-qa-0..4`, memory-capped); `scripts/qa_shard_monitor.sh` logs combined rows / worker liveness / RAM and wakes on a dead worker or RAM-critical. At the end the shards are **merged** into `Dataset/verified_qa.jsonl`, then DatasetMaker builds the CSV.
 
@@ -459,6 +459,51 @@ Driven by the `seismic-gen` systemd unit (env: `SKIP_QA=1 BUILD_CONCURRENCY=1 IM
 **Quality fixes landed** (all keep the gates): **NLI label-order bug fixed + entailment required** (§8.3); cross-type mismatch 25%→0% and attribute mismatch ~12%→0 (guards, §8.3, *proven irreplaceable by NLI*); compound half-answers fixed + multi-object comparison rule (§8.2); plain evidence + `<SEG>` owned by DatasetMaker (§8.1/§9); mask-attribute code refactored to `compute_attribute.py` (§6.3).
 
 **Finalize:** merge `verified_qa_shard_*.jsonl` → `Dataset/verified_qa.jsonl`, then `python Dataset/DatasetMaker.py` builds the CSV (regions/masks + evidence `<SEG>`). Launch/resume with `scripts/qa_shards.sh`; sglang via `scripts/run_sglang.sh` (check `nvidia-smi` first — training reclaims the GPU per fold).
+
+---
+
+## 14. Running the pipeline (current setup)
+
+The scripts are **portable** (each self-locates its repo root via `BASH_SOURCE`, so the repo can live anywhere — no hardcoded paths) and target a **12-core / 64 GB RAM / 25 GB VRAM / 500 GB** box. The old single-box path (§8.4, §13: `run_sglang.sh` + `qa_shards.sh` with NLI pinned to CPU) was a **6 GB-GPU / 15 GB-RAM constraint**; on the bigger GPU it is superseded by the below, whose key win is **NLI on the GPU** (`NLI_DEVICE=cuda`) — the 25 GB card fits the generator *and* the NLI model, removing the CPU-NLI throughput wall.
+
+**14.1 Environment.** `uv sync` builds the project venv. The serving backend (sglang or vllm) can **not** co-install there — both pin older `torch`/`transformers` than the project (`torch>=2.12`, `transformers>=5.9`), so `scripts/llm_server.sh` owns an **isolated `.venv-serve`**:
+
+```bash
+bash scripts/llm_server.sh setup vllm      # one-time: create .venv-serve + install the backend (or: setup sglang)
+```
+
+**14.2 Serve the generator LLM (you run this; the pipeline only *checks* the endpoint).** Both backends expose the **same** OpenAI endpoint `http://localhost:8000/v1` (`Verifier/llm_machine.py`), so they are interchangeable. The model is **configurable via `LLM_MODEL`**, read by both the server and the client — set it in *both* shells (vllm rejects a name mismatch):
+
+```bash
+export LLM_MODEL=Qwen/Qwen2.5-7B-Instruct-AWQ   # recommended upgrade from the 1.5B (biggest quality lever)
+bash scripts/llm_server.sh vllm                  # foreground; leave running
+```
+
+Model guidance: the generator only has to **rephrase grounded evidence** into natural Q/A (the evidence supplies the geology), so a strong general instruct model is right. **`Qwen2.5-7B-Instruct-AWQ`** is the sweet spot — same family as the tuned prompts, AWQ weights ~6 GB leave KV-cache + room for GPU-NLI. `LLM_MEM_FRAC=0.6` (server VRAM fraction) balances batch size against the ~4 GB the 8 NLI workers need.
+
+**14.3 Run end-to-end** (self-locating; aborts if the endpoint or VRAM/disk isn't ready — never launches the server itself):
+
+```bash
+export LLM_MODEL=Qwen/Qwen2.5-7B-Instruct-AWQ
+bash scripts/run_all.sh overlap    # build + QA concurrently (GPU not idle during build)
+#   all       = sequential: build (full machine) then QA (full machine)
+#   overlap   = build || QA, sharing the 12 cores (best wall-clock on large runs)
+#   build | qa | finalize | preflight  = individual phases
+```
+
+Tuned defaults (all env-overridable): `NLI_DEVICE=cuda`, `N_SHARDS=8`, `BUILD_CONCURRENCY=6`, `IMAGE_GEN_CONCURRENCY=3`, `TARGET_SCENES=2000`; `overlap` runs leaner (build 3 / QA 4) since the cores are shared. `qa_shards.sh` honors `N_SHARDS` for the balance/merge step.
+
+**14.4 Dataset config.** The class mix lives in `scripts/config/control_parameter.py` `high_level_controls`: the current build is **2-class — fault (1) + closure (2) — plus `boring` negatives** (`sample_types = [fault_only, fault_complex, boring]`, ratio `0.45/0.30/0.25`). Object-absent rows are emitted as **empty-mask negatives** (no mask, no `<SEG>`, natural per-class absence prose — §9.1).
+
+**14.5 Resume.** Both phases are resume-safe: re-run the same command. Build tops up to `TARGET_SCENES` (skips built scenes); QA appends and skips done graphs (`QA_RESUME=1`, dedup by `row_id`). Keep the `Dataset/verified_qa_shard_*.jsonl` (that *is* the QA resume state) and keep `N_SHARDS`/mode consistent across a resume (deterministic sharding — a different count re-buckets graphs and reprocesses them; the final `merge` still dedups).
+
+**14.6 Clean / re-run** — `scripts/clean.sh` (dry-run by default; `--yes` to delete; never removes `Dataset/*.csv`):
+
+```bash
+bash scripts/clean.sh rebuild        # preview a fresh-build reset (drops scenes/graphs/configs)
+bash scripts/clean.sh rebuild --yes  # then re-run the build from 0 scenes
+```
+Modes: `rebuild` (fresh build), `after` (post-run tidy — scaffolding only), `qa` (re-run QA over kept graphs).
 
 ---
 
