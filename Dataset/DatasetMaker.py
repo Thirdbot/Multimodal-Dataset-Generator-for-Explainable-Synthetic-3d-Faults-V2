@@ -157,33 +157,6 @@ def _region_object_name(evidences):
     return ""
 
 
-def _default_scene_mask(sample_dir, item, view, scene_objects, image_path):
-    # Whole-scene fallback for a no-evidence row: the union of every object's mask, or a
-    # full-frame mask if the section has nothing to outline. Returns (mask_path, bbox).
-    objs = list(scene_objects.values())
-    path = build_region_mask(sample_dir, item, view, objs, "scene")
-    boxes = [o.get("bbox") or {} for o in objs]
-    xs0 = [b.get("x_min") for b in boxes if b.get("x_min") is not None]
-    ys0 = [b.get("y_min") for b in boxes if b.get("y_min") is not None]
-    xs1 = [b.get("x_max") for b in boxes if b.get("x_max") is not None]
-    ys1 = [b.get("y_max") for b in boxes if b.get("y_max") is not None]
-    if path and xs0:
-        return path, [min(xs0), min(ys0), max(xs1), max(ys1)]
-    # nothing to outline -> full-frame mask (= "the whole section")
-    try:
-        arr = np.asarray(Image.open(image_path).convert("L"))
-        h, w = arr.shape[:2]
-    except (OSError, ValueError):
-        return "", None
-    MASK_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    row_id = item.get("row_id") or hashlib.sha1(
-        f"{item.get('sample_id','')}|{item.get('question','')}|{item.get('answer','')}".encode()
-    ).hexdigest()
-    out = MASK_OUTPUT_DIR / f"{row_id}_{view}_scene_mask.png"
-    Image.fromarray(np.full((h, w), 255, dtype=np.uint8), mode="L").save(out)
-    return out.as_posix(), [0, 0, w, h]
-
-
 # Split the per-object values by VALUE TYPE (clean, deterministic):
 #   "measure" = a continuous scalar magnitude with a unit -- dip (deg), throw (ms), area (%).
 #              These are the REGRESSION targets.
@@ -448,57 +421,30 @@ def build_row(item):
             ))
 
     if not regions:
-        # instrument (Hypothesis A / not-in-scene): a negative that names a specific
-        # object is a suspected blank-mask failure (that object should have masked),
-        # not a real absence. Log it with the scene's ids so we can tell whether the
-        # object is missing from this view's scene or the id namespace disagrees.
+        # No region masked for this row. Two cases, handled differently:
+        #  (a) the row NAMES a specific object (e.g. "the fault at [x,y]") but nothing masked ->
+        #      a suspected blank-mask FAILURE: that object should have segmented, so this is a
+        #      positive in disguise, not a real absence. DROP it rather than ship a mislabeled
+        #      "nothing" row.
+        #  (b) a genuine absence ("this section is structurally quiet...", "no salt body is
+        #      present", ...) -> a true NEGATIVE across ANY class. Emit it with NO mask and NO
+        #      <SEG>: the object is absent, so there is nothing to segment. regions stays [].
         named = sorted({e.get("object_id") for e in evidences if is_object_id(e.get("object_id", ""))})
         if named:
             print(f"[NEG-NAMED] {sample_id} {view}: named {named} but no region matched "
-                  f"(scene has {sorted(scene_objects)[:8]}) q={item.get('question','')[:55]}")
-        # Featureless / no-region row (e.g. "the section shows no faulting", or a section-level
-        # fact whose objects didn't mask): fall back to the DEFAULT SHARED SCENE -- the scene
-        # image + a whole-scene mask (union of all objects, else full frame) as ONE "the section"
-        # region with its own <SEG>. So even no-evidence rows carry image + mask + region + SEG.
-        default_mask, default_bbox = _default_scene_mask(sample_dir, item, view, scene_objects, image_path)
+                  f"(scene has {sorted(scene_objects)[:8]}) q={item.get('question','')[:55]} -> dropped")
+            return None
         neg_texts = [_untag_answer(evidence.get("text", "")) for evidence in evidences if evidence.get("text")]
         answer_text = _untag_answer(item.get("answer", ""))
-        if default_mask:
-            # global region: object_name = its seismic TYPE (classification field). Derive the
-            # type from the section-level evidences, else the dominant scene object class.
-            gtypes = set()
-            for evidence in evidences:
-                gtypes.update(EDGE_TYPES.get(evidence.get("edge"), []))
-            global_type = (sorted(gtypes)[0] if gtypes else next(
-                (o.get("object_type") for o in scene_objects.values() if o.get("object_type") in CLASS_IDS), ""))
-            center = ([(default_bbox[0] + default_bbox[2]) / 2, (default_bbox[1] + default_bbox[3]) / 2]
-                      if default_bbox else [None, None])
-            region_text = "".join(f"{t}.\n" for t in neg_texts).strip()
-            return {
-                "sample_id": sample_id,
-                "images": [image_path],
-                "masks": [default_mask],
-                "instruction": INSTRUCTION,
-                "question": f"{item.get('question', '')}",
-                "answer": f"<answer>{answer_text}</answer>",
-                "evidence": _assemble_evidence([region_text]) if region_text else "",
-                "regions": [{
-                    "image_idx": 0, "mask_idx": 0, "seg_idx": 0, "region_idx": 0,
-                    "object_type": global_type, "object_name": "the section", "view": view,
-                    "class_id": CLASS_IDS.get(global_type, 0), "bbox": default_bbox, "center": center,
-                    "values": _region_values(evidences),
-                }],
-            }
-        # truly nothing to show (no objects, no readable image) -> keep the old maskless form
         evidence_str = f"<evidence>\n{''.join(t + chr(10) for t in neg_texts)}</evidence>" if neg_texts else ""
         return {
             "sample_id": sample_id,
             "images": [image_path],
-            "masks": [],
+            "masks": [],                                  # empty-mask negative: nothing to segment
             "instruction": INSTRUCTION,
             "question": f"{item.get('question', '')}",
             "answer": f"<answer>{answer_text}</answer>",
-            "evidence": evidence_str,
+            "evidence": evidence_str,                     # no <SEG> -> aligns with 0 regions
             "regions": [],
         }
 

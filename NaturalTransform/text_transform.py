@@ -65,6 +65,17 @@ COUNT_TEMPLATES = {
     "number_onlap_episodes": "The section shows {count} {noun}",
 }
 BOOLEAN_TEMPLATES = {"salt_inserted": "Salt is present"}
+# Natural "nothing"/absence phrasing, one per class-level edge. A zero count or a false boolean
+# is a real, groundable negative -- rendered as geologist prose instead of "shows 0 faults".
+# These rows carry NO mask/<SEG> (the object is absent, so there is nothing to segment);
+# DatasetMaker.build_row emits them as empty-mask negatives.
+ABSENCE_TEMPLATES = {
+    "number_faults":         "This section is structurally quiet, with no faulting developed",
+    "fault_mode":            "This section is structurally quiet, with no faulting developed",
+    "number_hc_closures":    "No hydrocarbon-bearing closures are developed in this section",
+    "number_onlap_episodes": "No onlap terminations are present in this section",
+    "salt_inserted":         "No salt body is present in this section",
+}
 EDGE_TEMPLATES = {"HAS_VISUAL_OBJECT": "{source} includes a visible {target} feature"}
 
 SPECIAL_TOKENS = {
@@ -199,10 +210,14 @@ class TextTransform(object):
         if edge == "fault_mode":
             return self._fault_mode_sentence(source, target)
         if edge in BOOLEAN_TEMPLATES:
-            return self._sentence(BOOLEAN_TEMPLATES[edge]) if self._is_true(target) else None
+            if self._is_true(target):
+                return self._sentence(BOOLEAN_TEMPLATES[edge])
+            absent = ABSENCE_TEMPLATES.get(edge)
+            return self._sentence(absent) if absent else None
         if edge in COUNT_TEMPLATES:
             if self._is_false(target):
-                return None
+                absent = ABSENCE_TEMPLATES.get(edge)
+                return self._sentence(absent) if absent else None
             return self._sentence(COUNT_TEMPLATES[edge].format(
                 count=self._tag_number(target), noun=self.edge_label(edge)))
         if edge in PROPERTY_TEMPLATES:
@@ -221,7 +236,7 @@ class TextTransform(object):
         # plain fault count elsewhere).
         value = str(target).strip().lower()
         if value in {"none", "", "0", "false"}:
-            return self._sentence(f"{source} shows no faulting")
+            return self._sentence(ABSENCE_TEMPLATES["fault_mode"])
         name = FAULT_PATTERN_NAMES.get(value)
         if not name:
             return None
@@ -320,7 +335,11 @@ class TextTransform(object):
         if edge in LOW_VALUE_EXCEPTIONS or edge.startswith("intersects_"):
             return False
         value = str(value).strip().lower()
-        if edge.startswith("number_") and edge != "number_faults":
+        # A zero count is normally "low value" (dropped), EXCEPT for class-level edges that
+        # carry a natural absence phrasing -- those zeros are real "nothing" negatives we keep
+        # (e.g. no hydrocarbon closures, no onlap). number_fault_intersections has no absence
+        # template, so its ubiquitous 0 stays suppressed.
+        if edge.startswith("number_") and edge not in ABSENCE_TEMPLATES:
             return value in {"0", "0.0"}
         if edge.endswith("_pct") or edge.endswith("_count") or edge.startswith("n_voxels_"):
             return value in {"0", "0.0"}
