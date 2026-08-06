@@ -267,7 +267,7 @@ Failures measured on this pipeline that led to a measured change *(all measured 
 
 ## 15. Not yet done
 
-- **The shipped corpus was NOT regenerated** with the current pipeline's fixes: it lacks the **NLI label fix**, the **entailment coverage gate** (`_MIN_ENTAILMENT`), the **onlap-as-object fix**, the **same-type seed pairing**, and the **multi-object comparison prompt rule**. All exist in code (`NOT RUN` on the corpus).
+- **The shipped corpus was NOT regenerated** with the current pipeline's fixes: it lacks the **NLI label fix**, the **entailment coverage gate** (`_MIN_ENTAILMENT`), the **onlap-as-object fix**, the **same-type seed pairing**, the **multi-object comparison prompt rule**, and the **empty-mask negatives + natural absence phrasing** (object-absent rows now emit a true no-target negative — `masks=[]`, no `<SEG>` — with natural per-class absence prose, replacing the old whole-section-mask fallback; `ABSENCE_TEMPLATES`). All exist in code (`NOT RUN` on the corpus — the shipped 1,467 rows still carry the whole-section-mask form, of which only 2 negatives were produced, §14).
 - **No data split** (§13). `NOT RUN`.
 - **No baseline / no trained model results** in this document. `NOT RUN` here.
 - **No inter-annotator or human validation** of answer correctness beyond the automatic gates. `NOT RUN`.
