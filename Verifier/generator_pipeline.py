@@ -59,7 +59,9 @@ MAX_ATTEMPT = 3 * QUESTION_PER_GRAPH # max attempt for outer loop
 # in one batch, so it can ask spatial/relational questions ("the fault at [x,y] vs the closure at
 # [a,b]"); retrieval, the coord swap guard, union evidence, and masks/regions are all already
 # multi-object. The section doc is always attached on top (counts/mode), same as before.
-OBJECTS_PER_SEED = max(1, int(os.environ.get("OBJECTS_PER_SEED", "2")))
+OBJECTS_PER_SEED = max(1, int(os.environ.get("OBJECTS_PER_SEED", "3")))  # 3: capture more of a
+# section's objects per seed so "how many + their <class> throw" answers cover more of them (the
+# stronger 7B + 4096 ctx handle it). Env-tunable; keep it modest so dense scenes don't overflow.
 # Rotated per batch so questions spread across angles instead of clustering on one
 # phrasing. Evidence-gated in the prompt: an angle the Evidences cannot answer is skipped.
 QUESTION_FACETS = (
