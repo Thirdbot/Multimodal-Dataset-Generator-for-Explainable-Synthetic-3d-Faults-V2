@@ -1,3 +1,4 @@
+import os
 import re
 
 # ---------------------------------------------------------------------------
@@ -36,6 +37,21 @@ FAULT_PATTERN_NAMES = {
 # in a time section, so readings are scoped "in this section", never a genetic claim.
 DIP_STEEP_MIN = 60
 DIP_GENTLE_MAX = 30
+
+# Grounded geological "readings" thresholds (all env-overridable knobs). A reading is a
+# deterministic, definitional class derived from a measured value and emitted AS evidence, so it
+# passes the verification gate; it is scoped to what the section shows, never a genetic claim.
+#
+# THROW magnitude, judged by the section's dominant WAVELET PERIOD (~40 ms at the ~20-25 Hz
+# dominant frequency of this survey's 3-45 Hz band), i.e. by SEISMIC EXPRESSION, not an arbitrary
+# ms cutoff: a throw under ~1 period is barely more than a single seismic loop (minor); over ~3
+# periods it spans several loops (a major structural throw); between is moderate.
+THROW_MINOR_MS = float(os.environ.get("THROW_MINOR_MS", "40"))    # ~1 wavelet period
+THROW_MAJOR_MS = float(os.environ.get("THROW_MAJOR_MS", "120"))   # ~3 wavelet periods
+# AREA footprint = mask coverage as a % of the 2D section. This is a RELATIVE structural-footprint
+# descriptor (localized vs section-scale), not a physical cutoff -- conventional, tune to taste.
+AREA_SMALL_PCT = float(os.environ.get("AREA_SMALL_PCT", "2"))     # <2% reads as a localized body
+AREA_BROAD_PCT = float(os.environ.get("AREA_BROAD_PCT", "8"))     # >8% reads as section-scale
 
 NODE_NAMES = {"fault": "fault", "closure": "closure", "salt": "salt", "onlap": "onlap"}
 NUMBERED_NODE_NAMES = {"fault": "Fault {number}", "closure": "Closure {number}", "salt": "Salt {number}"}
@@ -128,6 +144,32 @@ class TextTransform(object):
                 else:
                     term = "moderately dipping"
                 readings.append(f"{source} appears {term} in this section")
+        elif edge == "throw":
+            try:
+                throw = float(target)
+            except (TypeError, ValueError):
+                throw = None
+            if throw is not None:
+                if throw >= THROW_MAJOR_MS:
+                    term = "a major throw"
+                elif throw < THROW_MINOR_MS:
+                    term = "a minor throw"
+                else:
+                    term = "a moderate throw"
+                readings.append(f"{source} has {term} for this section")
+        elif edge == "area_pct":
+            try:
+                area = float(target)
+            except (TypeError, ValueError):
+                area = None
+            if area is not None:
+                if area >= AREA_BROAD_PCT:
+                    term = "a broad, section-scale feature"
+                elif area < AREA_SMALL_PCT:
+                    term = "a small, localized feature"
+                else:
+                    term = "a moderate-sized feature"
+                readings.append(f"{source} is {term} in this section")
         elif edge == "fluid":
             fluid = str(target).strip().lower()
             if fluid in {"oil", "gas"}:
