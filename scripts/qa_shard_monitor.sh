@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Watches the 5 sharded QA workers (seismic-qa-0..4) + sglang. Logs combined rows every 120s,
 # exits (re-invoking the agent) if a worker dies, RAM goes critical, all workers finish, or ~30min.
-cd /home/third/Desktop/simulationv2
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
 LOG=qa_shard_monitor.log
 N=5; MAX_ITERS=15
 rows_total(){ local t=0 s; for s in $(seq 0 $((N-1))); do t=$((t + $(wc -l < Dataset/verified_qa_shard_$s.jsonl 2>/dev/null || echo 0))); done; echo $t; }

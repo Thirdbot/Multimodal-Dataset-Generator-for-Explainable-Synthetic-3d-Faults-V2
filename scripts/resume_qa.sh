@@ -2,7 +2,7 @@
 # Resume QA generation from where it stopped. Appends to verified_qa.jsonl (does NOT truncate):
 # _seed_processed_graphs() skips the ~383 graphs already turned into rows and runs only the rest.
 set -eu
-cd /home/third/Desktop/simulationv2
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
 # 1) local Qwen server (needs the venv activated for ninja) -- see scripts/run_sglang.sh
 systemctl --user reset-failed sglang-qwen 2>/dev/null || true
 systemd-run --user --unit=sglang-qwen --property=Restart=on-failure --property=RestartSec=20 \

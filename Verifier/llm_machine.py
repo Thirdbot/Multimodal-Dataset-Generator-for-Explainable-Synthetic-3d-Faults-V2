@@ -1,6 +1,7 @@
 """
 Solely for llm response, for mechanic will be programmatic
 """
+import os
 from operator import itemgetter
 from pydantic import BaseModel
 from langchain_core.output_parsers import PydanticOutputParser
@@ -135,7 +136,7 @@ class LLMMachine:
 
         self.client = ChatOpenAI(base_url=self.DEFAULT_VLLM_ENDPOINT,
                                  api_key="local",
-                                 model="Qwen/Qwen2.5-1.5B-Instruct",
+                                 model=os.environ.get("LLM_MODEL", "Qwen/Qwen2.5-1.5B-Instruct"),
                                  temperature=self.temp,
                                  frequency_penalty=self.frequency_penalty,
                                  presence_penalty=self.presence_penalty,

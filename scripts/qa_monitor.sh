@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Watches the clean-regen QA run (seismic-qa-new + sglang-qwen). Logs progress every 120s,
 # exits (re-invoking the agent) when the QA unit finishes/fails or on a ~30min heartbeat.
-cd /home/third/Desktop/simulationv2
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
 LOG=qa_monitor.log
 MAX_ITERS=15
 for i in $(seq 1 $MAX_ITERS); do

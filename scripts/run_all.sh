@@ -19,17 +19,21 @@
 #   TARGET_SCENES=1000 bash scripts/run_all.sh all      # override any tunable via env
 # ─────────────────────────────────────────────────────────────────────────────
 set -u
-ROOT=/home/third/Desktop/simulationv2          # <-- repo path. If the other machine differs, edit
-cd "$ROOT" || { echo "repo not at $ROOT - edit ROOT at top of this script"; exit 1; }
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"   # repo root = parent of scripts/, auto-detected
+cd "$ROOT" || { echo "cannot cd to repo root $ROOT"; exit 1; }
 
 # ── tunables (sized for 12c / 64 GB / 25 GB) ────────────────────────────────
 TARGET_SCENES="${TARGET_SCENES:-2000}"                 # ~40 GB disk, overnight QA on this box
-N_SHARDS="${N_SHARDS:-5}"                               # 12 cores / OMP=2, 2 cores left for sglang+OS.
-                                                       #   keep =5 so qa_shards.sh finalize matches.
+N_SHARDS="${N_SHARDS:-8}"                               # more workers -> more concurrent sglang requests -> bigger GPU batch
+                                                       #   (NLI on GPU = light CPU, so >cores is fine). qa_shards honors N_SHARDS.
 NLI_DEVICE="${NLI_DEVICE:-cuda}"                        # THE unlock: NLI on the 25 GB GPU
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-2}"; export MKL_NUM_THREADS="$OMP_NUM_THREADS"
-BUILD_CONCURRENCY="${BUILD_CONCURRENCY:-3}"            # 64 GB affords >2 parallel Synthoseis builds
-IMAGE_GEN_CONCURRENCY="${IMAGE_GEN_CONCURRENCY:-2}"
+BUILD_CONCURRENCY="${BUILD_CONCURRENCY:-6}"            # 64 GB holds ~6 parallel Synthoseis builds
+IMAGE_GEN_CONCURRENCY="${IMAGE_GEN_CONCURRENCY:-3}"
+# `overlap` mode runs build + QA at the SAME time (GPU isn't idle during the build); they share
+# the 12 cores, so each runs leaner than a full-machine sequential phase:
+OVERLAP_BUILD_CONCURRENCY="${OVERLAP_BUILD_CONCURRENCY:-3}"
+OVERLAP_N_SHARDS="${OVERLAP_N_SHARDS:-4}"
 MIN_FREE_GB="${MIN_FREE_GB:-20}"
 LLM_ENDPOINT="${LLM_ENDPOINT:-http://localhost:8000/v1}"   # started by YOU (scripts/llm_server.sh); we only check it
 GRAPH_DIR="graphs/properties_2d_graph"
@@ -77,9 +81,12 @@ shard(){
   log "sharded $n graphs: $(for s in $(seq 0 $((N_SHARDS-1))); do echo -n "$s:$(ls graphs/_shard_$s|wc -l) "; done)"
 }
 
-qa(){
-  require_llm; shard
-  log "QA: $N_SHARDS workers, NLI on $NLI_DEVICE, RESUME-safe"
+# One QA pass over whatever graphs exist now: (re)shard, launch N workers RESUME-mode, wait.
+# Deterministic sharding + resume => passes never double-process a graph, so it is safe to call
+# repeatedly (overlap mode does, as the build produces more graphs).
+qa_pass(){
+  shard
+  log "QA pass: $N_SHARDS workers, NLI on $NLI_DEVICE"
   local pids=() s
   for s in $(seq 0 $((N_SHARDS-1))); do
     NLI_DEVICE="$NLI_DEVICE" MPLBACKEND=Agg PYTHONPATH="$ROOT" \
@@ -87,16 +94,38 @@ qa(){
       nohup "$ROOT/.venv/bin/python" scripts/qa_new_only.py >>"qa_shard_$s.log" 2>&1 &
     pids+=($!); sleep 3
   done
-  log "workers: ${pids[*]} (tail -f qa_shard_*.log). waiting for all to finish ..."
-  wait "${pids[@]}" || true                                    # a dead worker: resume-safe, just re-run qa
+  wait "${pids[@]}" || true                                    # a dead worker: resume-safe, just re-run
   local t=0; for s in $(seq 0 $((N_SHARDS-1))); do t=$((t + $(wc -l < Dataset/verified_qa_shard_$s.jsonl 2>/dev/null || echo 0))); done
-  log "QA done: $t rows across $N_SHARDS shards"
+  log "QA pass done: $t rows across $N_SHARDS shards"
+}
+
+qa(){ require_llm; qa_pass; }                                   # sequential: build already finished
+
+# Run build and QA CONCURRENTLY. Build streams graphs in the background; we keep launching QA
+# passes that consume new graphs (resume skips done ones) until the build finishes and drains.
+overlap(){
+  N_SHARDS="$OVERLAP_N_SHARDS"; BUILD_CONCURRENCY="$OVERLAP_BUILD_CONCURRENCY"
+  preflight; require_llm
+  log "OVERLAP: build($BUILD_CONCURRENCY) + QA($N_SHARDS) concurrent, sharing 12 cores -> GPU not idle during build"
+  TARGET_SCENES="$TARGET_SCENES" MIN_FREE_GB="$MIN_FREE_GB" SKIP_QA=1 \
+    BUILD_CONCURRENCY="$BUILD_CONCURRENCY" IMAGE_GEN_CONCURRENCY="$IMAGE_GEN_CONCURRENCY" \
+    nohup bash scripts/run_generation.sh >>gen_run.log 2>&1 &
+  local bpid=$!; log "overlap: build pid $bpid (background)"
+  local seen=0 drain=0 n
+  while :; do
+    n=$(graphs)
+    if [ "$n" -gt "$seen" ]; then qa_pass; seen="$n"; fi        # new graphs appeared -> process them
+    if kill -0 "$bpid" 2>/dev/null; then sleep 30
+    else drain=$((drain+1)); [ "$drain" -ge 2 ] && break; fi    # build done: 2 drain passes catch the tail
+  done
+  wait "$bpid" 2>/dev/null || true
+  finalize
 }
 
 finalize(){
-  log "balance + CSV"
-  bash scripts/qa_shards.sh balance                            # -> Dataset/verified_qa.jsonl (class-balanced)
-  bash scripts/qa_shards.sh csv Dataset/verified_qa.jsonl      # -> Dataset/multimodal_multi_image_dataset.csv
+  log "balance + CSV over $N_SHARDS shards"
+  N_SHARDS="$N_SHARDS" bash scripts/qa_shards.sh balance        # merges shard_0..N-1 -> Dataset/verified_qa.jsonl (balanced)
+  bash scripts/qa_shards.sh csv Dataset/verified_qa.jsonl       # -> Dataset/multimodal_multi_image_dataset.csv
   log "final CSV built. stats:"
   .venv/bin/python scripts/dataset_stats.py 2>/dev/null | head -24
 }
@@ -106,6 +135,7 @@ case "${1:-all}" in
   build)     build ;;
   qa)        preflight; qa ;;
   finalize)  finalize ;;
-  all)       preflight; build; qa; finalize ;;
-  *) echo "usage: run_all.sh {all|preflight|build|qa|finalize}"; exit 1 ;;
+  all)       preflight; build; qa; finalize ;;   # sequential: build (full machine) then QA (full machine)
+  overlap)   overlap ;;                          # build + QA at once (faster wall-clock; shares cores)
+  *) echo "usage: run_all.sh {all|overlap|preflight|build|qa|finalize}"; exit 1 ;;
 esac

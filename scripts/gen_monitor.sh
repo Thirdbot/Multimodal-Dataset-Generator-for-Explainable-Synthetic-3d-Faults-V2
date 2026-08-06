@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Overnight watchdog: logs GPU/RAM/CPU/disk + generation health every 120s, guards resources,
 # and exits (re-invoking the agent) on a meaningful EVENT or a ~30min heartbeat.
-cd /home/third/Desktop/simulationv2
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
 LOG=gen_monitor.log
 MAX_ITERS=15   # ~30 min heartbeat
 train_alive(){ pgrep -f "hybrid.train.train" >/dev/null && echo 1 || echo 0; }

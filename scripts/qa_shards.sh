@@ -9,8 +9,8 @@
 #   qa_shards.sh csv [jsonl]     -> build the CSV (default verified_qa.jsonl; pass balanced one to use it)
 #   qa_shards.sh finalize        -> stop + merge + csv (full-set end-of-run wrap-up)
 set -eu
-cd /home/third/Desktop/simulationv2
-N=5
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+N="${N_SHARDS:-5}"
 CMD="${1:-status}"
 
 rows_total(){ local t=0 s; for s in $(seq 0 $((N-1))); do t=$((t + $(wc -l < Dataset/verified_qa_shard_$s.jsonl 2>/dev/null || echo 0))); done; echo $t; }

@@ -5,7 +5,7 @@
 #   QUEUE_AHEAD   : how many un-built configs to keep queued so the builder never idles
 #   MIN_FREE_GB   : hard stop if the disk drops below this
 set -u
-cd /home/third/Desktop/simulationv2
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 TARGET_SCENES="${TARGET_SCENES:-250}"
 QUEUE_AHEAD="${QUEUE_AHEAD:-9}"

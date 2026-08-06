@@ -27,3 +27,4 @@ Dataset/masks
 docs/
 gen_*.log
 qa_*.log
+.venv-serve/
