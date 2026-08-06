@@ -427,28 +427,28 @@ high_level_controls = {
     # each sample that is randomly created or mixed category will be ratio
     # all-faulted has different fault-line that it will be ratio, salt-fault will be ratio
     'sample_types': [
-                     "boring",
-                     "fault_only",
-                     "fault_complex",
-                     "salt_only",
-                     "salt_fault_mixed",
-                     "onlap",
-                     "depositional",
-                     "full_mixed"
+                     "fault_only",     # 1-9 faults + faulted closures: clean, countable masks
+                     "fault_complex",  # 10-20 faults: structural density diversity
+                     "boring",         # featureless -> empty-mask NEGATIVES (no fault to segment)
+                     # "salt_only",
+                     # "salt_fault_mixed",
+                     # "onlap",
+                     # "depositional",
+                     # "full_mixed",
     ], # for dataset generations each generation will be ratio in same amount
-    # Balanced-yet-realistic mix (sums to 1.0). Faults + closures are the most common
-    # structural/trap features so they dominate; salt and onlap are present for coverage
-    # but rarer, as in real basins. Resulting type presence: fault ~0.60, closure ~0.87,
-    # salt ~0.35, onlap ~0.32 -- every type well represented, none forced to parity.
+    # Two-class dataset: FAULT (class 1) + CLOSURE (class 2) only. include_salt=False and
+    # closure_types=["faulted"] in both fault recipes -> no salt/onlap masks ever appear.
+    # `boring` contributes ~25% negatives (no-fault scenes); absent classes also surface as
+    # natural empty-mask "nothing" rows (see NaturalTransform ABSENCE_TEMPLATES). Sums to 1.0.
     'ratio_per_types':{
-        "fault_complex":    0.22,   # faults + closures (intersecting/branching)
-        "fault_only":       0.13,   # faults alone
-        "salt_fault_mixed": 0.15,   # faults + salt + closures
-        "salt_only":        0.10,   # salt + closures
-        "onlap":            0.12,   # onlap + closures (depositional trap)
-        "depositional":     0.10,   # closures + onlap
-        "full_mixed":       0.10,   # everything (rarer)
-        "boring":           0.08,   # closures only / featureless -> negatives
+        "fault_only":       0.45,   # lean here: cleaner, well-separated, countable fault masks
+        "fault_complex":    0.30,   # denser faulting for coverage
+        "boring":           0.25,   # negatives: object-absent -> empty mask, no <SEG>
+        # "salt_fault_mixed": 0.0,
+        # "salt_only":        0.0,
+        # "onlap":            0.0,
+        # "depositional":     0.0,
+        # "full_mixed":       0.0,
     }
 }
 
