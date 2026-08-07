@@ -23,7 +23,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"   # repo root = parent o
 cd "$ROOT" || { echo "cannot cd to repo root $ROOT"; exit 1; }
 
 # ── tunables (sized for 12c / 64 GB / 25 GB) ────────────────────────────────
-TARGET_SCENES="${TARGET_SCENES:-2000}"                 # ~40 GB disk, overnight QA on this box
+TARGET_SCENES="${TARGET_SCENES:-400}"                  # solid set (~1k masks/class); the shipped corpus used 450.
+                                                       # override for more, e.g. TARGET_SCENES=1000 (long run)
 N_SHARDS="${N_SHARDS:-8}"                               # more workers -> more concurrent sglang requests -> bigger GPU batch
                                                        #   (NLI on GPU = light CPU, so >cores is fine). qa_shards honors N_SHARDS.
 NLI_DEVICE="${NLI_DEVICE:-cuda}"                        # THE unlock: NLI on the 25 GB GPU
@@ -34,12 +35,15 @@ IMAGE_GEN_CONCURRENCY="${IMAGE_GEN_CONCURRENCY:-3}"
 # the 12 cores, so each runs leaner than a full-machine sequential phase:
 OVERLAP_BUILD_CONCURRENCY="${OVERLAP_BUILD_CONCURRENCY:-3}"
 OVERLAP_N_SHARDS="${OVERLAP_N_SHARDS:-4}"
+OVERLAP_MIN_BATCH="${OVERLAP_MIN_BATCH:-24}"           # accumulate >= this many NEW graphs before a QA pass, so
+                                                       # each pass amortizes the ~5-7 min worker/model reload
 MIN_FREE_GB="${MIN_FREE_GB:-20}"
 LLM_ENDPOINT="${LLM_ENDPOINT:-http://localhost:8000/v1}"   # started by YOU (scripts/llm_server.sh); we only check it
 GRAPH_DIR="graphs/properties_2d_graph"
 
 log(){ echo "$(date +%H:%M:%S) [run_all] $*"; }
 graphs(){ ls "$GRAPH_DIR"/*_properties_graph_*.json 2>/dev/null | wc -l; }
+rows_total(){ local t=0 s; for s in $(seq 0 $((N_SHARDS-1))); do t=$((t + $(wc -l < "Dataset/verified_qa_shard_$s.jsonl" 2>/dev/null || echo 0))); done; echo "$t"; }
 
 preflight(){
   command -v nvidia-smi >/dev/null || { log "ABORT: no nvidia-smi"; exit 1; }
@@ -91,7 +95,7 @@ qa_pass(){
   for s in $(seq 0 $((N_SHARDS-1))); do
     NLI_DEVICE="$NLI_DEVICE" EMBED_DEVICE="$NLI_DEVICE" MPLBACKEND=Agg PYTHONPATH="$ROOT" \
       QA_GRAPH_ROOT="graphs/_shard_$s" QA_OUTPUT="Dataset/verified_qa_shard_$s.jsonl" QA_RESUME=1 \
-      nohup "$ROOT/.venv/bin/python" scripts/qa_new_only.py >>"qa_shard_$s.log" 2>&1 &
+      nohup nice -n "${QA_NICE:-0}" "$ROOT/.venv/bin/python" scripts/qa_new_only.py >>"qa_shard_$s.log" 2>&1 &
     pids+=($!); sleep 3
   done
   wait "${pids[@]}" || true                                    # a dead worker: resume-safe, just re-run
@@ -105,18 +109,28 @@ qa(){ require_llm; qa_pass; }                                   # sequential: bu
 # passes that consume new graphs (resume skips done ones) until the build finishes and drains.
 overlap(){
   N_SHARDS="$OVERLAP_N_SHARDS"; BUILD_CONCURRENCY="$OVERLAP_BUILD_CONCURRENCY"
+  QA_NICE="${QA_NICE:-10}"                                      # QA runs at lower CPU priority so the build's
+                                                               # image-gen is not starved (that was stalling the build)
   preflight; require_llm
-  log "OVERLAP: build($BUILD_CONCURRENCY) + QA($N_SHARDS) concurrent, sharing 12 cores -> GPU not idle during build"
+  log "OVERLAP: build($BUILD_CONCURRENCY) + QA($N_SHARDS, nice $QA_NICE); a QA pass fires every >= $OVERLAP_MIN_BATCH new graphs"
   TARGET_SCENES="$TARGET_SCENES" MIN_FREE_GB="$MIN_FREE_GB" SKIP_QA=1 \
     BUILD_CONCURRENCY="$BUILD_CONCURRENCY" IMAGE_GEN_CONCURRENCY="$IMAGE_GEN_CONCURRENCY" \
     nohup bash scripts/run_generation.sh >>gen_run.log 2>&1 &
-  local bpid=$!; log "overlap: build pid $bpid (background)"
-  local seen=0 drain=0 n
+  local bpid=$! seen=0 idle=0 n alive
+  log "overlap: build pid $bpid (background)"
   while :; do
     n=$(graphs)
-    if [ "$n" -gt "$seen" ]; then qa_pass; seen="$n"; fi        # new graphs appeared -> process them
-    if kill -0 "$bpid" 2>/dev/null; then sleep 30
-    else drain=$((drain+1)); [ "$drain" -ge 2 ] && break; fi    # build done: 2 drain passes catch the tail
+    kill -0 "$bpid" 2>/dev/null && alive=1 || alive=0
+    if { [ "$alive" = 1 ] && [ "$((n-seen))" -ge "$OVERLAP_MIN_BATCH" ]; } || { [ "$alive" = 0 ] && [ "$n" -gt "$seen" ]; }; then
+      qa_pass; seen="$n"; idle=0                                # enough new graphs (or build finished) -> one pass
+    elif [ "$alive" = 0 ]; then
+      break                                                     # build done and nothing left -> finish
+    else
+      idle=$((idle+1))
+      log "waiting: graphs=$n (+$((n-seen)) new, need $OVERLAP_MIN_BATCH) rows=$(rows_total) build=alive"   # heartbeat -> never silent
+      [ "$idle" -ge 20 ] && { log "WARN: build alive but no new graphs ~10 min -- check gen_driver.log (raw-backlog pause / stall?)"; idle=0; }
+      sleep 30
+    fi
   done
   wait "$bpid" 2>/dev/null || true
   finalize
