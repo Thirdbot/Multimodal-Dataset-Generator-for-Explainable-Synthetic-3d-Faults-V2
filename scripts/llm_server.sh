@@ -20,7 +20,7 @@
 # LLM_MODEL (vllm rejects a mismatched name):
 #   export LLM_MODEL=<hf/model>                  # server AND pipeline (run_all workers inherit it) [canonical]
 #   bash scripts/llm_server.sh vllm <hf/model>   # server only (quick test)
-# Knobs (env): LLM_MODEL  LLM_PORT  LLM_CONTEXT  LLM_MEM_FRAC  LLM_VENV
+# Knobs (env): LLM_MODEL  LLM_PORT  LLM_CONTEXT  LLM_MEM_FRAC  LLM_VENV  LLM_QUANT  LLM_EXTRA_ARGS
 # ─────────────────────────────────────────────────────────────────────────────
 set -eu
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"   # repo root = parent of scripts/, auto-detected
@@ -35,6 +35,10 @@ MEM_FRAC="${LLM_MEM_FRAC:-0.5}"                 # sglang SHARES the card with th
                                                # 0.5 of 25 GB = ~12.5 GB sglang leaves ~12 GB headroom.
                                                # Raise toward 0.65 ONLY if nvidia-smi shows spare VRAM;
                                                # >0.7 with 8 GPU workers will OOM.
+QUANT="${LLM_QUANT:-}"                          # force/override quantization: fp8, gptq, awq, bitsandbytes, ...
+                                               # pre-quantized repos auto-detect (leave empty); set this to ONLINE-quantize
+                                               # a base fp16 model, e.g. LLM_QUANT=fp8 LLM_MODEL=Qwen/Qwen2.5-7B-Instruct
+EXTRA_ARGS="${LLM_EXTRA_ARGS:-}"                # any extra backend flags, passed through verbatim (e.g. "--max-num-seqs 64")
 
 setup(){
   local backend="${1:-}"
@@ -55,13 +59,15 @@ case "${1:-}" in
     echo "serving $MODEL via sglang on :$PORT (ctx $CONTEXT, mem-frac $MEM_FRAC)"
     exec env PATH="$SERVE_VENV/bin:$PATH" "$PY" -m sglang.launch_server \
       --model-path "$MODEL" --host 0.0.0.0 --port "$PORT" \
-      --context-length "$CONTEXT" --mem-fraction-static "$MEM_FRAC" ;;
+      --context-length "$CONTEXT" --mem-fraction-static "$MEM_FRAC" \
+      ${QUANT:+--quantization $QUANT} $EXTRA_ARGS ;;
   vllm)
     MODEL="${2:-$MODEL}"                          # optional cmd arg: llm_server.sh vllm <model>
     "$PY" -c "import vllm" 2>/dev/null || { echo "vllm not set up -> bash scripts/llm_server.sh setup vllm"; exit 1; }
     echo "serving $MODEL via vllm on :$PORT (ctx $CONTEXT, gpu-util $MEM_FRAC)"
     exec "$PY" -m vllm.entrypoints.openai.api_server \
       --model "$MODEL" --host 0.0.0.0 --port "$PORT" \
-      --max-model-len "$CONTEXT" --gpu-memory-utilization "$MEM_FRAC" ;;
+      --max-model-len "$CONTEXT" --gpu-memory-utilization "$MEM_FRAC" \
+      ${QUANT:+--quantization $QUANT} $EXTRA_ARGS ;;
   *) echo "usage: llm_server.sh {setup {sglang|vllm} | sglang | vllm}"; exit 1 ;;
 esac
