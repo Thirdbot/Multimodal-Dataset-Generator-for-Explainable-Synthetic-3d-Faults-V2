@@ -11,7 +11,8 @@
 #   scripts/clean.sh qa         # re-run QA only (scenes/graphs kept)
 #                               #   removes: Dataset/verified_qa*.jsonl  graphs/_shard_*
 #   scripts/clean.sh rebuild    # re-BUILD from scratch (run_generation starts at 0 scenes)
-#                               #   removes: build_objects/images  graphs/*  build_configs recipes builds
+#                               #   removes: build_objects/{images,objects}  build_configs recipes builds
+#                               #            graphs/{properties_graph,properties_2d_graph,_shard_*,*_db_extract.json}
 #                               #   keeps:   Dataset/ (⚠ the OLD csv then references deleted images)
 #
 #   ...add --yes to execute:    scripts/clean.sh rebuild --yes
@@ -27,7 +28,7 @@ done
 case "$MODE" in
   after)   TARGETS="build_configs recipes builds graphs/_shard_*" ;;
   qa)      TARGETS="Dataset/verified_qa.jsonl Dataset/verified_qa_shard_*.jsonl graphs/_shard_*" ;;
-  rebuild) TARGETS="build_objects/images graphs/properties_graph graphs/properties_2d_graph graphs/_shard_* build_configs recipes builds"
+  rebuild) TARGETS="build_objects/images build_objects/objects graphs/properties_graph graphs/properties_2d_graph graphs/_shard_* graphs/*_db_extract.json build_configs recipes builds"
            echo "⚠ rebuild removes the scene images -> the current Dataset/*.csv will reference deleted files." ;;
   *) echo "usage: clean.sh {after|qa|rebuild} [--yes]"; exit 1 ;;
 esac
