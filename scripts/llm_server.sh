@@ -65,7 +65,7 @@ case "${1:-}" in
     MODEL="${2:-$MODEL}"                          # optional cmd arg: llm_server.sh vllm <model>
     "$PY" -c "import vllm" 2>/dev/null || { echo "vllm not set up -> bash scripts/llm_server.sh setup vllm"; exit 1; }
     echo "serving $MODEL via vllm on :$PORT (ctx $CONTEXT, gpu-util $MEM_FRAC)"
-    exec "$PY" -m vllm.entrypoints.openai.api_server \
+    exec env PATH="$SERVE_VENV/bin:$PATH" "$PY" -m vllm.entrypoints.openai.api_server \
       --model "$MODEL" --host 0.0.0.0 --port "$PORT" \
       --max-model-len "$CONTEXT" --gpu-memory-utilization "$MEM_FRAC" \
       ${QUANT:+--quantization $QUANT} $EXTRA_ARGS ;;
