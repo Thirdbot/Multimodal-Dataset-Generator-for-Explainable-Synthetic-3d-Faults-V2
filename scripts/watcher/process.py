@@ -13,9 +13,9 @@ import yaml
 from watchfiles import Change
 import shutil
 
-from  scripts.graph.graph_generator import trace_success_tracker
-from scripts.images.images_generator import generate_images_for_graph
-from scripts.graph.properties_2d_graph import main as generate_properties_2d_graphs
+# trace / image / 2d-graph now run in subprocesses (scripts.graph.trace_one, scripts.images.imagegen_one)
+# rather than asyncio.to_thread -- they are GIL-bound CPU work that would otherwise serialize on the
+# GIL and stall the event loop. Their heavy modules are imported in those subprocesses, not here.
 from Verifier.generator_pipeline import RagWorkflow, DEFAULT_OUTPUT
 from Dataset.DatasetMaker import main as build_dataset_csv
 
@@ -50,10 +50,33 @@ STOP_SIGNAL = object()
 
 _project_root = Path(__file__).parent.parent.parent
 
+_live_build_pids = set()   # PIDs of running build subprocesses, so shutdown can reap orphans
+_image_inflight = set()    # sample_ids being imaged now; shared across watcher + reconcile so the
+                           # second dispatcher backs off instead of racing the same file writes
+
+
+def _kill_live_builds():
+    # os._exit on shutdown skips the event loop, orphaning build subprocesses. Kill them by PID
+    # directly (works without the loop) so they don't keep burning CPU after the watcher exits.
+    for pid in list(_live_build_pids):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+
 
 async def _run_trace(objs):
-    async with _trace_semaphore:
-        await asyncio.to_thread(trace_success_tracker, objs)
+    # Trace each build in its OWN subprocess (was asyncio.to_thread): trace_success_tracker is
+    # GIL-bound CPU work, so threads serialized on the GIL and stalled the event loop. A
+    # subprocess pool capped by TRACE_CONCURRENCY parallelizes across cores.
+    async def _one(obj):
+        async with _trace_semaphore:
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable, "-m", "scripts.graph.trace_one", str(obj),
+                cwd=str(_project_root),
+            )
+            await proc.wait()
+    await asyncio.gather(*(_one(o) for o in objs))
 
 async def _run_build(config_path, run_id):
     # Each build runs in its OWN subprocess. Synthoseis monkeypatches process-global
@@ -69,19 +92,28 @@ async def _run_build(config_path, run_id):
             "--config", str(config_path), "--run-id", str(run_id),
             cwd=str(_project_root),
         )
+        _live_build_pids.add(proc.pid)
         try:
-            returncode = await asyncio.wait_for(proc.wait(), timeout=_build_timeout)
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
-            # Synthoseis occasionally hangs on a parameter combo; killing it frees the
-            # queue. The partial build (no parameters.db) is swept on the next start.
-            print(f"[BUILD TIMEOUT] {run_id} killed after {_build_timeout:.0f}s")
-            return
-        if returncode != 0:
-            # sample_generator already recorded the failure in failed.yaml; this is
-            # just visibility. A partial build with no parameters.db is swept later.
-            print(f"[BUILD SUBPROCESS] {run_id} exited with code {returncode}")
+            try:
+                returncode = await asyncio.wait_for(proc.wait(), timeout=_build_timeout)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                # Synthoseis occasionally hangs on a parameter combo; killing it frees the queue.
+                # QUARANTINE the offending config (delete it) so it is not re-dispatched on every
+                # reconcile/restart and wedged forever. The partial build is swept on the next start.
+                try:
+                    Path(config_path).unlink()
+                    print(f"[BUILD TIMEOUT] {run_id} killed after {_build_timeout:.0f}s; config quarantined")
+                except OSError:
+                    print(f"[BUILD TIMEOUT] {run_id} killed after {_build_timeout:.0f}s")
+                return
+            if returncode != 0:
+                # sample_generator already recorded the failure in failed.yaml; this is
+                # just visibility. A partial build with no parameters.db is swept later.
+                print(f"[BUILD SUBPROCESS] {run_id} exited with code {returncode}")
+        finally:
+            _live_build_pids.discard(proc.pid)
 
 def _sample_id_from_graph(graph_path):
     return Path(graph_path).stem.removesuffix("_db_extract_properties_graph")
@@ -114,61 +146,51 @@ def _sample_fully_processed(graph_path, sample_id):
 
 
 async def _run_image_gen(graph_path):
-    async with _image_gen_semaphore:
-        graph_path = Path(graph_path)
-        sample_id = _sample_id_from_graph(graph_path)
-
-        # Bail out early for samples that are already fully processed. graph_properties_watcher's
-        # startup catch-up fires this for EVERY existing graph, and this function used to re-run
-        # generate_properties_2d_graphs unconditionally -- so each restart re-processed the whole
-        # corpus (read every mask, recompute every dip). At ~200 graphs that ballooned the watcher
-        # to ~8GB, which OOM-killed it, which restarted it, which re-processed everything again:
-        # 93 deaths / 67 recycles, throughput collapsing 1.8 -> 12 min per scene. Worse, each death
-        # left raw builds unextracted (they are only deleted after this succeeds), so 1.2GB builds
-        # piled up until the disk floor stopped the run. Skipping done work makes restarts cheap.
-        if _sample_fully_processed(graph_path, sample_id):
-            _delete_build_for_sample(sample_id)   # raw build is redundant once extracted
-            return
-
-        scene_position = images_path / sample_id / "scene_position.json"
-        if not scene_position.exists():  # skip re-imaging a sample already done
-            try:
-                await asyncio.to_thread(generate_images_for_graph, graph_path)
-            except Exception as exc:
-                print(f"[IMAGE GEN FAILED] {sample_id}: {exc}")
+    graph_path = Path(graph_path)
+    sample_id = _sample_id_from_graph(graph_path)
+    # Both graph_properties_watcher and _reconcile_loop can dispatch the SAME sample. _sample_fully_
+    # processed only becomes true at the very end (scene + 2d graph), and image gen takes minutes,
+    # so without a claim the reconcile would fire a second run while the first is still writing ->
+    # two writers racing the same files. Claim the sample process-wide; the loser backs off.
+    if sample_id in _image_inflight:
+        return
+    _image_inflight.add(sample_id)
+    try:
+        async with _image_gen_semaphore:
+            # Skip work already done. graph_properties_watcher's startup catch-up fires this for
+            # EVERY existing graph; re-imaging a finished sample re-reads every mask and recomputes
+            # every dip, which used to balloon the watcher's memory. The raw build is redundant once
+            # extracted, so delete it and return.
+            if _sample_fully_processed(graph_path, sample_id):
+                _delete_build_for_sample(sample_id)
                 return
-
-        try:
-            await asyncio.to_thread(generate_properties_2d_graphs, {sample_id})
-        except Exception as exc:
-            print(f"[2D GRAPH FAILED] {sample_id}: {exc}")
-            return
-        _delete_build_for_sample(sample_id)
+            # Image gen + 2d-graph build run in a subprocess (GIL-bound matplotlib/numpy work that
+            # would otherwise stall the event loop); IMAGE_GEN_CONCURRENCY caps parallelism.
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable, "-m", "scripts.images.imagegen_one", str(graph_path),
+                cwd=str(_project_root),
+            )
+            rc = await proc.wait()
+            if rc != 0:
+                print(f"[IMAGE GEN FAILED] {sample_id}: rc={rc}")
+                return
+            _delete_build_for_sample(sample_id)   # raw build redundant once extracted
+    finally:
+        _image_inflight.discard(sample_id)
 
 async def on_recipes_delete(files,dest,types=""):
     for f_path in files:
         file_path = Path(dest).joinpath(f_path)
         print(f"removing file: {file_path}{types}")
-        os.remove(f"{file_path}{types}")
+        try:
+            os.remove(f"{file_path}{types}")
+        except OSError:
+            pass  # already gone -- these deletions are inherently racy (fire-and-forget tasks)
 
 async def on_build_delete(files,dest):
-    file_path = Path(dest).glob(f"seismic__*_{files}")
-    for f_path in file_path:
+    for f_path in Path(dest).glob(f"seismic__*_{files}"):
         print(f"removing file: {f_path}")
-        shutil.rmtree(f_path)
-
-async def on_build_failed(files):
-    for f_path in files:
-        if Path(f_path).exists:
-            shutil.rmtree(f_path)
-        else:
-            continue
-
-
-async def read_json(file_path):
-    with open(file_path) as json_file:
-        data = json.load(json_file)
-        return data
+        shutil.rmtree(f_path, ignore_errors=True)
 
 async def read_yaml(file_path):
     with open(file_path) as yaml_file:
@@ -191,7 +213,7 @@ async def recipes_watcher():
                 asyncio.create_task(read_yaml(file_path)).add_done_callback(partial(data_callback,file_path))
                 print("Added/Modified recipes:",file_path)
             elif change_type == Change.deleted:
-                data = recipes_dict.get(file_path)
+                data = recipes_dict.pop(file_path, None)   # pop, not get -- the cache was never pruned (slow leak)
                 if not data:
                     print("No cached samples for deleted recipe:", file_path)
                     continue
@@ -210,10 +232,12 @@ async def builds_config_watcher():
 
     print("Watching builds configs...")
 
-    for cfg in sorted(build_configs_path.glob("*.json")):
+    for cfg in sorted(build_configs_path.glob("*.json")):     # startup catch-up: build any config not yet built
         if _config_already_built(cfg.stem):
             continue
-    # what failed is failed, no rebuild from config
+        print(f"[STARTUP] building pre-existing config: {cfg.stem}")
+        asyncio.create_task(_run_build(cfg, cfg.stem))
+    # (failed configs stay failed; _reconcile_loop is the ongoing backstop for missed events)
 
     async for changes in watchfiles.awatch(build_configs_path.as_posix()):
         for change_type, file_path in changes:
@@ -258,7 +282,9 @@ async def builds_watcher():
         asyncio.create_task(_run_trace([folder]))
     if builds_success_path.exists():                            # phase 1b: trace builds from success.yaml
         asyncio.create_task(read_yaml(builds_success_path.as_posix())).add_done_callback(read_add)
-    async for changes in watchfiles.awatch(build_path.as_posix()):  # phase 2: new builds
+    def _tracker_yaml_only(change, path):   # only wake on the tracker files, not every mask/array/db write inside build folders
+        return Path(path).name in ("success.yaml", "failed.yaml")
+    async for changes in watchfiles.awatch(build_path.as_posix(), watch_filter=_tracker_yaml_only):  # phase 2: new builds
         for change_type,file_path in changes:
 
             if change_type not in (Change.added, Change.modified):
@@ -413,7 +439,9 @@ async def dataset_worker(queue):
                 try:
                     print(f"[DATASET] generating rows for {Path(gp).name}")
                     await asyncio.to_thread(workflow.generate_for_graph, Path(gp))
-                    processed.add(gp)      # mark done only on success
+                    processed.add(gp.as_posix())   # str form -- must match the `g not in processed` test
+                                                   # above and the posix strings from _seed_processed_graphs;
+                                                   # adding a Path here silently never deduped (dup rows)
                     made_rows = True
                 except Exception as exc:
                     # skip this graph, keep the worker alive; leave it unprocessed to retry
@@ -513,6 +541,7 @@ def _install_stop_handlers(loop, main_task):
     def _handle(signum, frame):
         if stopping["flag"]:
             print("\n[Watcher] Second signal: forcing exit.", flush=True)
+            _kill_live_builds()
             os._exit(130)
         stopping["flag"] = True
         print("\n[Watcher] Stop signal received. Halting (press Ctrl+C again to force)...", flush=True)
@@ -532,9 +561,9 @@ if __name__ == "__main__":
     except asyncio.CancelledError:
         print("[Watcher] Watchers cancelled.")
     finally:
-        # os._exit so we never block on shutdown_default_executor waiting for an
-        # abandoned build thread; partial builds are cleared by _sweep_partial_builds
-        # on the next start.
+        # os._exit so we never block on shutdown_default_executor. Kill any live build subprocesses
+        # first so they aren't orphaned burning CPU; partial builds are swept on the next start.
+        _kill_live_builds()
         print("[Watcher] Process terminated.", flush=True)
         sys.stdout.flush()
         os._exit(0)

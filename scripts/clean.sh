@@ -18,7 +18,11 @@
 # ─────────────────────────────────────────────────────────────────────────────
 set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"; cd "$ROOT"
-MODE="${1:-}"; YES=""; [ "${2:-}" = "--yes" ] && YES=1
+# accept --yes in ANY position; MODE = first non-flag arg (safe default: dry-run unless --yes present)
+MODE=""; YES=""
+for a in "$@"; do
+  if [ "$a" = "--yes" ]; then YES=1; elif [ -z "$MODE" ]; then MODE="$a"; fi
+done
 
 case "$MODE" in
   after)   TARGETS="build_configs recipes builds graphs/_shard_*" ;;

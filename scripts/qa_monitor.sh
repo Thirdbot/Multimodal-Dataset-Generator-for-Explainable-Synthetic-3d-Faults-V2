@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
 # Watches the clean-regen QA run (seismic-qa-new + sglang-qwen). Logs progress every 120s,
 # exits (re-invoking the agent) when the QA unit finishes/fails or on a ~30min heartbeat.
+# ASSUMES the seismic-qa-new + sglang-qwen systemd --user units exist (created out-of-band, NOT by
+# run_all.sh, whose qa path uses nohup workers + a user-run LLM server) -- absent units read as
+# inactive, which this treats as "QA ended".
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 LOG=qa_monitor.log
 MAX_ITERS=15
 for i in $(seq 1 $MAX_ITERS); do
   qa=$(systemctl --user is-active seismic-qa-new 2>/dev/null)
   sg=$(systemctl --user is-active sglang-qwen 2>/dev/null)
-  rows=$(wc -l < Dataset/verified_qa.jsonl 2>/dev/null)
+  rows=$(wc -l < Dataset/verified_qa.jsonl 2>/dev/null || echo 0)
   ramA=$(free -g | awk 'NR==2{print $7}')
   gpu=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader 2>/dev/null | tr -d ' ')
   trej=$(journalctl --user -u seismic-qa-new --no-pager 2>/dev/null | grep -ac 'topic mismatch')
@@ -22,4 +25,4 @@ for i in $(seq 1 $MAX_ITERS); do
   if [ "$sg" = "failed" ]; then echo "SGLANG_DOWN rows=$rows"; exit 0; fi
   sleep 120
 done
-echo "HEARTBEAT rows=$(wc -l < Dataset/verified_qa.jsonl 2>/dev/null) qa=$(systemctl --user is-active seismic-qa-new)"
+echo "HEARTBEAT rows=$(wc -l < Dataset/verified_qa.jsonl 2>/dev/null || echo 0) qa=$(systemctl --user is-active seismic-qa-new)"

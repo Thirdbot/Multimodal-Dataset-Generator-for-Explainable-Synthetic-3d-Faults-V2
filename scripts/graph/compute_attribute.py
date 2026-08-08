@@ -13,8 +13,6 @@ Currently computed:
   - area_pct           -- coverage of the section (closure / salt / onlap)
   - dip_deg            -- fault apparent dip (RANSAC-isolated trace, PCA angle)
   - bbox_from_mask     -- x_min / y_min / x_max / y_max
-  - center_from_bbox   -- bbox midpoint (how the scene stores object centres)
-  - centroid_from_mask -- true pixel centroid
 
 Future (all computable from the same masks + Δx,Δz -- see the attribute table):
   perimeter, principal orientation, aspect ratio, compactness, convexity,
@@ -55,22 +53,6 @@ def bbox_from_mask(mask):
         "x_max": int(x_max),
         "y_max": int(y_max),
     }
-
-
-def center_from_bbox(bbox):
-    """Object centre as the bbox midpoint (matches how the scene stores centres)."""
-    if not bbox:
-        return None
-    return {"x": (bbox["x_min"] + bbox["x_max"]) / 2, "y": (bbox["y_min"] + bbox["y_max"]) / 2}
-
-
-def centroid_from_mask(mask):
-    """True pixel centroid (mean of the mask coordinates), or None if empty."""
-    coords = np.argwhere(mask)
-    if coords.size == 0:
-        return None
-    y, x = coords.mean(axis=0)
-    return {"x": float(x), "y": float(y)}
 
 
 def area_pct(mask):
@@ -144,7 +126,8 @@ def mask_features(mask_path, object_id, object_type):
         return {}
     try:
         mask = np.asarray(Image.open(mask_path).convert("L")) > 0
-    except (OSError, ValueError):
+    except (OSError, ValueError) as exc:
+        print(f"[MASK READ FAILED] {mask_path}: {exc}")
         return {}
     if not mask.any():
         return {}

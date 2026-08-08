@@ -229,6 +229,6 @@ if __name__ == "__main__":
         print(f"\tanswer: {answers.ANSWERS}\n")
         print("---")
         for a in answers.ANSWERS:
-            checking = check(a,[example_evidence])
+            checking = check(a.ANSWER,[example_evidence])
             print(f"\tanswer: {a}\n")
             print(f"\tverdict = {checking.verdict} trust = {checking.trust_score}\n")

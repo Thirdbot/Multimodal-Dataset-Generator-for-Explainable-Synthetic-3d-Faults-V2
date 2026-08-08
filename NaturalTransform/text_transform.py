@@ -433,4 +433,9 @@ class TextTransform(object):
 
     @staticmethod
     def _is_false(value):
-        return str(value).strip().lower() in {"0", "false", "no"}
+        if str(value).strip().lower() in {"0", "false", "no"}:
+            return True
+        try:
+            return float(value) == 0        # normalize numeric zero ("0.0", 0.0) to absence
+        except (TypeError, ValueError):
+            return False

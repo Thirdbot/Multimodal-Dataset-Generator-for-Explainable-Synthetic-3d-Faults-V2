@@ -1,7 +1,6 @@
 """
 From the graph, we make a rag
 """
-import inspect
 import os
 import re
 import sys
@@ -54,7 +53,7 @@ class Rag:
     def __init__(self,embedding_model="all-MiniLM-L6-v2"):
         self.embedding_model = embedding_model
         self.embedding = _TagStrippingEmbeddings(HuggingFaceEmbeddings(
-            model_name="all-MiniLM-L6-v2",  # GeoGPT-Research-Project/GeoEmbedding
+            model_name=self.embedding_model,  # GeoGPT-Research-Project/GeoEmbedding
             # EMBED_DEVICE=cuda moves retrieval/RAG embedding off the CPU (it is rebuilt per graph);
             # default cpu keeps the small/shared-GPU behaviour unchanged.
             model_kwargs={"trust_remote_code": True, "device": os.environ.get("EMBED_DEVICE", "cpu")},
@@ -115,17 +114,28 @@ class Rag:
 
         graph = json.loads(Path(graph_path).read_text())
         parents = {}
-        category_id = ""
 
-        for node in graph.get("nodes", []):
-            node_id = node.get("id", "")
-            category_id = node_id
+        node_ids = [node.get("id", "") for node in graph.get("nodes", []) if node.get("id", "")]
 
+        source_order, sources, targets = [], set(), set()
         for edge in graph.get("edges", []):
             source = edge.get("source", "")
             target = edge.get("target", "")
             if source and target:
                 parents[target] = source
+                if source not in sources:
+                    source_order.append(source)
+                sources.add(source)
+                targets.add(target)
+
+        # The section/category node -- pick it robustly instead of "whatever node comes last":
+        # prefer the "<category> structure" node, else the edge root (a source that is never a
+        # target), else fall back to the first node.
+        category_id = next((nid for nid in node_ids if re.search(r" structure$", nid)), "")
+        if not category_id:
+            category_id = next((s for s in source_order if s not in targets), "")
+        if not category_id and node_ids:
+            category_id = node_ids[0]
 
         return {
             "parents": parents,

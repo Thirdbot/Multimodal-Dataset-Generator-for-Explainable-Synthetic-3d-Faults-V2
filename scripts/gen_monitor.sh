@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Overnight watchdog: logs GPU/RAM/CPU/disk + generation health every 120s, guards resources,
 # and exits (re-invoking the agent) on a meaningful EVENT or a ~30min heartbeat.
+# ASSUMES generation runs as the seismic-gen systemd --user unit (created out-of-band, NOT by
+# run_all.sh, which launches the build via `nohup bash scripts/run_generation.sh`) -- an absent
+# unit reads as inactive here; the STALL_HEAL / disk / OOM guards still work off the filesystem.
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 LOG=gen_monitor.log
 MAX_ITERS=15   # ~30 min heartbeat
@@ -29,7 +32,7 @@ for i in $(seq 1 $MAX_ITERS); do
       [ -e "$cfg" ] || continue
       stem=$(basename "$cfg" .json)
       # only unbuilt (no scene/graph) AND settled (>3min old, not mid-pickup)
-      if ls build_objects/images/ 2>/dev/null | grep -q "$stem"; then continue; fi
+      if ls build_objects/images/ 2>/dev/null | grep -qF -- "$stem"; then continue; fi
       if [ -n "$(find "$cfg" -mmin +3 2>/dev/null)" ]; then
         mkdir -p build_configs_orphaned; mv "$cfg" build_configs_orphaned/ && moved=$((moved+1))
       fi

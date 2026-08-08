@@ -120,6 +120,7 @@ def _fault_settings_override(build_rules):
                 self.number_faults = self.rng.integers(
                     build_rules["min_faults"],
                     build_rules["max_faults"],
+                    endpoint=True,
                 )
             self.fmode = "random"
             self.fault_param = [

@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
-# Watches the 5 sharded QA workers (seismic-qa-0..4) + sglang. Logs combined rows every 120s,
+# Watches the N sharded QA workers (seismic-qa-0..N-1) + sglang. Logs combined rows every 120s,
 # exits (re-invoking the agent) if a worker dies, RAM goes critical, all workers finish, or ~30min.
+# ASSUMES qa_shards.sh start|resume created the seismic-qa-0..N-1 systemd --user units (run_all's
+# own qa_pass uses nohup, NOT these units) -- set N_SHARDS to match the run (qa_shards default 5,
+# run_all default 8).
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 LOG=qa_shard_monitor.log
-N=5; MAX_ITERS=15
+N="${N_SHARDS:-5}"; MAX_ITERS=15
 rows_total(){ local t=0 s; for s in $(seq 0 $((N-1))); do t=$((t + $(wc -l < Dataset/verified_qa_shard_$s.jsonl 2>/dev/null || echo 0))); done; echo $t; }
 for i in $(seq 1 $MAX_ITERS); do
   states=""; active=0; dead=0

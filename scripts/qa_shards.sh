@@ -20,6 +20,7 @@ case "$CMD" in
     RESUME=""; [ "$CMD" = "resume" ] && RESUME=1
     for s in $(seq 0 $((N-1))); do
       systemctl --user reset-failed seismic-qa-$s 2>/dev/null || true
+      systemctl --user stop seismic-qa-$s 2>/dev/null || true   # an ACTIVE unit makes systemd-run --unit abort under set -e; reset-failed only clears FAILED state
       systemd-run --user --unit=seismic-qa-$s \
         --setenv=NLI_DEVICE=cpu --setenv=MPLBACKEND=Agg --setenv=CUDA_VISIBLE_DEVICES= \
         --setenv=OMP_NUM_THREADS=2 --setenv=MKL_NUM_THREADS=2 \
@@ -68,7 +69,7 @@ PY
     # the full verified_qa.jsonl is untouched. Build its CSV with:  $0 csv Dataset/verified_qa.jsonl
     [ -s Dataset/verified_qa.jsonl ] || { echo "Dataset/verified_qa.jsonl empty -- run '$0 merge' first"; exit 1; }
     BALANCE_TARGET="${2:-}" "$PWD/.venv/bin/python" - <<'PY'
-import json, os
+import json, os, sys
 from collections import Counter
 CLASSES = ('fault', 'closure', 'salt', 'onlap')
 def otype(oid):
@@ -100,7 +101,10 @@ arg = os.environ.get('BALANCE_TARGET', '').strip()
 if arg.isdigit():
     target = int(arg)
 else:
-    v = sorted(before.values(), reverse=True); target = v[1] if len(v) > 1 else v[0]
+    v = sorted(before.values(), reverse=True)
+    if not v:                                    # no row mapped to any class -> nothing to balance
+        print('no object-class rows in Dataset/verified_qa.jsonl -- nothing to balance (kept as-is)'); sys.exit(0)
+    target = v[1] if len(v) > 1 else v[0]
 cur = Counter(before)
 for cls in sorted(CLASSES, key=lambda c: cur[c] - target, reverse=True):
     if cur[cls] <= target:

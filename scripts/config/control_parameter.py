@@ -189,6 +189,9 @@ class CategoricalParameter:
         self.kwargs["min_number_faults"] = min_number_faults
         self.kwargs["max_number_faults"] = max_number_faults
 
+        # None-guard: fail fast if any parameter was left unset before serialization.
+        self._check_value()
+
     def _check_value(self):
         all_none = {k for k,v in self.kwargs.items() if v is None}
         if all_none:
@@ -201,7 +204,7 @@ class CategoricalParameter:
         print out whole parameter for 1 sample
         :return: Dictionary
         """
-        return self.kwargs
+        return dict(self.kwargs)
 
     def boring(self):
         """
@@ -342,8 +345,8 @@ class SampleControl:
             intersection = {k: ratio_per_types[k] for k in common_keys}
             combine_types = types_ratio | intersection # combine types (result in the same types as types_ratio or replaced by ratio_per_types)
 
-            for rt in ratio_per_types:
-                min_ratio = ratio_per_types[rt] + min_ratio
+            for rt in intersection:
+                min_ratio += intersection[rt]
             left_ratio = max_ratio - min_ratio # can be 0 if all are ratio
 
             # ratio not exceeding max
@@ -369,7 +372,14 @@ class SampleControl:
         recipes_path = Path(recipes_path)
         build_configs_path = Path(build_configs_path)
 
-        run_number = len(list(recipes_path.iterdir()))
+        # Derive the next index from existing recipe_*.yaml files so a deleted
+        # recipe or a stray non-recipe file cannot cause an index collision.
+        existing_indices = []
+        for recipe_file in recipes_path.glob("recipe_*.yaml"):
+            suffix = recipe_file.stem[len("recipe_"):]
+            if suffix.isdigit():
+                existing_indices.append(int(suffix))
+        run_number = max(existing_indices, default=-1) + 1
 
         # Weighted-random category per sample. The old `int(population * ratio)` floored every
         # ratio to 0 for a small population (0.22*4 -> 0), so the ratios were ignored and the
@@ -392,7 +402,6 @@ class SampleControl:
         }
 
         recipe_name_path = recipes_path / f"{recipe_name}.yaml"
-        recipe_name_path.touch(exist_ok=True)
         sample_names = []
 
         logger.info(f"[Populating] from file {recipe_name} At {recipe_name_path}")
@@ -466,7 +475,8 @@ if __name__ == "__main__":
     temp_builds_path = yaml_helper.get_data('temp_builds_path') # store as tmp
 
     ## initialize values
-    cube_shape = yaml_helper.get_data('cube_shape')
+    # NOTE: cube_shape is not read from yaml here; it is set from the resolution
+    # preset (LOW/MEDIUM/HIGH) below.
     initial_layer_stdev = yaml_helper.get_data('initial_layer_stdev')
     incident_angles = yaml_helper.get_data('incident_angles')
     digi = yaml_helper.get_data('digi')
@@ -504,6 +514,8 @@ if __name__ == "__main__":
 
     categorical_parameter = CategoricalParameter(**low_level_controls)
 
+    # Resolution presets. Only LOW is currently wired up; MEDIUM and HIGH are
+    # kept as documented tiers but are intentionally unused for now.
     LOW = {
         "cube_shape": [100, 100, 500],
     }

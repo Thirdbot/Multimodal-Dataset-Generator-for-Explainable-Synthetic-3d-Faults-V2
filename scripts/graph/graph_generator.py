@@ -5,12 +5,10 @@ parameters.db, filters the extracted tables by sample category, and writes a
 properties graph for downstream evidence/RAG/dataset generation.
 """
 
-import time
 import threading
 from pathlib import Path
 import sys
 
-import yaml
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -25,7 +23,6 @@ PROPERTIES_GRAPH_DIR = ROOT / "graphs" / "properties_graph"
 # O(N^2) re-trace churn and stops a re-trace from racing the build's deletion.
 _TRACE_LOCK = threading.Lock()
 _TRACED = set()
-from scripts.common.yaml_helper import YAMLHelper
 from scripts.graph.low_level_tracer import ParameterDbTracer
 from scripts.graph.graph_system import GraphSystem
 
@@ -104,39 +101,6 @@ CATEGORY_FILTERS = {
 class BuildGraphGenerator:
     """Trace completed build folders listed in success.yaml."""
 
-    def __init__(self):
-        self.already_traced = set()
-        self.last_success_mtime = None
-
-    def trace_success_path(self, path):
-        """Read success.yaml and trace any newly completed build folders."""
-        path = Path(path)
-
-        if path.name != 'success.yaml':
-            return
-
-        if not path.exists():
-            return
-
-        current_mtime = path.stat().st_mtime
-        time.sleep(0.2)
-        with open(path, 'r') as f:
-            data = yaml.safe_load(f) or {}
-
-        self.last_success_mtime = current_mtime
-
-        for build_folder in data.get("success_build_obj", []):
-            build_folder = Path(build_folder)
-            if not build_folder.exists():
-                logger.warning(f"[TRACE SKIP] -> Missing folder: {build_folder}")
-                continue
-
-            if build_folder in self.already_traced:
-                continue
-
-            if self._trace_sample(build_folder):
-                self.already_traced.add(build_folder)
-
     def _category_from_sample_name(self,sample_name):
         for category in sorted(CATEGORY_FILTERS, key=len, reverse=True):
             if f"_{category}_" in sample_name or sample_name.startswith(f"{category}_"):
@@ -176,7 +140,6 @@ class BuildGraphGenerator:
             return False
 
 def trace_success_tracker(successfuL_list):
-    success_cache = []
     for success_tracker_path in successfuL_list:
         success_tracker_path = Path(success_tracker_path)
         if not success_tracker_path.exists():
@@ -188,8 +151,7 @@ def trace_success_tracker(successfuL_list):
             continue
 
         logger.info(f"[RUN ONCE] -> Success tracker: {success_tracker_path}")
-        if success_tracker_path not in set(success_cache):
-            BuildGraphGenerator()._trace_sample(success_tracker_path)
-            success_cache.append(success_tracker_path)
-        else:
-            continue
+        # Dedup lives in _trace_sample via the module-level _TRACED set (plus an
+        # on-disk graph check), so a per-call cache here was redundant and rebuilt
+        # a set every iteration (O(n^2)).
+        BuildGraphGenerator()._trace_sample(success_tracker_path)

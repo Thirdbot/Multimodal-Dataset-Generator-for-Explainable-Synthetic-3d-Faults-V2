@@ -137,8 +137,11 @@ overlap(){
 }
 
 finalize(){
-  log "balance + CSV over $N_SHARDS shards"
-  N_SHARDS="$N_SHARDS" bash scripts/qa_shards.sh balance        # merges shard_0..N-1 -> Dataset/verified_qa.jsonl (balanced)
+  log "merge + balance + CSV over $N_SHARDS shards"
+  # NOTE: merge pulls in EVERY Dataset/verified_qa_shard_*.jsonl on disk; if a prior run used a
+  # larger N_SHARDS, its extra shard files are stale and would leak in -- clean.sh qa first.
+  N_SHARDS="$N_SHARDS" bash scripts/qa_shards.sh merge          # shard_0..N-1 -> Dataset/verified_qa.jsonl (deduped by row_id)
+  N_SHARDS="$N_SHARDS" bash scripts/qa_shards.sh balance        # down-samples over-represented class IN-PLACE (does NOT merge)
   bash scripts/qa_shards.sh csv Dataset/verified_qa.jsonl       # -> Dataset/multimodal_multi_image_dataset.csv
   log "final CSV built. stats:"
   .venv/bin/python scripts/dataset_stats.py 2>/dev/null | head -24

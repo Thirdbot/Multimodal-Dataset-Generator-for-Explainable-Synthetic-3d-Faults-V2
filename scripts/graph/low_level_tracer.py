@@ -40,14 +40,21 @@ class ParameterDbTracer(object):
         return self.properties_data
 
     def _get_data_in_table(self,table):
-        """Fetch all rows for each SQLite table name provided."""
+        """Fetch all rows for each SQLite table name provided.
+
+        The connection is closed on every exit path (including a failing
+        SELECT) so the handle can't leak; this object is single-use, opening
+        the connection in __init__ and not reusing it after extraction.
+        """
         data = {}
-        for table_name in table:
-            row = self.conn.execute(
-                f"SELECT * FROM {table_name}"
-            ).fetchall()
-            data[table_name] = [dict(row) for row in row]
-        self.conn.close()
+        try:
+            for table_name in table:
+                rows = self.conn.execute(
+                    f"SELECT * FROM {table_name}"
+                ).fetchall()
+                data[table_name] = [dict(row) for row in rows]
+        finally:
+            self.conn.close()
         return data
 
     @staticmethod

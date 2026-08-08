@@ -116,7 +116,7 @@ def main():
             continue
         # Each <SEG> the answer emits must have a target mask/region. Surface mismatches so we
         # can tell whether the LM segmented objects it wasn't grounded on (post-regen check).
-        seg_n = row["answer"].count("<SEG>")
+        seg_n = str(item.get("answer", "")).count("<SEG>")
         if seg_n and seg_n != len(row["regions"]):
             print(f"[SEG MISMATCH] {row.get('sample_id')}: {seg_n} <SEG> in answer vs {len(row['regions'])} regions")
         rows.append(row)
@@ -194,102 +194,6 @@ def _assemble_evidence(region_texts):
         return ""
     body = "".join(f"<region>\n{t}\n<SEG>\n</region>\n" for t in region_texts)
     return f"<evidence>\n{body}</evidence>"
-
-
-def _object_class(object_id, scene_object):
-    return scene_object.get("object_type") or (
-        str(object_id).split("_")[0] if "_" in str(object_id) else ""
-    )
-
-
-def _bbox_list(scene_object):
-    bbox = scene_object.get("bbox") or {}
-    coords = [bbox.get("x_min"), bbox.get("y_min"), bbox.get("x_max"), bbox.get("y_max")]
-    return coords if all(c is not None for c in coords) else None
-
-
-def _bbox_str(bbox):
-    return "[" + ",".join(str(c) for c in bbox) + "]"
-
-
-def _fmt_num(value):
-    if isinstance(value, float) and value.is_integer():
-        return str(int(value))
-    return str(value)
-
-
-_TAGGED_VALUE_RE = re.compile(r"<(nums|center|bbox)>(.*?)</\1>")
-
-# A clean right boundary for a wrapped value: whitespace, string end, or trailing punctuation
-# (never '<', which would mean the value is already followed by a closing tag).
-_WRAP_TRAIL = set(" \t\n\r.,;:)]}?!")
-
-
-def _wrap_first(text, value, tag):
-    # Wrap the FIRST *clean standalone* occurrence of `value` in <tag>...</tag>. Clean = the char
-    # just BEFORE it is whitespace or the string start, and the char AFTER is whitespace / end /
-    # trailing punctuation. This is what prevents double-nesting: when the LLM already emitted the
-    # tag (e.g. "<nums>80.5</nums>"), the char before the value is the tag's '>' -- not whitespace
-    # -- so we skip it and substitute nothing rather than wrapping again. The whitespace-before
-    # rule also stops a scalar from being wrapped inside a coordinate list (preceded by '[' or ',').
-    open_t, close_t = f"<{tag}>", f"</{tag}>"
-    search, n = 0, len(text)
-    while True:
-        pos = text.find(value, search)
-        if pos == -1:
-            return text
-        end = pos + len(value)
-        before_ok = pos == 0 or text[pos - 1].isspace()
-        after_ok = end == n or text[end] in _WRAP_TRAIL
-        if before_ok and after_ok:
-            return text[:pos] + open_t + value + close_t + text[end:]
-        search = end
-
-
-def tag_answer(answer, evidences, scene_objects):
-    # Deterministically wrap the plain-text answer with grounding tags, sourced from the
-    # grounded facts (the model emits none). EVERY value the evidence carries inside a tag is
-    # wrapped where it appears in the answer, with the SAME tag: scalars -> <nums>, 2-lists ->
-    # <center>, 4-lists -> <bbox>. Object names -> plain <object>. Returns the tagged answer.
-    answer = str(answer or "")
-
-    named = {}            # display name -> (object_id, class, bbox_list, bbox_str)
-    scalars, centers, boxes = set(), set(), set()
-    for evidence in evidences:
-        text = evidence.get("text", "")
-        object_id = evidence.get("object_id", "")
-        match = _OBJECT_TAG_RE.search(text)
-        name = match.group(1) if match else ""
-        scene_object = scene_objects.get(object_id) or {}
-        bbox = _bbox_list(scene_object)
-        if name and bbox and is_object_id(object_id):
-            named.setdefault(name, (object_id, _object_class(object_id, scene_object), bbox, _bbox_str(bbox)))
-        for tag, value in _TAGGED_VALUE_RE.findall(text):
-            (scalars if tag == "nums" else centers if tag == "center" else boxes).add(value)
-
-    # A named object's scene box is also wrappable: if the answer states those coords inline
-    # (even when the extent fact itself wasn't grounded), wrap them in place so the object is
-    # not both wrapped inline AND given a duplicate anchor below.
-    boxes |= {meta[3] for meta in named.values()}
-
-    tagged = answer
-    # Every value/name is wrapped via _wrap_first, which only wraps a clean standalone occurrence
-    # -- so a tag the LLM already wrote is left alone (substituted, not double-nested), and a
-    # scalar inside a [..] list is never wrapped (its neighbour is ',' or '[', not whitespace).
-    # Longest-first within each group avoids a short value grabbing part of a longer one.
-    for value in sorted(scalars, key=len, reverse=True):
-        tagged = _wrap_first(tagged, value, "nums")
-    for value in sorted(centers, key=len, reverse=True):
-        tagged = _wrap_first(tagged, value, "center")
-    for value in sorted(boxes, key=len, reverse=True):
-        tagged = _wrap_first(tagged, value, "bbox")
-
-    # Objects: plain <object> marker only. No synthetic <bbox> is attached -- a box is tagged
-    # solely where the answer itself states those coords.
-    for name in sorted(named, key=lambda n: answer.find(n) if n in answer else len(answer)):
-        tagged = _wrap_first(tagged, name, "object")
-
-    return tagged
 
 
 def build_row(item):
@@ -513,7 +417,8 @@ def load_scene(sample_dir, view):
         return "", {}
     try:
         data = json.loads(scene_path.read_text())
-    except (OSError, json.JSONDecodeError):
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"[SCENE READ FAILED] {scene_path}: {exc}")
         return "", {}
 
     view_block = (data.get("views") or {}).get(view)
@@ -537,9 +442,18 @@ def _scene_file(sample_dir, rel_path):
 
 
 def read_jsonl(path):
+    # Stream one line at a time (main iterates this exactly once), so a large
+    # verified_qa.jsonl is never fully materialized in memory.
     if not path.exists():
         raise FileNotFoundError(path)
-    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+
+    def _rows():
+        with open(path) as handle:
+            for line in handle:
+                if line.strip():
+                    yield json.loads(line)
+
+    return _rows()
 
 
 def compact_evidences(evidence):

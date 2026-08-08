@@ -144,7 +144,7 @@ class GraphSystem:
 
     def _add_by_filter(self,sample_node,data,category_filter):
         """Add category, object-system, and realized-object nodes from tables."""
-        tables = category_filter.get("tables")
+        tables = category_filter.get("tables") or ()   # unknown category has no tables -> no-op, don't crash on `for table in None`
         model_properties = self._pick(data.get("model_parameters",[{}])[0], category_filter.get("model_keys"))
         visible_fault_indexes = self._visible_fault_indexes(model_properties)
         fault_index_map = self._fault_index_map(visible_fault_indexes)
@@ -255,7 +255,9 @@ class GraphSystem:
 
     @staticmethod
     def _pick(source, keys):
-        return {key: source.get(key) for key in keys if key in source}
+        # keys is None for an unknown category (empty CATEGORY_FILTERS entry);
+        # `keys or ()` yields an empty pick instead of raising TypeError.
+        return {key: source.get(key) for key in (keys or ()) if key in source}
 
 
 # if __name__ == "__main__":

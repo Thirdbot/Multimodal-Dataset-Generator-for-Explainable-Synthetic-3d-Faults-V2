@@ -2,6 +2,8 @@ import csv
 import json
 from pathlib import Path
 
+csv.field_size_limit(10 ** 7)  # regions/evidence fields can exceed the default CSV limit
+
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CSV = ROOT / "Dataset" / "multimodal_multi_image_dataset.csv"

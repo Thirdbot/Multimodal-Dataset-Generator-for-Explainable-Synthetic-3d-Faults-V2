@@ -253,7 +253,10 @@ class GraphImageExtractor:
             try:
                 return int(float(value))
             except (TypeError, ValueError):
-                return 0
+                # Don't silently swallow a malformed number_faults to 0 -- that disables the
+                # missing-fault warning. Surface it and fall through to the node-count fallback.
+                print(f"[BAD number_faults] {value!r}; falling back to fault node count")
+                break
         return len([node for node in self._get_object_nodes() if node.get("id", "").startswith("fault_")])
 
     @staticmethod
@@ -323,11 +326,6 @@ class GraphImageExtractor:
         # added beside it when graph/object masks can separate them reliably.
         slices = self._global_slices(base_array, property_array, object_type)
 
-        if object_type == "closure":
-            individual = self._closure_individual_slices(base_array, property_array, source_path, object_properties)
-            slices.update(individual)
-            return slices
-
         if object_type == "fault":
             individual = self._direct_fault_slices(base_array, property_array, source_path)
             if individual:
@@ -349,12 +347,6 @@ class GraphImageExtractor:
             return slices
 
         return slices
-
-    def _object_slicing(self,basic_obj,prop_obj):
-        # Slice 3D object arrays and create 2D object crops/masks
-        basic_array = self._prepare_3d_array(self._as_array(basic_obj))
-        prop_array = self._prepare_3d_array(self._as_array(prop_obj))
-        return list(self._global_slices(basic_array, prop_array, "object").values())
 
     def _global_slices(self,basic_array,prop_array,object_type):
         # One mask for the whole generated entity class.
@@ -429,7 +421,6 @@ class GraphImageExtractor:
         if not closure_mask.any():
             return {}
 
-        selected = {}
         closure_objects = [
             obj for obj in object_properties
             if obj.get("id", "").startswith("closure_")
@@ -438,9 +429,23 @@ class GraphImageExtractor:
         closure_objects = sorted(closure_objects, key=lambda item: self._object_index(item.get("id")) or 0)
         component_masks = self._connected_component_masks(closure_mask)
 
-        for index, component_mask in enumerate(component_masks):
-            object_id = closure_objects[index]["id"] if index < len(closure_objects) else f"closure_{index}"
-            selected[object_id] = self._slice_by_mask(base_array, component_mask)
+        # Match each DB closure to a mask component with the same greedy scheme the fault
+        # path uses (voxel-count + centroid distance via _best_mask_for_object) instead of
+        # blindly pairing sorted-id order against raster-scan component order, which attached
+        # a closure's DB attributes to an unrelated mask.
+        # TODO: closure nodes currently carry no DB position/voxel fields (only fluid +
+        # intersects_*), so with today's graphs this match degrades to deterministic component
+        # order; it becomes spatially correct once closure nodes gain x0/y0/z0 or n_voxels the
+        # way fault nodes already do.
+        selected = {}
+        used = set()
+        for closure in closure_objects:
+            expected_count = self._expected_voxel_count(closure.get("id"), "closure", object_properties)
+            best_index, best_mask = self._best_mask_for_object(component_masks, closure, expected_count, used)
+            if best_mask is None:
+                continue
+            used.add(best_index)
+            selected[closure["id"]] = self._slice_by_mask(base_array, best_mask)
         return selected
 
     @staticmethod
@@ -465,6 +470,13 @@ class GraphImageExtractor:
         common_shape = tuple(min(a, b) for a, b in zip(basic_array.shape, mask.shape))
         basic_array = basic_array[:common_shape[0], :common_shape[1], :common_shape[2]]
         mask = mask[:common_shape[0], :common_shape[1], :common_shape[2]]
+
+        # Clipping to the shared shape can empty an otherwise non-empty mask (all its voxels
+        # lay outside the overlap). Without this guard argmax() would pick index 0 and emit a
+        # misleading blank slice. Return {} -- the skip sentinel that _slice_mask_area /
+        # _select_average_mask_slices already treat as zero-area and drop.
+        if not mask.any():
+            return {}
 
         inline_index = int(mask.sum(axis=(1, 2)).argmax())
         crossline_index = int(mask.sum(axis=(0, 2)).argmax())
@@ -592,22 +604,6 @@ class GraphImageExtractor:
 
         return best_index, best_mask
 
-    def _bbox_mask(self,mask,graph_object):
-        # Restrict closure masks to the DB bounding box before component search.
-        x_min = self._axis_value(graph_object, "x_min", 0)
-        x_max = self._axis_value(graph_object, "x_max", mask.shape[0] - 1)
-        y_min = self._axis_value(graph_object, "y_min", 0)
-        y_max = self._axis_value(graph_object, "y_max", mask.shape[1] - 1)
-        z_min = self._axis_value(graph_object, "z_min", 0)
-        z_max = self._axis_value(graph_object, "z_max", mask.shape[2] - 1)
-
-        bounded = np.zeros_like(mask, dtype=bool)
-        x0, x1 = self._clip_range(x_min, x_max, mask.shape[0])
-        y0, y1 = self._clip_range(y_min, y_max, mask.shape[1])
-        z0, z1 = self._clip_range(z_min, z_max, mask.shape[2])
-        bounded[x0:x1, y0:y1, z0:z1] = mask[x0:x1, y0:y1, z0:z1]
-        return bounded
-
     def _object_center_index(self,graph_object,shape):
         if all(key in graph_object for key in ("x_min", "x_max", "y_min", "y_max", "z_min", "z_max")):
             return np.array([
@@ -623,13 +619,6 @@ class GraphImageExtractor:
             ))
 
         return None
-
-    @staticmethod
-    def _axis_value(graph_object,key,default):
-        value = graph_object.get(key, default)
-        if value is None:
-            return default
-        return value
 
     @staticmethod
     def _clip_range(low,high,size):
@@ -908,51 +897,20 @@ class GraphImageExtractor:
     def _safe_filename(value):
         return re.sub(r"[^0-9A-Za-z_.-]", "_", str(value))
 
-    def _map_coordinate_to_mask(self,prop_mask,coordinate,search_radius=20):
-        # Map graph coordinate -> voxel seed -> nearest mask voxel -> connected mask component.
-        seed_index = self._coordinate_to_index(coordinate, prop_mask.shape)
-        seed_index = self._nearest_mask_index(prop_mask, seed_index, search_radius)
-        if seed_index is None:
-            return np.zeros_like(prop_mask, dtype=bool)
-
-        labels, _ = ndimage.label(prop_mask)
-        component_label = int(labels[seed_index])
-        if component_label == 0:
-            return np.zeros_like(prop_mask, dtype=bool)
-        return labels == component_label
-
     @staticmethod
     def _coordinate_to_index(coordinate,shape):
         x = float(coordinate["x"])
         y = float(coordinate["y"])
         z = float(coordinate["z"])
+        # x/y are model-centre-relative inline/crossline offsets, so they are shifted by half
+        # the axis length. z is an absolute depth/time sample measured from the top of the cube
+        # (0..depth, projected as the vertical axis in graph_system), NOT a centred coordinate,
+        # so it is used directly by magnitude with no +shape/2 shift -- intentional, not a bug.
         return (
             int(np.clip(round(x + shape[0] / 2), 0, shape[0] - 1)),
             int(np.clip(round(y + shape[1] / 2), 0, shape[1] - 1)),
             int(np.clip(round(abs(z)), 0, shape[2] - 1)),
         )
-
-    @staticmethod
-    def _nearest_mask_index(mask,seed_index,search_radius):
-        if mask[seed_index]:
-            return seed_index
-
-        i, j, k = seed_index
-        i0 = max(i - search_radius, 0)
-        i1 = min(i + search_radius + 1, mask.shape[0])
-        j0 = max(j - search_radius, 0)
-        j1 = min(j + search_radius + 1, mask.shape[1])
-        k0 = max(k - search_radius, 0)
-        k1 = min(k + search_radius + 1, mask.shape[2])
-
-        window = mask[i0:i1, j0:j1, k0:k1]
-        hits = np.argwhere(window)
-        if hits.size == 0:
-            return None
-
-        local_seed = np.array([i - i0, j - j0, k - k0])
-        nearest = hits[np.linalg.norm(hits - local_seed, axis=1).argmin()]
-        return tuple((nearest + np.array([i0, j0, k0])).astype(int))
 
     @staticmethod
     def _as_array(obj):
@@ -967,8 +925,12 @@ class GraphImageExtractor:
 
     @staticmethod
     def _load_sample_object(sample_path):
-        data = xarray.open_dataset(sample_path,engine='zarr')
-        return data
+        # Load eagerly inside the context manager so the underlying Zarr store handle is
+        # released immediately. The old code returned an open handle that was never closed,
+        # leaking handles across thousands of samples. .load() pulls the arrays into memory,
+        # so callers (via _as_array) still read .values after the store is closed.
+        with xarray.open_dataset(sample_path, engine='zarr') as data:
+            return data.load()
 
 def generate_images_for_graph(graph_path, samples_path=None):
     root = Path(__file__).resolve().parents[2]

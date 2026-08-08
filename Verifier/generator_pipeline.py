@@ -7,7 +7,7 @@ import hashlib
 from collections import Counter
 from pathlib import Path
 
-from longtracer import LongTracer, check, check_batch
+from longtracer import LongTracer, check_batch
 from langchain_core.documents import Document
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -98,11 +98,16 @@ class RagWorkflow(object):
         for graph_path in self.graph_paths(max_graphs=max_graphs, views=graph_views):
             if graph_path.as_posix() in done:
                 continue
-            self.rows.extend(self.generate_for_graph(
-                graph_path,
-                questions_per_graph=questions_per_graph,
-                candidates_per_question=candidates_per_question,
-            ))
+            try:
+                self.rows.extend(self.generate_for_graph(
+                    graph_path,
+                    questions_per_graph=questions_per_graph,
+                    candidates_per_question=candidates_per_question,
+                ))
+            except Exception as error:
+                # one bad graph must not kill the whole run -- log and move on
+                print(f"[GRAPH ERROR] {graph_path}: {error}")
+                continue
         return self.rows
 
     def generate_for_graph(self, graph_path, questions_per_graph=QUESTION_PER_GRAPH, candidates_per_question=CANDIDATE_PER_QUESTION):
@@ -127,11 +132,15 @@ class RagWorkflow(object):
         attempts = 0
         while number_of_passes_questions < questions_per_graph and attempts < MAX_ATTEMPT: # retry batches regenerations
             attempts += 1
-            try:
-                evidences_docs = next(evidence_seeds)
-            except StopIteration:
+            evidences_docs = next(evidence_seeds, None)
+            if evidences_docs is None:
+                # generator exhausted -> re-create it for a fresh shuffle. If it is STILL
+                # empty (a graph that yields no seeds at all), stop instead of raising
+                # StopIteration, which would otherwise abort the whole run.
                 evidence_seeds = self.evidence_seeds(all_docs)
-                evidences_docs = next(evidence_seeds)
+                evidences_docs = next(evidence_seeds, None)
+                if evidences_docs is None:
+                    break
             seed_text = self.rag.format_docs(evidences_docs)
             question_items = self.generate_question(seed_text, min(3,questions_per_graph - number_of_passes_questions)) # try 3 first, then try left
             if not question_items or question_items == []:
@@ -211,8 +220,8 @@ class RagWorkflow(object):
                 }
                 if self.append_row(row):
                     rows.append(row)
-                tally["passed"] += 1
-                number_of_passes_questions += 1
+                    tally["passed"] += 1
+                    number_of_passes_questions += 1
         print(f"[TALLY] {sample_id} {view}: attempts={attempts}/{MAX_ATTEMPT} "
               f"passed={tally['passed']} q_reject={tally['q_reject']} "
               f"a_reject={tally['a_reject']} row_skip={tally['row_skip']}")
@@ -418,12 +427,6 @@ class RagWorkflow(object):
         paths = sorted(set(paths))
         return paths[:max_graphs] if max_graphs else paths
 
-    def write_rows(self, rows):
-        self.output_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.output_path, "w") as file:
-            for row in rows:
-                file.write(json.dumps(row, default=str) + "\n")
-
     def start_output(self, truncate=False):
         self.output_path.parent.mkdir(parents=True, exist_ok=True)
         if truncate:
@@ -522,69 +525,11 @@ def docs_to_text(docs):
     return "\n".join(doc.page_content for doc in docs)
 
 
-def shared_docs(question_docs, answer_docs):
-    question_keys = {evidence_key(doc) for doc in question_docs}
-    return [
-        doc for doc in answer_docs
-        if evidence_key(doc) in question_keys
-    ]
-
-
-def shared_or_fallback_docs(question_docs, answer_docs):
-    # Prefer the intersection (docs that are both question-relevant and
-    # answer-supporting). When it is empty, fall back to the union so the row
-    # keeps evidence instead of being dropped; downstream trust/verification
-    # filters still discard docs that do not entail the answer.
-    shared = shared_docs(question_docs, answer_docs)
-    if shared:
-        return shared
-    return [*question_docs, *answer_docs]
-
-
 def filter_docs_by_retrieval_score(docs, min_score):
     return [
         doc for doc in docs
         if float(doc.metadata.get("_similarity_score", 0.0)) >= min_score
     ]
-
-
-def filter_docs_by_trust(answer, docs, min_trust=0.7):
-    # One entailment check per doc (kept per-doc so we know which docs support the
-    # answer), but run as a thread-pool batch instead of a serial CPU-NLI loop --
-    # this is the hottest verification path once fan-out is reduced.
-    if not docs:
-        return []
-    results = check_batch(
-        [{"response": answer, "sources": [doc.page_content]} for doc in docs],
-        max_workers=min(4, len(docs)),
-    )
-    kept = []
-    for doc, result in zip(docs, results):
-        trust_score = float(getattr(result, "trust_score", 0.0) or 0.0)
-        if getattr(result, "verdict", "") == "PASS" and trust_score >= min_trust:
-            doc.metadata['trust_score'] = trust_score
-            kept.append(doc)
-    return kept
-
-
-def ground_per_fact(retrieval_query, answer, docs, min_trust=0.7):
-    # A compound answer (e.g. throw AND dip) makes several claims, and each needs its
-    # OWN supporting doc. filter_docs_by_trust checks a doc against the WHOLE answer, so
-    # a single-fact doc only partially matches a multi-fact answer and hovers at the
-    # threshold -> some facts silently lose their evidence (and its object_id, so they
-    # also lose the mask). The RETRIEVAL_QUERY already lists one fact per line (the same
-    # split retrieve_many uses), so trust-check each fact and union the docs that support
-    # it -- every fact keeps its grounding. Falls back to the whole answer if the query
-    # is a single line, so single-fact answers behave exactly as before.
-    facts = [line.strip() for line in str(retrieval_query).splitlines() if line.strip()] or [answer]
-    kept, seen = [], set()
-    for fact in facts:
-        for doc in filter_docs_by_trust(fact, docs, min_trust=min_trust):
-            key = doc.page_content
-            if key not in seen:
-                seen.add(key)
-                kept.append(doc)
-    return kept
 
 
 _NLI_TAG_RE = re.compile(r"</?(?:object|nums|center|bbox|SEG)>")
@@ -631,6 +576,8 @@ def cover_answer(answer, retrieval_query, object_docs, min_trust=0.7, require_al
         return None
 
     claims = [line.strip() for line in str(retrieval_query).splitlines() if line.strip()] or [str(answer)]
+    claims = list(dict.fromkeys(claims))  # distinct, order-preserving: `best` is keyed by claim, so
+    # duplicate query lines would otherwise inflate len(claims) past len(best) and false-reject below
     pairs, items = [], []
     for claim in claims:
         for doc, fact in pool:
@@ -700,27 +647,6 @@ def cover_answer(answer, retrieval_query, object_docs, min_trust=0.7, require_al
     if not evidence:
         return None
     return {"docs": evidence, "score": sum(scores) / len(scores)}
-
-
-def _match_fact_in_doc(fact_line, doc):
-    # Pick which fact of the object the covered answer-fact refers to, so evidence + mask
-    # route to the right (object_id, edge, target). Score each fact's SENTENCE against the
-    # answer line by shared numbers first (values like 80.5 or [23,133.5]), then shared
-    # words -- robust for dict-valued position/bbox facts and for value-free facts (fluid,
-    # intersects) that the raw target string can't match.
-    facts = doc.metadata.get("facts") or []
-    if not facts:
-        return None
-    line_nums = set(re.findall(r"\d+\.?\d*", str(fact_line)))
-    line_words = set(re.findall(r"[a-z]+", str(fact_line).lower()))
-    best, best_score = facts[0], (-1, -1)
-    for fact in facts:
-        text = str(fact.get("text") or "")
-        score = (len(line_nums & set(re.findall(r"\d+\.?\d*", text))),
-                 len(line_words & set(re.findall(r"[a-z]+", text.lower()))))
-        if score > best_score:
-            best_score, best = score, fact
-    return best
 
 
 _COORD_GROUP_RE = re.compile(r"[\[\(]\s*(-?\d+(?:\.\d+)?(?:\s*,\s*-?\d+(?:\.\d+)?)+)\s*[\]\)]")
@@ -817,14 +743,6 @@ def attr_edges_required(answer):
 # question's grounded edges to the answer's grounded edges (the edge gate), which replaced the
 # old keyword-facet proxy. Mechanical, not a correctness check (that's the model's job).
 # Question GENERATION still spreads across QUESTION_FACETS for variety -- separate, untouched.
-
-
-def verify_answer(answer, evidence_text):
-    result = check(answer, [evidence_text])
-    return {
-        "verdict": getattr(result, "verdict", ""),
-        "score": min(1.0, max(0.0, float(getattr(result, "trust_score", 0.0) or 0.0))),
-    }
 
 
 def sample_id_from_graph(graph_path):

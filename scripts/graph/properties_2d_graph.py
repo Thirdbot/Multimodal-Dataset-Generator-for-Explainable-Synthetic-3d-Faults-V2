@@ -60,7 +60,9 @@ def main(sample_ids=None):
             output_path = OUTPUT_DIR / f"{graph_path.stem}_{view}_properties_2d_graph.json"
             output_path.write_text(json.dumps(copied_graph, indent=2, default=str))
             written.append(output_path)
-            samples.append(sample_id)
+        # One sample id per graph, not per view: the old per-view append double-listed every
+        # id (once per VIEWS entry). No caller uses the returned length, so dedup is safe.
+        samples.append(sample_id)
 
     print(f"wrote {len(written)} 2d graph files to {OUTPUT_DIR}")
     return samples
@@ -237,10 +239,14 @@ def _copy_graph_with_2d_positions(graph, positions, view):
 
 
 def _category_id(graph):
+    # The category/hub node id ends in " structure" (e.g. "fault_complex structure"), the
+    # convention create_rag.py uses to find it (re.search(r" structure$", ...)). The old code
+    # returned on the very first node and only ever yielded a bare prefix, never the real
+    # category node -- so the HAS_VISUAL_OBJECT edges below dangled from a non-existent id.
     for node in graph.get("nodes", []):
-        node_id = node.get("id", "")
-        node_id = str(node_id).split("_")[0]
-        return node_id
+        node_id = str(node.get("id", ""))
+        if re.search(r" structure$", node_id):
+            return node_id
     return ""
 
 

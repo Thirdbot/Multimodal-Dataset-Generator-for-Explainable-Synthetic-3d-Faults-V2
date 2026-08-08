@@ -32,7 +32,8 @@ def regime_of(sample_id):
 def regions_of(row):
     try:
         return json.loads(row["regions"]) or []
-    except Exception:
+    except (KeyError, TypeError, json.JSONDecodeError) as exc:
+        print(f"[BAD REGIONS] {row.get('sample_id', '?')}: {exc}")
         return []
 
 
@@ -77,8 +78,10 @@ def main():
     scenes = {r["sample_id"] for r in rows}
     imgs = set()
     for r in rows:
-        try: imgs.update(json.loads(r["images"]))
-        except Exception: pass
+        try:
+            imgs.update(json.loads(r["images"]))
+        except (KeyError, TypeError, json.JSONDecodeError) as exc:
+            print(f"[BAD IMAGES] {r.get('sample_id', '?')}: {exc}")
     views = {(r["sample_id"], reg.get("view")) for r in rows for reg in regions_of(r)}
     print(f"[TOTAL] distinct scenes (sample_id) = {len(scenes)}")
     print(f"[TOTAL] distinct images (unique image paths) = {len(imgs)}")
@@ -102,13 +105,14 @@ def main():
             ot = reg.get("object_type")
             if str(reg.get("object_name", "")).lower() == "the section":
                 section_regions += 1
+                continue                              # section region is not a segmentation target
             region_class[ot] += 1
             class_id_map.setdefault(ot, reg.get("class_id"))
     tot_reg = sum(region_class.values())
     for ot, c in region_class.most_common():
         print(f"   {str(ot):10} (class_id={class_id_map.get(ot)}) {c:5}  ({pct(c, tot_reg)})")
-    print(f"   [section-level regions among the above: {section_regions}]")
-    print(f"   [total regions/masks: {tot_reg}]")
+    print(f"   [section-level regions (excluded above): {section_regions}]")
+    print(f"   [total regions/masks: {tot_reg + section_regions}]")
 
     print("\n[ROWS per question type]  (regex heuristic; see q_type())")
     for t, c in Counter(q_type(r["question"]) for r in rows).most_common():
@@ -125,12 +129,18 @@ def main():
     print("\n[ROWS per scene]")
     rps = Counter(r["sample_id"] for r in rows)
     vals = list(rps.values())
-    print(f"   min={min(vals)} median={statistics.median(vals):.1f} mean={statistics.mean(vals):.2f} max={max(vals)}")
+    if not vals:
+        print("   (no rows)")
+    else:
+        print(f"   min={min(vals)} median={statistics.median(vals):.1f} mean={statistics.mean(vals):.2f} max={max(vals)}")
 
     print("\n[ANSWER length]  (words, tags stripped)")
     lens = [len(re.sub(r"</?answer>", "", r["answer"]).split()) for r in rows]
     lens.sort()
-    print(f"   min={lens[0]} p25={lens[n//4]} median={statistics.median(lens):.0f} p75={lens[3*n//4]} max={lens[-1]} mean={statistics.mean(lens):.1f}")
+    if n == 0:
+        print("   (no rows)")
+    else:
+        print(f"   min={lens[0]} p25={lens[n//4]} median={statistics.median(lens):.0f} p75={lens[3*n//4]} max={lens[-1]} mean={statistics.mean(lens):.1f}")
 
     print("\n[MEASURE/DERIVE value coverage]  (rows whose regions carry each value type)")
     measure_keys, derive_keys = Counter(), Counter()
