@@ -263,6 +263,14 @@ Failures measured on this pipeline that led to a measured change *(all measured 
 
 **Measured-but-unfixed limitation:** the multi-object comparison example in §8 shows an answer that **copied the prompt's few-shot values (65/45) instead of the evidence values (throw 219.77, dip 81.2)** and passed verification, because the corpus was generated **before** the NLI label fix and entailment gate. The rate of such prompt-echo / value-mismatch answers in the shipped corpus is **`UNKNOWN — not systematically measured`** (one confirmed instance).
 
+**Throughput & scaling (measured 2026-08-08, bulk-run work — affects wall-clock only, not corpus *content*):**
+
+| failure | before | after | fix |
+|---|---|---|---|
+| build fans out only ~1-wide at high `BUILD_CONCURRENCY` | `watchfiles.awatch` silently drops `Change.added` events under load, so queued configs / finished builds / graphs are never picked up (measured: 125 configs queued but 1 `sample_generator` running; ~0.8–2 scenes/min, stalled behind phantom backlog) | build fans out to the set concurrency; self-healing | periodic `_reconcile_loop` re-scans + re-fires config→build, build→trace, graph→image every 45 s — a no-op at low concurrency (committed `7eaaebe`) |
+
+Per-scene CPU cost is dominated by **trace (~2–2.5 min/scene)**, far above build (~1.6 min) and image (~0.7 min); the post-build stages ran **GIL-threaded** (`asyncio.to_thread`) so they serialized regardless of the concurrency knob until run as subprocesses. QA is **CPU-bound, not GPU-bound** — on an A100-80GB the GPU held ~32% with 12 workers because build and QA workers contend for the ~17-core host, so a bigger GPU does not help (more CPU cores do). Fully-QA'd throughput on ~17 cores ≈ **1000 scenes in ~6–7 h, 2000 in ~8–11 h**; QA yields ~3.5–4 rows/scene.
+
 ---
 
 ## 15. Not yet done
