@@ -428,6 +428,48 @@ async def dataset_worker(queue):
         if stop:
             break
 
+async def _reconcile_loop():
+    # SELF-HEALING SAFETY NET. watchfiles.awatch can silently MISS filesystem events under heavy
+    # build load, and each stage reacts only to live events: builds_config_watcher builds a config
+    # only on Change.added (its startup loop merely *skips* existing unbuilt ones), builds_watcher
+    # traces only on a success.yaml event, graph_properties_watcher images only on a new-graph event.
+    # A dropped event therefore strands finished work -- at high BUILD_CONCURRENCY this leaves the
+    # pipeline building ~1-wide or stalled behind phantom backlog. This loop periodically re-scans
+    # every stage and re-fires whatever is not done yet. It is a no-op at low concurrency (nothing is
+    # missed there) and idempotent (each stage skips already-done work; the in-flight set avoids
+    # dispatching the same item twice), so it is safe to always run.
+    await asyncio.sleep(30)                              # let the watchers' startup catch-up go first
+    inflight = set()
+    def _done(key):
+        return lambda _t: inflight.discard(key)
+    while True:
+        try:
+            for cfg in build_configs_path.glob("*.json"):            # configs whose build never fired
+                rid = cfg.stem
+                if _config_already_built(rid) or rid in inflight:
+                    continue
+                inflight.add(rid)
+                asyncio.create_task(_run_build(cfg, rid)).add_done_callback(_done(rid))
+            for folder in build_path.glob("seismic__*"):             # finished builds never traced
+                if not (folder / "parameters.db").exists():
+                    continue
+                if (properties_graph_path / f"{folder.name}_db_extract_properties_graph.json").exists():
+                    continue
+                if folder.name in inflight:
+                    continue
+                inflight.add(folder.name)
+                asyncio.create_task(_run_trace([folder])).add_done_callback(_done(folder.name))
+            for g in properties_graph_path.glob("*_db_extract_properties_graph.json"):  # graphs never imaged
+                sid = _sample_id_from_graph(g)
+                if _sample_fully_processed(g, sid) or sid in inflight:
+                    continue
+                inflight.add(sid)
+                asyncio.create_task(_run_image_gen(g)).add_done_callback(_done(sid))
+        except Exception as exc:                          # never let the safety net die
+            print(f"[RECONCILE] {exc}")
+        await asyncio.sleep(int(os.environ.get("RECONCILE_INTERVAL", "45")))
+
+
 # concurrent
 async def gather():
     for p in (recipes_path, build_configs_path, build_path, properties_graph_path, images_path, properties_2d_graph_path):
@@ -448,6 +490,7 @@ async def gather():
         builds_config_watcher(),
         builds_watcher(),
         graph_properties_watcher(),
+        _reconcile_loop(),                               # re-fires anything awatch dropped (self-healing)
     ]
     if os.environ.get("SKIP_QA", "").strip() not in ("1", "true", "yes"):
         stages += [dataset_gen_pipeline(dataset_queue), dataset_worker(dataset_queue)]
